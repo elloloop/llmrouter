@@ -6,7 +6,7 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
   <h1>Roadmap</h1>
   <p>
     <code>llmrouter</code> is pre-1.0. This page is the public plan
-    for what is shipped, what is being built next, and — equally
+    for what has shipped, what is being built next, and — equally
     important — what is intentionally <em>not</em> part of the
     library. The roadmap is best-effort, not a contract; dates are
     omitted on purpose because most of the work is driven by a small
@@ -15,209 +15,204 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
   <p>
     Versions follow <a href="https://semver.org/" target="_blank" rel="noopener noreferrer">semantic versioning</a>.
     While we are pre-1.0, expect minor breakages between minor
-    versions (v0.1 → v0.2 → v0.3). Patch versions (v0.1.0 → v0.1.1)
-    will never break the API; only tests, docs, and internals change.
+    versions. Patch versions never break the API.
   </p>
 
-  <h2 id="released">Released</h2>
+  <h2 id="shipped">Shipped</h2>
+
+  <h3 id="v0-3-0">v0.3.0 — Audio, embeddings, four new specialist providers</h3>
+  <p>
+    <code>llmrouter</code> grows beyond chat. Three new root
+    capabilities (Embeddings, TTS, STT) and four new specialist
+    provider packages dedicated to audio and embeddings.
+  </p>
+  <ul>
+    <li>
+      <strong>Embedder interface</strong> on the root package — single
+      method <code>Embed(ctx, EmbedRequest) (*EmbedResponse, error)</code>.
+      Implemented by OpenAI, Azure OpenAI, Bedrock (Titan + Cohere),
+      Vertex, Gemini, Cohere, Mistral, Together, and Voyage AI.
+    </li>
+    <li>
+      <strong>Speaker interface</strong> for TTS — single method
+      <code>Speak(ctx, SpeechRequest) (*AudioStream, error)</code>.
+      Implemented by OpenAI, Azure, Gemini (partial via Vertex path),
+      ElevenLabs, Cartesia.
+    </li>
+    <li>
+      <strong>Transcriber interface</strong> for STT — single method
+      <code>Transcribe(ctx, TranscribeRequest) (*TranscriptStream, error)</code>.
+      Implemented by OpenAI Whisper, Azure Whisper, Groq Whisper,
+      Gemini (audio understanding), ElevenLabs Scribe, Deepgram Nova.
+    </li>
+    <li>
+      <strong>ElevenLabs provider</strong> — TTS + STT, no chat. Voice
+      ID, model selection, output_format mapping, language detection,
+      Scribe diarization via <code>Raw</code>.
+    </li>
+    <li>
+      <strong>Deepgram provider</strong> — STT only. Nova-3 / Nova-2 /
+      enhanced, per-word timing, confidence scores, diarization via
+      <code>Raw</code>. WebSocket streaming is on the v0.4 roadmap;
+      v0.3 supports pre-recorded transcription.
+    </li>
+    <li>
+      <strong>Cartesia provider</strong> — TTS only. Sonic-2,
+      sub-100 ms first-token latency, SSE streaming, real-time voice
+      agent use cases. WebSocket streaming on v0.4 roadmap.
+    </li>
+    <li>
+      <strong>Voyage AI provider</strong> — Embeddings only.
+      voyage-3 / voyage-3-large / voyage-code-3 / voyage-finance-2 /
+      voyage-multilingual-2. Recommended pairing for Anthropic Claude.
+    </li>
+    <li>
+      <strong>Cross-vendor format normalisation</strong> for audio
+      (mp3 / opus / wav / pcm / ulaw) and for embedding task types
+      (Vertex canonical → Cohere / Voyage / OpenAI translations).
+    </li>
+    <li>
+      <strong>AudioStream / TranscriptStream</strong> with the same
+      single-consumer, context-cancellation, terminal-error lifecycle
+      as <code>Stream</code> — if you've used
+      <code>CompletionStream</code>, you already know how.
+    </li>
+  </ul>
+
+  <h3 id="v0-2-0">v0.2.0 — Cloud providers, tool use, multimodal</h3>
+  <p>
+    The cloud triple plus the typed surface for the features that
+    previously rode on <code>Raw</code>.
+  </p>
+  <ul>
+    <li>
+      <strong>Azure OpenAI Service provider</strong> — deployment URL,
+      <code>api-key</code> header, <code>api-version</code> query
+      parameter. Supports chat, embeddings, TTS, Whisper STT.
+    </li>
+    <li>
+      <strong>AWS Bedrock provider</strong> — full SigV4 signing,
+      per-model-family body translation (Claude / Llama / Titan /
+      Nova / Mistral / Cohere). Chat + Titan/Cohere embeddings.
+    </li>
+    <li>
+      <strong>Google Vertex AI provider</strong> — ADC auth,
+      project/region scoping, chat (Gemini + Claude), embeddings,
+      partial TTS via Gemini.
+    </li>
+    <li>
+      <strong>Google Gemini (AI Studio) provider</strong> — API-key
+      based, chat + embeddings + TTS + audio-understanding STT.
+    </li>
+    <li>
+      <strong>Cohere provider</strong> — Command family chat + Embed
+      v3 embeddings with mandatory input_type.
+    </li>
+    <li>
+      <strong>Mistral provider</strong> — chat + <code>mistral-embed</code>.
+    </li>
+    <li>
+      <strong>Ten OpenAI-compatible providers verified</strong> —
+      OpenRouter, Together, Groq, DeepSeek, Fireworks, xAI (Grok),
+      Perplexity, Cerebras, vLLM, Ollama. All share the OpenAI provider
+      machinery via <code>WithBaseURL</code>.
+    </li>
+    <li>
+      <strong>Typed tool-call passthrough</strong> —
+      <code>ChatRequest.Tools []ToolDef</code> on the way out and
+      <code>Choice.Delta.ToolCalls</code> on the way back, with full
+      translation to Anthropic <code>tool_use</code> /
+      <code>tool_result</code> blocks. Closes #1.
+    </li>
+    <li>
+      <strong>Extended thinking blocks</strong> for Claude 3.7 and
+      onwards, surfaced via <code>Choice.Delta.Thinking</code>.
+    </li>
+    <li>
+      <strong>Prompt caching</strong> — typed
+      <code>Message.CacheControl</code> field for Anthropic ephemeral
+      cache; OpenAI auto-caching surfaces via
+      <code>Usage.CachedTokens</code>.
+    </li>
+    <li>
+      <strong>Multimodal content helpers</strong> —
+      <code>llmrouter.ImageURLContent</code> and
+      <code>ImageBytesContent</code> builders for image inputs.
+      Closes #2.
+    </li>
+    <li>
+      <strong>Mid-stream error surfacing</strong> — errors that arrive
+      as SSE events <em>after</em> the channel opened are now
+      delivered to <code>Stream.Err()</code> with the right status,
+      not as silent EOF.
+    </li>
+  </ul>
 
   <h3 id="v0-1-1">v0.1.1 — Test hardening</h3>
   <p>
-    A pure quality release. No source changes, no API changes,
-    nothing for an application caller to do.
+    A pure quality release. 330-subtest table-driven test suite, 100%
+    statement coverage on the root package, 90.4% on each provider.
+    No public-API changes.
   </p>
-  <ul>
-    <li>
-      <strong>330-subtest table-driven test suite</strong> covering
-      core types, options, the streaming producer, error wrapping,
-      and both providers.
-    </li>
-    <li>
-      <strong>100% statement coverage</strong> on the root package
-      (<code>llmrouter.go</code>, <code>options.go</code>,
-      <code>stream.go</code>, <code>errors.go</code>).
-    </li>
-    <li>
-      <strong>90.4% statement coverage</strong> on each provider
-      package — the uncovered branches are non-2xx error paths that
-      need a full HTTP fixture round-trip and will land in the
-      provider integration suite.
-    </li>
-    <li>
-      No public-API changes. v0.1.0 application code runs unchanged.
-    </li>
-  </ul>
 
   <h3 id="v0-1-0">v0.1.0 — Initial public release</h3>
-  <p>The library&rsquo;s first tagged release. Includes the core surface and the first two providers.</p>
   <ul>
     <li>
-      <strong>Core API</strong>: the
-      <code>Provider</code> interface, <code>ChatRequest</code> /
-      <code>Message</code> / <code>Chunk</code> types, the
-      <code>Stream</code> handle, the option pattern
-      (<code>WithAPIKey</code>, <code>WithBaseURL</code>,
-      <code>WithHTTPClient</code>, <code>WithTimeout</code>,
-      <code>WithExtra</code>), and the <code>ErrUpstream</code>
-      error wrapper.
+      Core API: <code>Provider</code> interface,
+      <code>ChatRequest</code> / <code>Message</code> /
+      <code>Chunk</code>, <code>Stream</code> handle, option pattern,
+      <code>ErrUpstream</code>.
     </li>
-    <li>
-      <strong>OpenAI provider</strong> with byte passthrough on
-      requests and chunks, plus the <code>WithBaseURL</code> override
-      that turns it into a universal OpenAI-compatible client
-      (OpenRouter, Together, Groq, vLLM, Ollama, LM Studio, anything
-      that speaks <code>/v1/chat/completions</code> SSE).
-    </li>
-    <li>
-      <strong>Anthropic provider</strong> with full bidirectional
-      translation: OpenAI <code>messages</code> →
-      Anthropic <code>/v1/messages</code> request body (including
-      lifting the <code>system</code> role into the top-level
-      <code>system</code> field), and Anthropic SSE events
-      (<code>message_start</code>, <code>content_block_delta</code>,
-      <code>message_delta</code>, <code>message_stop</code>) →
-      OpenAI-shaped delta chunks.
-    </li>
-    <li>
-      <strong>Stream API</strong> with a buffered chunks channel,
-      a producer goroutine, single-consumer semantics, and
-      <code>context.Context</code> cancellation that propagates all
-      the way to the in-flight HTTP request.
-    </li>
+    <li>OpenAI provider with byte passthrough + <code>WithBaseURL</code>.</li>
+    <li>Anthropic provider with full request and SSE translation.</li>
   </ul>
 
-  <h2 id="v0-2">Planned for v0.2 — Cloud provider triple</h2>
+  <h2 id="v0-4">Planned for v0.4 — Real-time audio</h2>
   <p>
-    Adds the three managed cloud LLM endpoints that most enterprise
-    deployments end up using. Each one is a real new provider with
-    its own auth scheme and its own body translation, not just a
-    base-URL flip.
+    Two of v0.3's audio providers (Deepgram, Cartesia) have WebSocket
+    surfaces that don't fit neatly into a single HTTP round-trip. v0.4
+    adds them.
   </p>
   <ul>
     <li>
-      <strong>Azure OpenAI Service provider.</strong>
-      Deployment-URL-based endpoint
-      (<code>https://&lt;resource&gt;.openai.azure.com/openai/deployments/&lt;deployment&gt;/chat/completions</code>),
-      <code>api-key</code> header instead of
-      <code>Authorization: Bearer</code>, mandatory
-      <code>api-version</code> query parameter. Request and response
-      shapes are OpenAI-compatible; only the auth and URL change.
+      <strong>WebSocket streaming for Deepgram</strong> — live
+      transcription of microphone audio at sub-300 ms latency.
+      <code>Transcriber.Transcribe</code> with <code>Stream=true</code>
+      switches to the WebSocket transport when the model supports it.
     </li>
     <li>
-      <strong>AWS Bedrock provider.</strong> SigV4 request signing
-      against
-      <code>bedrock-runtime.&lt;region&gt;.amazonaws.com</code>, plus
-      per-model-family body translation: Claude family
-      (Anthropic-shaped <code>messages</code>), Llama family
-      (Meta-shaped <code>prompt</code> + chat templating), Titan
-      family (Amazon-shaped <code>inputText</code>). The model
-      family is detected from the <code>Model</code> string in
-      <code>ChatRequest</code>.
+      <strong>WebSocket streaming for Cartesia</strong> — real-time
+      TTS for browser-direct streaming where the SSE handshake
+      latency matters.
     </li>
     <li>
-      <strong>Google Vertex AI provider.</strong> Application Default
-      Credentials (ADC) for auth, project + region in the endpoint
-      URL, Google&rsquo;s
-      <code>publishers/google/models/...:streamGenerateContent</code>
-      surface translated into OpenAI-shaped chunks.
+      <strong>Embeddings for Anthropic</strong> when (and if) Anthropic
+      ships a first-party embedding endpoint. Until then, the
+      documented recommendation is to pair Anthropic with
+      <a href="/llmrouter/docs/providers/voyage">Voyage AI</a>.
     </li>
     <li>
-      <strong>More OpenAI-compatible endpoint examples</strong> in
-      the provider tests — verified round trips against the wire
-      format of OpenRouter, Together, Groq, vLLM, and Ollama, so
-      regressions get caught.
-    </li>
-  </ul>
-  <p>
-    v0.2 may also include small breaking changes to the
-    <code>WithExtra</code> option to accommodate the per-provider
-    metadata each cloud endpoint needs (Azure deployment name,
-    Vertex project ID and region). We will list any such breakages
-    in the changelog with migration notes.
-  </p>
-
-  <h2 id="v0-3">Planned for v0.3 — Beyond chat</h2>
-  <p>
-    Once the cloud triple lands, the next chunk of work is to round
-    out the request and response surface with the things people
-    already use via <code>Raw</code> passthrough — tools, multimodal
-    content, embeddings.
-  </p>
-  <ul>
-    <li>
-      <strong>Typed tool-call passthrough.</strong> Today, tool
-      definitions and tool-call responses flow through via
-      <code>ChatRequest.Raw</code> and <code>Chunk.Raw</code> — which
-      works, but is byte-string-typed. v0.3 adds
-      <code>ChatRequest.Tools []ToolDef</code> on the way out and
-      <code>Choice.Delta.ToolCalls []ToolCallDelta</code> on the way
-      back, normalised to OpenAI shape and translated to Anthropic
-      <code>tool_use</code> / <code>tool_result</code> blocks in the
-      Anthropic provider.
-    </li>
-    <li>
-      <strong>Multimodal content helpers.</strong> Constructors for
-      image URLs (<code>llmrouter.ImageURLContent</code>) and image
-      bytes (<code>llmrouter.ImageBytesContent</code>) that build
-      the right content-block shape for both OpenAI and Anthropic.
-      Removes the &ldquo;build the JSON yourself and stuff it in
-      <code>Raw</code>&rdquo; workaround.
-    </li>
-    <li>
-      <strong>First-class embeddings API.</strong> A separate
-      <code>Embed(ctx, EmbedRequest) (EmbedResponse, error)</code>
-      method on the <code>Provider</code> interface — kept distinct
-      from <code>CompletionStream</code> because the request shape,
-      response shape, and lifecycle are different (no streaming, no
-      <code>Stream</code> handle).
-    </li>
-  </ul>
-
-  <h2 id="v0-4">Planned for v0.4 — Audio and vision</h2>
-  <p>
-    Audio and vision are big enough that they deserve their own
-    minor version. The plan is to bundle them rather than
-    interleaving them with v0.3&rsquo;s work.
-  </p>
-  <ul>
-    <li>
-      <strong>Audio / TTS / STT.</strong> OpenAI Whisper (STT),
-      OpenAI GPT-4o audio (in &amp; out), Vertex audio. The shape
-      will be similar to the embeddings API — separate methods on
-      <code>Provider</code> with their own request and response
-      types, not shoehorned into <code>CompletionStream</code>.
-    </li>
-    <li>
-      <strong>Vision provider abstraction.</strong> Multimodal
-      <em>output</em> (e.g. image generation) handled with its own
-      typed surface. Multimodal <em>input</em> (image
-      understanding) is already covered by v0.3&rsquo;s multimodal
-      content helpers.
+      <strong>First-class function-calling tool result message
+      type</strong> — today, tool-result messages ride on the typed
+      surface as <code>Role: "tool"</code> with
+      <code>Content</code> as the result JSON. v0.4 adds a typed
+      <code>ToolResultMessage</code> helper that wires up the
+      <code>tool_call_id</code> linkage correctly for both OpenAI and
+      Anthropic shapes without the caller having to remember the
+      vendor-specific spelling.
     </li>
   </ul>
 
   <h2 id="v1-0">Planned for v1.0 — API freeze</h2>
   <p>
-    Once v0.4 ships and the surface has been stable for a few
-    months, v1.0 freezes the public API. The contract from v1.0
-    onwards:
+    Once v0.4 ships and the surface has been stable for a few months,
+    v1.0 freezes the public API. The contract from v1.0 onwards:
   </p>
   <ul>
-    <li>
-      No breaking changes to exported types, functions, or
-      interfaces within the v1.x series.
-    </li>
-    <li>
-      Backward-compatible additions (new options, new methods on
-      <code>Provider</code> with sensible defaults, new fields on
-      types) are minor bumps.
-    </li>
-    <li>
-      Bug fixes are patch bumps.
-    </li>
-    <li>
-      Breaking changes — if they ever happen — bump major.
-    </li>
+    <li>No breaking changes to exported types, functions, or interfaces within v1.x.</li>
+    <li>Backward-compatible additions (new options, new methods with sensible defaults, new fields) are minor bumps.</li>
+    <li>Bug fixes are patch bumps.</li>
+    <li>Breaking changes — if they ever happen — bump major.</li>
   </ul>
   <p>
     Until v1.0, we do <strong>not</strong> guarantee backward
@@ -233,17 +228,13 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     in a PR. They are not bad ideas — they are the
     <em>wrong layer</em>. They belong in the gateway you build
     <em>on top of</em> a library like <code>llmrouter</code>, not
-    inside the library itself. Putting them in the library forces
-    them on every caller, contaminates the API surface, and traps
-    operational concerns (caching, budgets, multi-tenant policy)
-    inside a Go module that can never be the right home for them.
+    inside the library itself.
   </p>
   <ul>
     <li>
       <strong>Rate limiting.</strong> Token-bucket rate limiting
       across vendors is a property of <em>your</em> deployment, not
-      of the library. Build it in the HTTP handler in front of
-      <code>llmrouter</code>.
+      of the library.
     </li>
     <li>
       <strong>Budget caps.</strong> Per-tenant or per-key cost
@@ -252,64 +243,41 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     </li>
     <li>
       <strong>Response caching.</strong> Caching needs a cache key
-      strategy (do you include the full message history? do you
-      ignore <code>user</code>? do you cache by hash or by content?),
-      an eviction policy, and a backing store. All of which are
+      strategy, an eviction policy, and a backing store — all
       deployment decisions.
     </li>
     <li>
       <strong>Vector store / RAG.</strong> Vector databases,
       retrievers, chunkers, rerankers, and prompt assembly are an
-      entire product category. <code>llmrouter</code> will give you
-      the embedding API in v0.3; the retrieval pipeline is yours to
-      build.
+      entire product category. <code>llmrouter</code> gives you
+      embeddings; the retrieval pipeline is yours to build.
     </li>
     <li>
       <strong>Persistent conversation state.</strong> Storing turns
       across requests, summarising old context, paging history out
-      to disk — these are application concerns. The library&rsquo;s
-      <code>ChatRequest</code> is a single call; persistence lives
-      one layer up.
+      to disk — these are application concerns.
     </li>
     <li>
       <strong>A bundled HTTP server.</strong> <code>llmrouter</code>
       is a library, not a binary. Run it inside your own server.
-      The examples in
-      <a href="/llmrouter/docs/guides/chat-gateway">Build a chat
-      gateway</a> show how to wrap it in a few lines of
-      <code>net/http</code>.
     </li>
   </ul>
   <p>
     If you want all of these in one box, the answer in the Python
     ecosystem is LiteLLM. There is no Go equivalent today, and
-    <code>llmrouter</code> is deliberately not trying to become
-    one. We&rsquo;d rather be the boring, byte-exact, single-purpose
-    library that a gateway is built on top of.
+    <code>llmrouter</code> is deliberately not trying to become one.
   </p>
 
   <h2 id="influence">How to influence the roadmap</h2>
   <p>
-    The plan above is a plan, not a promise. The most effective way
-    to move something earlier is to file an issue at
+    The plan above is a plan, not a promise. File an issue at
     <a href="https://github.com/elloloop/llmrouter/issues" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/issues</a>
     with:
   </p>
   <ul>
     <li>The <code>type:feature</code> label.</li>
-    <li>
-      A concrete use case — &ldquo;we need Vertex auth because our
-      compliance team requires Google&rsquo;s key management,&rdquo;
-      not &ldquo;please add more providers.&rdquo;
-    </li>
+    <li>A concrete use case — not just &ldquo;please add more providers.&rdquo;</li>
     <li>The shape of the API you&rsquo;d want, if you&rsquo;ve thought about it.</li>
     <li>Whether you&rsquo;d be willing to send the PR yourself.</li>
   </ul>
-  <p>
-    Issues with a real use case attached almost always move ahead
-    of speculative ones, and issues with a willing contributor
-    behind them move fastest of all. See
-    <a href="/llmrouter/docs/project/contributing">Contributing</a>
-    for how to send the PR once the issue is agreed.
-  </p>
 </DocsLayout>

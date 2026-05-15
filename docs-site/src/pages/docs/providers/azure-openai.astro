@@ -1,0 +1,179 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Azure OpenAI Provider">
+  <h1>Azure OpenAI Provider</h1>
+  <p>
+    The <code>azureopenai</code> provider talks to Azure-hosted OpenAI
+    deployments. The request and response shapes are OpenAI-compatible;
+    the differences from the
+    <a href="/llmrouter/docs/providers/openai">OpenAI provider</a> are
+    the endpoint URL (deployment-scoped), the auth header
+    (<code>api-key</code> instead of <code>Authorization: Bearer</code>),
+    and a mandatory <code>api-version</code> query parameter.
+  </p>
+  <p>
+    Capability-wise it matches OpenAI: chat
+    (<a href="/llmrouter/docs/api/llmrouter#provider"><code>Provider</code></a>),
+    embeddings
+    (<a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>),
+    TTS (<a href="/llmrouter/docs/api/audio#speaker"><code>Speaker</code></a>),
+    and Whisper STT
+    (<a href="/llmrouter/docs/api/audio#transcriber"><code>Transcriber</code></a>).
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/azureopenai"
+)`} />
+
+  <h2 id="construction">Construction</h2>
+  <p>
+    Azure requires the resource name, the deployment name, and the API
+    version. The library models these as required options:
+  </p>
+  <Code lang="go" code={`p, err := azureopenai.New(
+    llmrouter.WithAPIKey(os.Getenv("AZURE_OPENAI_KEY")),
+    azureopenai.WithResource("my-resource"),         // {resource}.openai.azure.com
+    azureopenai.WithDeployment("gpt-4o-deployment"), // your deployment name
+    azureopenai.WithAPIVersion("2024-10-21"),        // pinned API version
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    Constructed endpoint:
+    <code>{`https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={version}`}</code>.
+  </p>
+  <p>
+    For Microsoft Entra ID (formerly Azure AD) auth, omit
+    <code>WithAPIKey</code> and pass a custom <code>http.Client</code>
+    via <code>WithHTTPClient</code> that injects a bearer token from
+    <code>azidentity</code>.
+  </p>
+
+  <h2 id="model-vs-deployment">Model vs. Deployment</h2>
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Heads-up.</strong> On OpenAI, the request's
+    <code>model</code> field is what picks the model. On Azure, the
+    <em>deployment name</em> in the URL picks the model and
+    <code>model</code> in the body is ignored (or must match the
+    deployment). The library still requires you to set
+    <code>ChatRequest.Model</code> for portability — set it to the
+    same name as the deployment.
+  </aside>
+
+  <h2 id="example">Full example</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/azureopenai"
+)
+
+func main() {
+    p, err := azureopenai.New(
+        llmrouter.WithAPIKey(os.Getenv("AZURE_OPENAI_KEY")),
+        azureopenai.WithResource(os.Getenv("AZURE_OPENAI_RESOURCE")),
+        azureopenai.WithDeployment("gpt-4o"),
+        azureopenai.WithAPIVersion("2024-10-21"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model: "gpt-4o",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "Summarise the Azure OpenAI deployment model in one sentence."),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="embeddings">Embeddings</h2>
+  <p>
+    Azure exposes embedding models via separate deployments. Construct
+    a second provider pinned to your embedding deployment:
+  </p>
+  <Code lang="go" code={`embed, _ := azureopenai.New(
+    llmrouter.WithAPIKey(os.Getenv("AZURE_OPENAI_KEY")),
+    azureopenai.WithResource(resource),
+    azureopenai.WithDeployment("text-embedding-3-large"),
+    azureopenai.WithAPIVersion("2024-10-21"),
+)
+
+resp, err := embed.Embed(ctx, llmrouter.EmbedRequest{
+    Model:      "text-embedding-3-large",
+    Inputs:     []string{"hello", "world"},
+    Dimensions: 1024,
+})`} />
+
+  <h2 id="audio">Audio (TTS / Whisper)</h2>
+  <p>
+    Both <code>Speak</code> and <code>Transcribe</code> are available
+    when the deployment is for a TTS model
+    (<code>tts-1</code>, <code>tts-1-hd</code>) or for Whisper
+    (<code>whisper-1</code>) respectively. The behaviour matches the
+    <a href="/llmrouter/docs/providers/openai">OpenAI provider</a> —
+    only the auth and endpoint differ.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "azureopenai"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — missing or wrong <code>api-key</code>.</li>
+    <li><code>404</code> — deployment not found (check resource name + deployment name).</li>
+    <li><code>429</code> — Azure capacity exhausted; honour <code>Retry-After</code>.</li>
+    <li><code>400</code> — content filter (Azure's prompt or response policy triggered).</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>One provider per deployment.</strong> Azure splits chat
+      and embedding and TTS into separate deployments — construct one
+      provider per deployment you need.
+    </li>
+    <li>
+      <strong>Content filter.</strong> Azure may return 400 with a
+      content-filter body even when the upstream OpenAI model would
+      have responded. Inspect <code>ErrUpstream.Body</code>.
+    </li>
+    <li>
+      <strong>Region pinning.</strong> Pin <code>api-version</code> to
+      a known-good value; Azure rolls forward and old versions
+      eventually 404.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — same wire format, different auth.</li>
+    <li><a href="/llmrouter/docs/concepts/configuration">Configuration & Options</a> — option pattern.</li>
+  </ul>
+</DocsLayout>

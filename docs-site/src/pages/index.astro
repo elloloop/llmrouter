@@ -105,7 +105,7 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <div class="badge">
             <span class="dot"></span>
-            v0.1.1 &middot; OpenAI &middot; Anthropic &middot; any OpenAI-compatible endpoint
+            v0.3.0 &middot; 20 providers &middot; chat, embeddings, TTS, STT
           </div>
           <h1>
             One Go client.<br />
@@ -113,14 +113,15 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
           </h1>
           <p class="subtitle">
             <strong>llmrouter</strong> is a streaming-first Go library
-            that gives you an OpenAI-shaped API for OpenAI, Anthropic,
-            and any OpenAI-compatible endpoint &mdash; with
-            byte-passthrough for building gateways and proxies.
+            that gives you an OpenAI-shaped API across 20 providers
+            &mdash; chat, embeddings, text-to-speech, and
+            speech-to-text &mdash; with byte-passthrough for building
+            gateways and proxies.
           </p>
           <div class="install-highlight">
             <div class="install-box">
-              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.1.1</code>
-              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.1.1">
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.3.0</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.3.0">
                 Copy
               </button>
             </div>
@@ -154,7 +155,7 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <p class="section-label reveal">Why llmrouter</p>
           <h2 class="section-heading reveal">
-            Three properties. That&rsquo;s the whole pitch.
+            Four properties. That&rsquo;s the whole pitch.
           </h2>
           <p class="section-sub reveal">
             Most multi-LLM libraries reach for breadth. llmrouter is
@@ -185,14 +186,25 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               </p>
             </article>
             <article class="pillar">
+              <div class="pillar-icon">A+E</div>
+              <h3>Audio + embeddings</h3>
+              <p>
+                Chat is not the whole story. v0.3 adds
+                <code>Speaker</code> (TTS), <code>Transcriber</code>
+                (STT), and <code>Embedder</code> &mdash; same
+                streaming and cancellation semantics, backed by
+                OpenAI, ElevenLabs, Cartesia, Deepgram, Voyage, and
+                more.
+              </p>
+            </article>
+            <article class="pillar">
               <div class="pillar-icon">D</div>
               <h3>Boring dependencies</h3>
               <p>
-                The only dependencies are the Go standard library
-                and <code>google/uuid</code>. No surprise transitive
-                trees. New providers will only ever pull in their
-                official vendor SDK &mdash; published by Google, AWS,
-                Anthropic, or OpenAI.
+                The only dependencies are the Go standard library,
+                <code>google/uuid</code>, and the official vendor SDKs
+                for the cloud providers (AWS, Google, Anthropic). No
+                surprise transitive trees.
               </p>
             </article>
           </div>
@@ -206,21 +218,51 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
       <section class="features" id="features">
         <div class="container">
           <p class="section-label reveal">What you get today</p>
-          <h2 class="section-heading reveal">Two providers, one shape, zero surprises.</h2>
+          <h2 class="section-heading reveal">20 providers, four interfaces, one shape.</h2>
           <p class="section-sub reveal">
-            v0.1 ships OpenAI and Anthropic with full request and SSE
-            translation. v0.2 brings Azure OpenAI Service, AWS
-            Bedrock, and Google Vertex AI.
+            v0.3 ships chat, embeddings, TTS, and STT &mdash; against
+            every major LLM vendor plus specialist audio and
+            embedding shops.
           </p>
           <div class="features-grid reveal">
             <article class="feature-card">
-              <div class="feature-icon">OA</div>
-              <h3>OpenAI, passthrough</h3>
+              <div class="feature-icon">CHAT</div>
+              <h3>16 chat providers</h3>
               <p>
-                Default provider. Streaming chat completions against
-                <code>/v1/chat/completions</code>. Request bytes and
-                chunk bytes pass through unchanged when you set
-                <code>Raw</code> &mdash; ideal for proxies.
+                OpenAI, Anthropic, Azure, Bedrock, Vertex, Gemini,
+                Cohere, Mistral &mdash; plus OpenRouter, Together,
+                Groq, DeepSeek, Fireworks, xAI, Perplexity, Cerebras
+                via the OpenAI-compatible path.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">EMB</div>
+              <h3>9 embedding providers</h3>
+              <p>
+                OpenAI, Azure, Bedrock (Titan + Cohere), Vertex,
+                Gemini, Cohere, Mistral, Together, and
+                <strong>Voyage AI</strong> &mdash; the canonical
+                pairing for Anthropic Claude.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">TTS</div>
+              <h3>5 text-to-speech providers</h3>
+              <p>
+                OpenAI <code>tts-1</code> / <code>tts-1-hd</code>,
+                Azure, Gemini, <strong>ElevenLabs</strong> for highest
+                quality, and <strong>Cartesia Sonic-2</strong> for
+                sub-100 ms latency real-time agents.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">STT</div>
+              <h3>5 speech-to-text providers</h3>
+              <p>
+                OpenAI Whisper, Azure Whisper, Groq Whisper, Gemini
+                audio understanding, <strong>ElevenLabs Scribe</strong>,
+                and <strong>Deepgram Nova-3</strong> for per-word
+                timing and diarization.
               </p>
             </article>
             <article class="feature-card">
@@ -234,42 +276,10 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               </p>
             </article>
             <article class="feature-card">
-              <div class="feature-icon">AN</div>
-              <h3>Anthropic, translated</h3>
-              <p>
-                Anthropic <code>/v1/messages</code> with full
-                bidirectional translation &mdash; OpenAI request
-                shape on the way in, Anthropic SSE events
-                (<code>message_start</code>,
-                <code>content_block_delta</code>, &hellip;) translated
-                back to OpenAI chunks on the way out.
-              </p>
-            </article>
-            <article class="feature-card">
-              <div class="feature-icon">v02</div>
-              <h3>Cloud triple on the roadmap</h3>
-              <p>
-                v0.2 lands Azure OpenAI Service (deployment URL +
-                <code>api-key</code> header), AWS Bedrock (SigV4 +
-                per-model-family body translation), and Google
-                Vertex AI (ADC auth, project/region).
-              </p>
-            </article>
-            <article class="feature-card">
-              <div class="feature-icon">330</div>
-              <h3>Tested to the wire</h3>
-              <p>
-                330-subtest table-driven test suite. 100% statement
-                coverage on the core; 90.4% on each provider. All
-                tests run race-clean
-                (<code>go test -race</code>).
-              </p>
-            </article>
-            <article class="feature-card">
               <div class="feature-icon">A2</div>
               <h3>Apache-2.0, pre-1.0</h3>
               <p>
-                Apache-2.0 licensed. Currently v0.1.x &mdash; expect
+                Apache-2.0 licensed. Currently v0.3.x &mdash; expect
                 minor API churn between minor versions until v1.0
                 freezes the surface. Patch versions never break the
                 API.
@@ -318,77 +328,88 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
       <section class="providers-section" id="providers">
         <div class="container">
           <p class="section-label reveal">Providers</p>
-          <h2 class="section-heading reveal">One <code>Provider</code> interface. Many backends.</h2>
+          <h2 class="section-heading reveal">Four interfaces. Twenty backends.</h2>
           <p class="section-sub reveal">
-            Each provider implements the same one-method interface.
-            Your application code never branches on which one is
-            upstream.
+            Each capability (chat, embeddings, TTS, STT) is a single
+            one-method interface. Your application code never branches
+            on which vendor is upstream.
           </p>
+
+          <div class="capability-matrix reveal">
+            <table>
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Chat</th>
+                  <th>Embeddings</th>
+                  <th>TTS</th>
+                  <th>STT</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><a href="/llmrouter/docs/providers/openai">OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/anthropic">Anthropic</a></td><td class="y">&#10003;</td><td class="n">use Voyage</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/bedrock">AWS Bedrock</a></td><td class="y">&#10003;</td><td class="y">Titan + Cohere</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/vertex">Vertex AI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y partial">partial</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio)</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">audio</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/cohere">Cohere</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/mistral">Mistral</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Together</a></td><td class="y">&#10003;</td><td class="y">delegated</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Groq</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Whisper</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">OpenRouter</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Fireworks</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">DeepSeek</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">xAI (Grok)</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Perplexity</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Cerebras</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="y">Scribe</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/deepgram">Deepgram</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Nova-3</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/cartesia">Cartesia</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Sonic-2</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/voyage">Voyage AI</a></td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+              </tbody>
+            </table>
+          </div>
+
           <div class="providers-grid reveal">
             <article class="provider-card shipped">
-              <div class="provider-tag">Shipped</div>
-              <h3>OpenAI</h3>
+              <div class="provider-tag">Chat</div>
+              <h3>16 chat providers</h3>
               <p>
-                <code>providers/openai</code>. Default, passthrough,
-                works with any OpenAI-compatible endpoint via
-                <code>WithBaseURL</code>.
+                OpenAI, Anthropic, Azure, Bedrock, Vertex, Gemini,
+                Cohere, Mistral &mdash; plus eight OpenAI-compatible
+                vendors via <code>WithBaseURL</code>.
               </p>
               <a href="/llmrouter/docs/providers/openai" class="provider-link">
-                Read the docs &rarr;
+                Browse chat providers &rarr;
               </a>
             </article>
             <article class="provider-card shipped">
-              <div class="provider-tag">Shipped</div>
-              <h3>Anthropic</h3>
+              <div class="provider-tag">Audio</div>
+              <h3>TTS &amp; STT</h3>
               <p>
-                <code>providers/anthropic</code>. Full
-                <code>/v1/messages</code> request and SSE translation.
-                <code>MaxTokens</code> required on the request.
+                <strong>TTS:</strong> ElevenLabs &middot; Cartesia &middot;
+                OpenAI &middot; Azure &middot; Gemini.<br />
+                <strong>STT:</strong> Deepgram &middot; ElevenLabs
+                Scribe &middot; OpenAI / Azure / Groq Whisper &middot;
+                Gemini.
               </p>
-              <a href="/llmrouter/docs/providers/anthropic" class="provider-link">
-                Read the docs &rarr;
+              <a href="/llmrouter/docs/concepts/audio" class="provider-link">
+                Read Audio concept &rarr;
               </a>
             </article>
             <article class="provider-card shipped">
-              <div class="provider-tag">Shipped</div>
-              <h3>Any OpenAI-compatible</h3>
+              <div class="provider-tag">Embeddings</div>
+              <h3>9 embedding providers</h3>
               <p>
-                OpenRouter, Together, Groq, vLLM, Ollama, LM Studio,
-                anything else that speaks OpenAI SSE. One
-                <code>WithBaseURL</code> call.
+                OpenAI &middot; Azure &middot; Cohere &middot;
+                <strong>Voyage</strong> &middot; Vertex &middot;
+                Gemini &middot; Mistral &middot; Together &middot;
+                Bedrock (Titan + Cohere).
               </p>
-              <a href="/llmrouter/docs/providers/openai-compatible" class="provider-link">
-                See examples &rarr;
+              <a href="/llmrouter/docs/concepts/embeddings" class="provider-link">
+                Read Embeddings concept &rarr;
               </a>
-            </article>
-            <article class="provider-card planned">
-              <div class="provider-tag planned-tag">v0.2</div>
-              <h3>Azure OpenAI Service</h3>
-              <p>
-                Deployment URL + <code>api-key</code> header +
-                <code>api-version</code> query param. Same OpenAI
-                request and response shape underneath.
-              </p>
-              <span class="provider-link muted">Coming in v0.2</span>
-            </article>
-            <article class="provider-card planned">
-              <div class="provider-tag planned-tag">v0.2</div>
-              <h3>AWS Bedrock</h3>
-              <p>
-                SigV4 request signing, per-model-family body
-                translation: Claude / Llama / Titan.
-              </p>
-              <span class="provider-link muted">Coming in v0.2</span>
-            </article>
-            <article class="provider-card planned">
-              <div class="provider-tag planned-tag">v0.2</div>
-              <h3>Google Vertex AI</h3>
-              <p>
-                ADC auth, project + region in the endpoint URL.
-                Vertex&rsquo; streaming surface translated to
-                OpenAI chunks.
-              </p>
-              <span class="provider-link muted">Coming in v0.2</span>
             </article>
           </div>
         </div>
@@ -398,20 +419,20 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <div class="stats-grid reveal">
             <div>
-              <div class="stat-value">v0.1.1</div>
+              <div class="stat-value">v0.3.0</div>
               <div class="stat-label">Latest release</div>
             </div>
             <div>
-              <div class="stat-value">330</div>
-              <div class="stat-label">Table-driven subtests</div>
+              <div class="stat-value">20</div>
+              <div class="stat-label">Providers</div>
+            </div>
+            <div>
+              <div class="stat-value">4</div>
+              <div class="stat-label">Interfaces (chat, embed, TTS, STT)</div>
             </div>
             <div>
               <div class="stat-value">100%</div>
               <div class="stat-label">Core coverage</div>
-            </div>
-            <div>
-              <div class="stat-value">2 + N</div>
-              <div class="stat-label">Providers (OpenAI, Anthropic, + any OpenAI-compatible)</div>
             </div>
           </div>
         </div>
@@ -423,8 +444,8 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
             <h2>Install in one line.</h2>
             <p class="install-sub">Go 1.23+. Apache-2.0. No surprises in your <code>go.sum</code>.</p>
             <div class="install-cmd">
-              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.1.1</code>
-              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.1.1">Copy</button>
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.3.0</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.3.0">Copy</button>
             </div>
             <p class="install-platforms">
               Then head to the
@@ -974,6 +995,68 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
 
   .providers-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  .capability-matrix {
+    max-width: 1100px;
+    margin: 0 auto 56px;
+    overflow-x: auto;
+    border: 1px solid var(--dp-border);
+    border-radius: 12px;
+    background: var(--dp-bg-tertiary);
+  }
+
+  .capability-matrix table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+
+  .capability-matrix th,
+  .capability-matrix td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--dp-border-subtle);
+    white-space: nowrap;
+  }
+
+  .capability-matrix th {
+    background: var(--dp-bg-secondary);
+    color: var(--dp-text);
+    font-weight: 600;
+    font-size: 0.8125rem;
+    letter-spacing: 0.02em;
+  }
+
+  .capability-matrix tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .capability-matrix tr.specialist {
+    background: color-mix(in srgb, var(--dp-accent) 4%, transparent);
+  }
+
+  .capability-matrix td a {
+    color: var(--dp-text);
+    text-decoration: none;
+    font-weight: 500;
+  }
+
+  .capability-matrix td a:hover {
+    text-decoration: underline;
+  }
+
+  .capability-matrix td.y {
+    color: var(--dp-success);
+    font-weight: 600;
+  }
+
+  .capability-matrix td.y.partial {
+    color: var(--dp-warning);
+  }
+
+  .capability-matrix td.n {
+    color: var(--dp-text-tertiary);
   }
 
   .provider-card {

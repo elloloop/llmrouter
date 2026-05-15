@@ -1,0 +1,287 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Embeddings">
+  <h1>Embeddings</h1>
+  <p>
+    Embeddings turn text into fixed-size float vectors that capture
+    semantic similarity. They are the bedrock of retrieval-augmented
+    generation, semantic search, clustering, and classification. In
+    <code>llmrouter</code>, embeddings live behind a separate interface
+    from chat completions because the request and response shapes are
+    fundamentally different: there is no streaming, no
+    <code>Stream</code> handle, no SSE — just a single round-trip that
+    returns one vector per input.
+  </p>
+
+  <h2 id="embedder">The Embedder interface</h2>
+  <p>
+    Every embedding-capable provider implements <code>Embedder</code>.
+    Like <code>Provider</code>, it has exactly one method, and
+    implementations are concurrency-safe:
+  </p>
+  <Code lang="go" code={`type Embedder interface {
+    Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
+}`} />
+  <p>
+    Not every provider is an <code>Embedder</code>. Anthropic, Groq,
+    OpenRouter, Fireworks, DeepSeek, xAI, Perplexity, and Cerebras have
+    no first-party embedding endpoint — for those vendors,
+    <code>llmrouter</code> recommends pairing the chat provider with a
+    dedicated embedding provider such as
+    <a href="/llmrouter/docs/providers/voyage">Voyage AI</a> (the
+    canonical pairing for Anthropic Claude users) or
+    <a href="/llmrouter/docs/providers/openai">OpenAI</a>.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Why a separate interface, not another method on Provider.</strong>
+    Chat completions are intrinsically streaming; embeddings are intrinsically
+    not. Mixing the two would force every chat-only provider to return
+    "unimplemented" for embeddings (and vice versa). Two interfaces let the
+    type system express capability instead of relying on runtime errors.
+  </aside>
+
+  <h2 id="embed-request">EmbedRequest</h2>
+  <p>
+    The polymorphic request shape. Vendor-specific extras travel through
+    <code>Raw</code> (full byte passthrough) or via the typed fields
+    below.
+  </p>
+
+  <Code lang="go" code={`type EmbedRequest struct {
+    Model          string          // e.g. "text-embedding-3-small", "voyage-3-large"
+    Inputs         []string        // texts to embed; index-aligned with the response
+    Dimensions     int             // optional; lower-dim output for OpenAI v3 + others
+    TaskType       string          // task hint, normalised cross-vendor (see table below)
+    EncodingFormat string          // "float" (default) or "base64"
+    User           string          // OpenAI-style end-user id for telemetry
+    Raw            json.RawMessage // optional byte passthrough; Model is overlaid
+}`} />
+
+  <h3 id="fields">Field-by-field</h3>
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      The model identifier. The literal string is sent to the upstream;
+      providers don't try to be clever about model aliases. Common
+      values: <code>text-embedding-3-small</code>,
+      <code>text-embedding-3-large</code> (OpenAI / Azure),
+      <code>embed-english-v3.0</code> (Cohere),
+      <code>voyage-3</code>, <code>voyage-3-large</code> (Voyage),
+      <code>text-embedding-005</code> (Vertex / Gemini),
+      <code>mistral-embed</code> (Mistral),
+      <code>amazon.titan-embed-text-v2:0</code> (Bedrock).
+    </dd>
+    <dt><code>Inputs</code></dt>
+    <dd>
+      The list of strings to embed. <code>EmbedResponse.Embeddings</code>
+      is index-aligned with this slice: the vector at position
+      <code>i</code> corresponds to <code>Inputs[i]</code>. Most
+      providers accept arrays; legacy single-string endpoints batch
+      client-side inside the provider.
+    </dd>
+    <dt><code>Dimensions</code></dt>
+    <dd>
+      Optional. Requests a lower-dimensional output. Supported by
+      OpenAI <code>text-embedding-3-*</code> (256 to 3072), Voyage
+      (256 / 512 / 1024 / 2048), and a handful of others. Zero means
+      "use the model's default dimension."
+    </dd>
+    <dt><code>TaskType</code></dt>
+    <dd>
+      Optional task hint. <code>llmrouter</code> uses the
+      Gemini/Vertex/Voyage vocabulary as the canonical form and
+      translates per-vendor. See <a href="#task-type-mapping">cross-vendor
+      task-type mapping</a> below.
+    </dd>
+    <dt><code>EncodingFormat</code></dt>
+    <dd>
+      <code>"float"</code> (default) returns
+      <code>[]float32</code> per input. <code>"base64"</code> returns
+      the base64 wire encoding; the library still decodes it to
+      <code>[]float32</code> in the response — the field only controls
+      the wire format. Providers that support only one format ignore
+      this field.
+    </dd>
+    <dt><code>User</code></dt>
+    <dd>
+      OpenAI-style end-user identifier. Used for abuse tracking and
+      telemetry. Forwarded to OpenAI and Azure; ignored by others.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough escape hatch. If non-nil, this JSON object is
+      the outgoing request body with <code>Model</code> overlaid. Use
+      <code>Raw</code> for vendor-specific fields the typed surface
+      doesn't model — for example, Cohere's <code>input_type</code> and
+      <code>embedding_types</code>, Voyage's <code>truncation</code>,
+      Bedrock Titan's <code>normalize</code>.
+    </dd>
+  </dl>
+
+  <h2 id="embed-response">EmbedResponse</h2>
+
+  <Code lang="go" code={`type EmbedResponse struct {
+    Model      string          // resolved model id echoed by the provider
+    Embeddings [][]float32     // index-aligned with EmbedRequest.Inputs
+    Usage      *Usage          // PromptTokens / TotalTokens when available
+    Raw        json.RawMessage // original wire-format JSON
+}`} />
+
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      The model id the upstream actually used. For some providers this
+      echoes the request verbatim; for others it includes a version
+      suffix (e.g. <code>text-embedding-3-small-2024</code>). Useful for
+      logging which dimension space your vectors live in.
+    </dd>
+    <dt><code>Embeddings</code></dt>
+    <dd>
+      The vectors, one per input. <code>len(Embeddings) == len(req.Inputs)</code>
+      always — the library reorders if the provider returns out-of-order
+      results (Cohere is index-tagged on the wire).
+    </dd>
+    <dt><code>Usage</code></dt>
+    <dd>
+      Token usage. Embedding providers populate
+      <code>PromptTokens</code> (sometimes also
+      <code>TotalTokens</code>). May be nil for vendors that don't
+      report usage.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Original wire bytes for callers that want to forward the response
+      without re-marshaling.
+    </dd>
+  </dl>
+
+  <h2 id="task-type-mapping">Cross-vendor task-type mapping</h2>
+  <p>
+    Different vendors spell the same task hint differently. The library
+    accepts the Vertex/Gemini vocabulary as canonical and translates
+    per-provider on the way out. Pass the canonical value in
+    <code>TaskType</code>; the provider rewrites it for you.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Canonical (Vertex / Gemini / library)</th>
+          <th class="text-left p-3 border-b border-border">Cohere <code>input_type</code></th>
+          <th class="text-left p-3 border-b border-border">Voyage <code>input_type</code></th>
+          <th class="text-left p-3 border-b border-border">OpenAI / Mistral</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>RETRIEVAL_QUERY</code></td><td class="p-3 border-b border-border"><code>search_query</code></td><td class="p-3 border-b border-border"><code>query</code></td><td class="p-3 border-b border-border">(not modeled — ignored)</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>RETRIEVAL_DOCUMENT</code></td><td class="p-3 border-b border-border"><code>search_document</code></td><td class="p-3 border-b border-border"><code>document</code></td><td class="p-3 border-b border-border">(ignored)</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>SEMANTIC_SIMILARITY</code></td><td class="p-3 border-b border-border"><code>search_document</code></td><td class="p-3 border-b border-border"><code>document</code></td><td class="p-3 border-b border-border">(ignored)</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>CLASSIFICATION</code></td><td class="p-3 border-b border-border"><code>classification</code></td><td class="p-3 border-b border-border"><code>document</code></td><td class="p-3 border-b border-border">(ignored)</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>CLUSTERING</code></td><td class="p-3 border-b border-border"><code>clustering</code></td><td class="p-3 border-b border-border"><code>document</code></td><td class="p-3 border-b border-border">(ignored)</td></tr>
+        <tr><td class="p-3"><code>QUESTION_ANSWERING</code></td><td class="p-3"><code>search_query</code></td><td class="p-3"><code>query</code></td><td class="p-3">(ignored)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    If you'd rather speak each vendor's native vocabulary, set
+    <code>TaskType</code> to the empty string and pass the vendor's
+    raw field via <code>Raw</code>.
+  </p>
+
+  <h2 id="example">Full Go example</h2>
+  <p>
+    A complete program that embeds three strings against OpenAI and
+    prints the cosine similarity between each pair.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "math"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    inputs := []string{
+        "The cat sat on the mat.",
+        "A feline rested on the rug.",
+        "Quantum chromodynamics is hard.",
+    }
+
+    resp, err := p.Embed(context.Background(), llmrouter.EmbedRequest{
+        Model:      "text-embedding-3-small",
+        Inputs:     inputs,
+        Dimensions: 256,
+        TaskType:   "SEMANTIC_SIMILARITY",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for i := 0; i < len(inputs); i++ {
+        for j := i + 1; j < len(inputs); j++ {
+            sim := cosine(resp.Embeddings[i], resp.Embeddings[j])
+            fmt.Printf("sim(%d,%d) = %.3f\\n", i, j, sim)
+        }
+    }
+    if resp.Usage != nil {
+        fmt.Printf("prompt_tokens=%d total_tokens=%d\\n",
+            resp.Usage.PromptTokens, resp.Usage.TotalTokens)
+    }
+}
+
+func cosine(a, b []float32) float32 {
+    var dot, na, nb float64
+    for i := range a {
+        dot += float64(a[i]) * float64(b[i])
+        na += float64(a[i]) * float64(a[i])
+        nb += float64(b[i]) * float64(b[i])
+    }
+    return float32(dot / (math.Sqrt(na) * math.Sqrt(nb)))
+}`} />
+
+  <h2 id="raw-passthrough">Raw passthrough</h2>
+  <p>
+    For vendor-specific fields not on the typed surface, build the JSON
+    yourself and pass it as <code>Raw</code>. The library overlays
+    <code>Model</code> so you can swap models without rewriting the
+    body. Cohere's <code>embedding_types</code> is a good example:
+  </p>
+  <Code lang="go" code={`raw := []byte(` + "`" + `{
+  "input": ["hello", "world"],
+  "input_type": "search_document",
+  "embedding_types": ["float", "int8"]
+}` + "`" + `)
+
+resp, err := cohereProvider.Embed(ctx, llmrouter.EmbedRequest{
+    Model: "embed-english-v3.0",
+    Raw:   raw,
+})`} />
+  <p>
+    The typed <code>Embeddings</code> field in the response always
+    contains the <code>float</code> vectors; richer wire formats are
+    available on <code>Raw</code>.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/api/embeddings">API reference: Embedder, EmbedRequest, EmbedResponse</a></li>
+    <li><a href="/llmrouter/docs/providers/voyage">Voyage AI provider</a> — embeddings-only, recommended for Anthropic users.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — default embedding backend.</li>
+    <li><a href="/llmrouter/docs/concepts/byte-passthrough">Byte passthrough</a> — the same Raw pattern as chat.</li>
+  </ul>
+</DocsLayout>

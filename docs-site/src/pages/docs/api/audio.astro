@@ -1,0 +1,330 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Audio">
+  <h1>Package llmrouter — Audio</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go"><code>audio.go</code></a>.
+    Two interfaces — <a href="#speaker"><code>Speaker</code></a>
+    (text-to-speech) and
+    <a href="#transcriber"><code>Transcriber</code></a>
+    (speech-to-text) — plus the request, response, and stream types
+    they speak.
+  </p>
+  <p>
+    Import path:
+    <Code lang="go" code={`import "github.com/elloloop/llmrouter"`} />
+  </p>
+
+  <h2 id="speaker">Speaker</h2>
+  <p>
+    The TTS contract. Implementations are concurrency-safe. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L12">audio.go#L12</a>.
+  </p>
+  <Code lang="go" code={`type Speaker interface {
+    Speak(ctx context.Context, req SpeechRequest) (*AudioStream, error)
+}`} />
+  <p>
+    <code>Speak</code> issues a synthesis request and returns an
+    <a href="#audio-stream"><code>*AudioStream</code></a> that the
+    caller must drain (or cancel via <code>ctx</code>). A non-nil error
+    is returned only for synchronous failures; mid-stream errors
+    surface from <code>AudioStream.Err()</code> after the chunk channel
+    closes.
+  </p>
+
+  <h2 id="transcriber">Transcriber</h2>
+  <p>
+    The STT contract. Implementations are concurrency-safe. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L18">audio.go#L18</a>.
+  </p>
+  <Code lang="go" code={`type Transcriber interface {
+    Transcribe(ctx context.Context, req TranscribeRequest) (*TranscriptStream, error)
+}`} />
+
+  <h2 id="speech-request">SpeechRequest</h2>
+  <p>
+    The TTS request shape. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L23">audio.go#L23</a>.
+  </p>
+  <Code lang="go" code={`type SpeechRequest struct {
+    Model  string          // e.g. "tts-1", "tts-1-hd", "eleven_turbo_v2_5"
+    Input  string          // text to synthesise; required
+    Voice  string          // "alloy", "echo", or a vendor voice id
+    Format string          // "mp3" (default) | "opus" | "aac" | "flac" | "wav" | "pcm" | "ulaw"
+    Speed  *float64        // 0.25-4.0; nil for default
+    Stream bool            // request chunked audio
+    Raw    json.RawMessage // optional byte passthrough; Model + Input overlaid
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>Provider-specific TTS model id.</dd>
+    <dt><code>Input</code></dt>
+    <dd>Text to synthesise. Required; the provider returns an error on empty.</dd>
+    <dt><code>Voice</code></dt>
+    <dd>Voice identifier. Format is provider-specific (canonical names for OpenAI, UUIDs for Cartesia/ElevenLabs).</dd>
+    <dt><code>Format</code></dt>
+    <dd>
+      Library-canonical audio format. Empty defaults to
+      <code>mp3</code>. Providers map this to their native enum and
+      surface the result on <code>AudioStream.ContentType</code>.
+    </dd>
+    <dt><code>Speed</code></dt>
+    <dd>Playback-rate multiplier. Providers clamp to their supported range.</dd>
+    <dt><code>Stream</code></dt>
+    <dd>
+      When <code>true</code>, request chunked audio. When
+      <code>false</code>, the entire audio arrives as a single
+      <code>AudioChunk</code>.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough escape hatch. The library overlays
+      <code>Model</code> and <code>Input</code>; everything else (voice
+      settings, language, stability, style) survives unchanged.
+    </dd>
+  </dl>
+
+  <h2 id="audio-stream">AudioStream</h2>
+  <p>
+    The TTS stream handle. Single-consumer: only one goroutine should
+    read <code>Chunks()</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L53">audio.go#L53</a>.
+  </p>
+  <Code lang="go" code={`type AudioStream struct {
+    ContentType string // "audio/mpeg", "audio/opus", "audio/wav", "audio/pcm", ...
+    // unexported: chunks chan, cancel func, errMu chan, err error
+}`} />
+  <dl>
+    <dt><code>ContentType</code></dt>
+    <dd>
+      The MIME type of the audio. Populated by the producer
+      <em>before</em> any chunks are sent — safe to read after the
+      first receive.
+    </dd>
+  </dl>
+
+  <h3 id="audio-stream-chunks">AudioStream.Chunks</h3>
+  <Code lang="go" code={`func (s *AudioStream) Chunks() <-chan AudioChunk`} />
+  <p>
+    Returns the receive-only chunk channel. Buffer capacity 16;
+    closes exactly once after the producer calls
+    <code>Finish</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L75">audio.go#L75</a>.
+  </p>
+
+  <h3 id="audio-stream-err">AudioStream.Err</h3>
+  <Code lang="go" code={`func (s *AudioStream) Err() error`} />
+  <p>
+    Blocks until the producer finishes; returns the terminal error
+    (<code>nil</code> on success). Safe to call multiple times.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L79">audio.go#L79</a>.
+  </p>
+
+  <h3 id="audio-stream-cancel">AudioStream.Cancel</h3>
+  <Code lang="go" code={`func (s *AudioStream) Cancel()`} />
+  <p>
+    Idempotent. Cancels the derived context the producer is using and
+    causes the producer to finish with
+    <code>context.Canceled</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L85">audio.go#L85</a>.
+  </p>
+
+  <h2 id="audio-chunk">AudioChunk</h2>
+  <Code lang="go" code={`type AudioChunk struct {
+    Data []byte // decoded audio bytes for this frame
+    Raw  []byte // original wire bytes (often == Data)
+}`} />
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L65">audio.go#L65</a>.
+    For most providers <code>Data == Raw</code>; the distinction
+    matters when the provider wraps audio in a JSON envelope
+    (ElevenLabs base64-encoded chunks, Cartesia SSE), in which case
+    <code>Raw</code> is the envelope and <code>Data</code> is the
+    decoded audio.
+  </p>
+
+  <h2 id="new-audio-stream">NewAudioStream</h2>
+  <p>
+    Provider-facing constructor. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L96">audio.go#L96</a>.
+  </p>
+  <Code lang="go" code={`func NewAudioStream(parent context.Context) (
+    *AudioStream,
+    context.Context,
+    AudioProducerHooks,
+)`} />
+  <p>
+    Mirrors <code>NewStream</code> for chat. Returns the stream, a
+    derived context the producer should respect, and the
+    <a href="#audio-producer-hooks"><code>AudioProducerHooks</code></a>
+    callbacks the producer must use. If the producer needs to set
+    <code>ContentType</code>, it must do so on the returned
+    <code>*AudioStream</code> <em>before</em> calling
+    <code>Send</code>.
+  </p>
+
+  <h2 id="audio-producer-hooks">AudioProducerHooks</h2>
+  <Code lang="go" code={`type AudioProducerHooks struct {
+    Send   func(AudioChunk) bool // returns false if the consumer is gone
+    Finish func(error)           // must be called exactly once
+}`} />
+  <p>
+    <code>Send</code> returns <code>false</code> when the derived
+    context is cancelled — the producer should treat this as a signal
+    to clean up and call <code>Finish</code>. <code>Finish</code>
+    closes the chunk channel and unblocks any caller of
+    <code>Err()</code>.
+  </p>
+
+  <h2 id="transcribe-request">TranscribeRequest</h2>
+  <p>
+    The STT request shape. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L127">audio.go#L127</a>.
+  </p>
+  <Code lang="go" code={`type TranscribeRequest struct {
+    Model          string          // "whisper-1", "nova-3", "scribe_v1"
+    Audio          io.Reader       // binary audio source; required
+    AudioFormat    string          // "audio/mpeg", "audio/wav", ...
+    Filename       string          // metadata for multipart-upload providers
+    Language       string          // ISO-639-1 hint
+    Prompt         string          // context hint (Whisper, ElevenLabs)
+    ResponseFormat string          // "json" | "text" | "srt" | "vtt" | "verbose_json"
+    Temperature    *float64        // sampling temperature (Whisper)
+    Stream         bool            // request live transcription
+    Raw            json.RawMessage // byte passthrough; Model is overlaid
+}`} />
+  <dl>
+    <dt><code>Audio</code></dt>
+    <dd>
+      Any <code>io.Reader</code>. The library reads until
+      <code>EOF</code>; for retries, the caller must rewind.
+    </dd>
+    <dt><code>AudioFormat</code></dt>
+    <dd>
+      Source MIME type. Some providers sniff (Whisper); others require
+      an explicit format (Deepgram).
+    </dd>
+    <dt><code>Filename</code></dt>
+    <dd>
+      Multipart-upload metadata. Defaults to <code>"audio"</code> +
+      an extension derived from <code>AudioFormat</code> when empty.
+    </dd>
+    <dt><code>Language</code></dt>
+    <dd>ISO-639-1 hint; empty means auto-detect.</dd>
+    <dt><code>Prompt</code></dt>
+    <dd>
+      Optional priming context. Whisper uses this as a glossary of
+      proper nouns and domain terms.
+    </dd>
+    <dt><code>ResponseFormat</code></dt>
+    <dd>
+      Provider response format. The library always emits
+      <code>TranscriptSegment</code>s regardless; richer modes
+      populate <code>Words</code> and <code>Confidence</code>.
+    </dd>
+    <dt><code>Temperature</code></dt>
+    <dd>Sampling temperature; Whisper-specific.</dd>
+    <dt><code>Stream</code></dt>
+    <dd>
+      Live transcription. Providers that don't support streaming send
+      a single final segment regardless.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough for provider-specific fields
+      (Deepgram <code>diarize</code>, <code>smart_format</code>,
+      <code>redact</code>, etc.).
+    </dd>
+  </dl>
+
+  <h2 id="transcript-stream">TranscriptStream</h2>
+  <p>
+    The STT stream handle. Single-consumer. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L171">audio.go#L171</a>.
+  </p>
+  <Code lang="go" code={`type TranscriptStream struct {
+    // unexported: segments chan, cancel func, errMu chan, err error
+}
+
+func (s *TranscriptStream) Segments() <-chan TranscriptSegment
+func (s *TranscriptStream) Err() error
+func (s *TranscriptStream) Cancel()`} />
+  <p>
+    Same lifecycle as <code>AudioStream</code>: <code>Segments()</code>
+    is the receive-only channel; <code>Err()</code> blocks until the
+    producer finishes; <code>Cancel()</code> is idempotent.
+  </p>
+
+  <h2 id="transcript-segment">TranscriptSegment</h2>
+  <Code lang="go" code={`type TranscriptSegment struct {
+    Text       string          // transcribed text
+    Final      bool            // true on the terminal segment
+    Start, End time.Duration   // timestamps relative to audio start
+    Words      []TranscriptWord
+    Confidence float32         // [0, 1]; zero when not provided
+    Raw        json.RawMessage // original wire JSON for this segment
+}`} />
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L181">audio.go#L181</a>.
+  </p>
+  <p>
+    Streaming providers emit interim segments
+    (<code>Final=false</code>) followed by exactly one
+    <code>Final=true</code> segment. Non-streaming providers emit
+    exactly one <code>Final=true</code> segment.
+  </p>
+
+  <h2 id="transcript-word">TranscriptWord</h2>
+  <Code lang="go" code={`type TranscriptWord struct {
+    Word       string
+    Start, End time.Duration
+    Confidence float32
+}`} />
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L206">audio.go#L206</a>.
+    Populated by providers that return per-word timing — Whisper
+    <code>verbose_json</code>, Deepgram, ElevenLabs Scribe. Empty
+    otherwise.
+  </p>
+
+  <h2 id="new-transcript-stream">NewTranscriptStream</h2>
+  <Code lang="go" code={`func NewTranscriptStream(parent context.Context) (
+    *TranscriptStream,
+    context.Context,
+    TranscriptProducerHooks,
+)`} />
+  <p>
+    Provider-facing constructor. Same shape as
+    <a href="#new-audio-stream"><code>NewAudioStream</code></a>.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L230">audio.go#L230</a>.
+  </p>
+
+  <h2 id="transcript-producer-hooks">TranscriptProducerHooks</h2>
+  <Code lang="go" code={`type TranscriptProducerHooks struct {
+    Send   func(TranscriptSegment) bool
+    Finish func(error)
+}`} />
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L255">audio.go#L255</a>.
+    Same contract as <code>AudioProducerHooks</code>: <code>Send</code>
+    returns <code>false</code> on cancellation, <code>Finish</code>
+    must be called exactly once.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/audio">Audio concept</a> — narrative overview of TTS + STT.</li>
+    <li><a href="/llmrouter/docs/api/stream">Stream API</a> — same patterns for chat.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a>, <a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a>, <a href="/llmrouter/docs/providers/cartesia">Cartesia</a>, <a href="/llmrouter/docs/providers/deepgram">Deepgram</a>.</li>
+  </ul>
+</DocsLayout>

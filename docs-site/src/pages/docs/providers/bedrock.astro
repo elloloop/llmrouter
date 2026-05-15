@@ -1,0 +1,159 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="AWS Bedrock Provider">
+  <h1>AWS Bedrock Provider</h1>
+  <p>
+    The <code>bedrock</code> provider talks to AWS Bedrock's
+    <code>bedrock-runtime</code> endpoint, with full SigV4 request
+    signing and per-model-family body translation. Chat is exposed via
+    <a href="/llmrouter/docs/api/llmrouter#provider"><code>Provider</code></a>;
+    embeddings via
+    <a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>
+    (Titan and Cohere on Bedrock). TTS and STT are not supported on
+    Bedrock.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/bedrock"
+)`} />
+
+  <h2 id="construction">Construction</h2>
+  <p>
+    Bedrock uses AWS SigV4 — there is no API key. The provider takes
+    an <code>aws.Config</code> and a region:
+  </p>
+  <Code lang="go" code={`import (
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/elloloop/llmrouter/providers/bedrock"
+)
+
+awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+if err != nil {
+    log.Fatal(err)
+}
+
+p, err := bedrock.New(
+    bedrock.WithAWSConfig(awsCfg),
+    bedrock.WithRegion("us-east-1"),
+)`} />
+  <p>
+    Credentials are resolved by the AWS SDK chain (env vars, shared
+    credentials file, EC2/ECS/EKS metadata, SSO). The library never
+    sees raw credentials.
+  </p>
+
+  <h2 id="model-routing">Model routing and body translation</h2>
+  <p>
+    Bedrock hosts many vendor families on one runtime, each with its
+    own request body. The provider inspects
+    <code>ChatRequest.Model</code> and routes to the right body
+    translator:
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Model prefix</th>
+          <th class="text-left p-3 border-b border-border">Family</th>
+          <th class="text-left p-3 border-b border-border">Body shape</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>anthropic.claude-*</code></td><td class="p-3 border-b border-border">Claude</td><td class="p-3 border-b border-border">Anthropic <code>/v1/messages</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>meta.llama*</code></td><td class="p-3 border-b border-border">Llama</td><td class="p-3 border-b border-border">Meta chat templating</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>amazon.titan-*</code></td><td class="p-3 border-b border-border">Titan</td><td class="p-3 border-b border-border">Amazon <code>inputText</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>amazon.nova-*</code></td><td class="p-3 border-b border-border">Nova</td><td class="p-3 border-b border-border">Amazon Converse</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>mistral.*</code></td><td class="p-3 border-b border-border">Mistral</td><td class="p-3 border-b border-border">Mistral chat</td></tr>
+        <tr><td class="p-3"><code>cohere.command-*</code></td><td class="p-3"><code>Cohere</code></td><td class="p-3">Cohere <code>/v1/chat</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The response stream is translated back to OpenAI-shaped
+    <code>Chunk</code>s in every case.
+  </p>
+
+  <h2 id="example-chat">Chat example (Claude on Bedrock)</h2>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are concise."),
+        llmrouter.TextMessage("user", "What's interesting about SigV4?"),
+    },
+    MaxTokens: 256,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}`} />
+
+  <h2 id="embeddings">Embeddings (Titan, Cohere)</h2>
+  <p>
+    Bedrock exposes two embedding families. The library routes
+    <code>EmbedRequest.Model</code> the same way as chat:
+  </p>
+  <ul>
+    <li><code>amazon.titan-embed-text-v2:0</code> — 1024 dims, Amazon Titan.</li>
+    <li><code>amazon.titan-embed-text-v1</code> — 1536 dims, legacy.</li>
+    <li><code>cohere.embed-english-v3</code> — 1024 dims, Cohere on Bedrock.</li>
+    <li><code>cohere.embed-multilingual-v3</code> — 1024 dims.</li>
+  </ul>
+  <Code lang="go" code={`resp, err := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model:    "amazon.titan-embed-text-v2:0",
+    Inputs:   []string{"What is SigV4?"},
+    TaskType: "RETRIEVAL_DOCUMENT", // mapped to Cohere input_type when applicable
+})`} />
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "bedrock"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>403</code> — IAM principal lacks <code>bedrock:InvokeModel*</code> for the model ARN.</li>
+    <li><code>400</code> — model not enabled in the region (request access in the Bedrock console).</li>
+    <li><code>429</code> — service quota exhausted; either request a quota increase or use Provisioned Throughput.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>No TTS, no STT.</strong> Bedrock has Polly (TTS) and
+      Transcribe (STT) as separate AWS services; <code>llmrouter</code>
+      does not wrap them. Use the AWS SDKs directly or
+      <a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a> /
+      <a href="/llmrouter/docs/providers/cartesia">Cartesia</a> /
+      <a href="/llmrouter/docs/providers/deepgram">Deepgram</a>.
+    </li>
+    <li>
+      <strong>Region matters.</strong> Model availability varies by
+      region; <code>us-east-1</code> has the broadest catalogue.
+    </li>
+    <li>
+      <strong>Cross-region inference profiles.</strong> Some newer
+      models (Claude 3.5 Sonnet v2) are accessed via
+      <code>us.anthropic.claude-3-5-sonnet-20241022-v2:0</code> profile
+      IDs. Pass them as-is.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a> — direct API, often faster.</li>
+    <li><a href="/llmrouter/docs/concepts/byte-passthrough">Byte passthrough</a> — per-family bodies via <code>Raw</code>.</li>
+  </ul>
+</DocsLayout>

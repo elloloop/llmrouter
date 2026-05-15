@@ -23,6 +23,242 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     page is the curated, human-written summary.
   </p>
 
+  <h2 id="v0-3-0">v0.3.0 — 2026-05-15</h2>
+  <p><strong>Audio, embeddings, and four new specialist providers.</strong></p>
+  <p>
+    The biggest single release since v0.1. <code>llmrouter</code>
+    grows beyond chat: three new root capabilities (Embeddings, TTS,
+    STT) and four new provider packages dedicated to audio and
+    embeddings. Existing chat code is unchanged — the new interfaces
+    live alongside <code>Provider</code>.
+  </p>
+
+  <h3>New root capabilities</h3>
+  <ul>
+    <li>
+      <code>llmrouter.Embedder</code> interface —
+      <code>Embed(ctx, EmbedRequest) (*EmbedResponse, error)</code>.
+      Documented at
+      <a href="/llmrouter/docs/concepts/embeddings">Embeddings concept</a>
+      and
+      <a href="/llmrouter/docs/api/embeddings">API reference</a>.
+    </li>
+    <li>
+      <code>llmrouter.Speaker</code> interface (TTS) —
+      <code>Speak(ctx, SpeechRequest) (*AudioStream, error)</code>.
+    </li>
+    <li>
+      <code>llmrouter.Transcriber</code> interface (STT) —
+      <code>Transcribe(ctx, TranscribeRequest) (*TranscriptStream, error)</code>.
+      Documented at
+      <a href="/llmrouter/docs/concepts/audio">Audio concept</a> and
+      <a href="/llmrouter/docs/api/audio">API reference</a>.
+    </li>
+    <li>
+      <code>AudioStream</code> / <code>TranscriptStream</code> with
+      the same single-consumer, context-cancellation, terminal-error
+      lifecycle as <code>Stream</code>. New types: <code>AudioChunk</code>,
+      <code>TranscriptSegment</code>, <code>TranscriptWord</code>,
+      <code>SpeechRequest</code>, <code>TranscribeRequest</code>,
+      <code>EmbedRequest</code>, <code>EmbedResponse</code>.
+    </li>
+    <li>
+      Cross-vendor format normalisation: audio formats
+      (<code>mp3</code> / <code>opus</code> / <code>wav</code> /
+      <code>pcm</code> / <code>ulaw</code>) and embedding task types
+      (Vertex canonical → Cohere / Voyage / OpenAI translations).
+    </li>
+  </ul>
+
+  <h3>New providers</h3>
+  <ul>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a></strong>
+      — TTS via the Eleven family (<code>eleven_turbo_v2_5</code>,
+      <code>eleven_multilingual_v2</code>, <code>eleven_flash_v2_5</code>)
+      and STT via Scribe (<code>scribe_v1</code>). No chat.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/deepgram">Deepgram</a></strong>
+      — STT only. Nova-3, Nova-2, enhanced, with per-word timing,
+      confidence scores, and diarization via <code>Raw</code>.
+      WebSocket streaming on v0.4 roadmap.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/cartesia">Cartesia</a></strong>
+      — TTS only. Sonic-2 with sub-100 ms first-token latency, SSE
+      streaming. WebSocket streaming on v0.4 roadmap.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/voyage">Voyage AI</a></strong>
+      — Embeddings only. voyage-3 / voyage-3-large / voyage-code-3 /
+      voyage-finance-2 / voyage-multilingual-2. Recommended pairing
+      for Anthropic Claude.
+    </li>
+  </ul>
+
+  <h3>Capability matrix updates for existing providers</h3>
+  <ul>
+    <li>
+      <strong>OpenAI</strong> now implements <code>Embedder</code>,
+      <code>Speaker</code> (TTS), and <code>Transcriber</code>
+      (Whisper) in addition to <code>Provider</code>.
+    </li>
+    <li>
+      <strong>Azure OpenAI</strong> matches OpenAI for all four
+      capabilities (each requires a separate deployment).
+    </li>
+    <li>
+      <strong>AWS Bedrock</strong> adds embeddings via Titan and Cohere
+      on Bedrock.
+    </li>
+    <li>
+      <strong>Vertex AI</strong> adds embeddings
+      (<code>text-embedding-005</code>) and partial TTS via the Gemini
+      path.
+    </li>
+    <li>
+      <strong>Gemini (AI Studio)</strong> adds embeddings, TTS, and
+      STT via audio understanding — the only chat-first provider with
+      all four capabilities.
+    </li>
+    <li>
+      <strong>Cohere</strong> adds Embed v3 embeddings with
+      mandatory input_type derived from <code>TaskType</code>.
+    </li>
+    <li>
+      <strong>Mistral</strong> adds <code>mistral-embed</code>.
+    </li>
+    <li>
+      <strong>Together</strong> adds delegated embeddings.
+    </li>
+    <li>
+      <strong>Groq</strong> adds Whisper STT.
+    </li>
+  </ul>
+
+  <h3>Known limitations</h3>
+  <ul>
+    <li>
+      Deepgram and Cartesia have HTTP/SSE paths today; WebSocket
+      streaming lands in v0.4.
+    </li>
+    <li>
+      Anthropic does not offer first-party embeddings.
+      <code>llmrouter</code> recommends pairing with Voyage AI; when
+      Anthropic ships embeddings, the provider will gain
+      <code>Embedder</code>.
+    </li>
+    <li>
+      Bedrock TTS (Polly) and STT (Transcribe) are not wrapped; use
+      ElevenLabs / Cartesia / Deepgram for those.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.3.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.3.0</a>
+  </p>
+
+  <h2 id="v0-2-0">v0.2.0 — 2026-05-15</h2>
+  <p><strong>Cloud triple, tool use, multimodal, ten OpenAI-compatible providers verified.</strong></p>
+  <p>
+    The cloud-provider release. Adds the three managed cloud LLM
+    endpoints (Azure OpenAI, AWS Bedrock, Google Vertex), plus
+    direct-API providers for Gemini, Cohere, and Mistral. Closes the
+    typed surface around features that previously rode on
+    <code>Raw</code> (tool use, multimodal, prompt caching).
+  </p>
+
+  <h3>New providers</h3>
+  <ul>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI Service</a></strong>
+      — deployment-scoped URL, <code>api-key</code> header,
+      <code>api-version</code> query parameter. Chat + embeddings +
+      TTS + Whisper STT (each via its own deployment).
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/bedrock">AWS Bedrock</a></strong>
+      — SigV4 signing, per-model-family body translation for Claude,
+      Llama, Titan, Nova, Mistral, and Cohere on Bedrock.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/vertex">Google Vertex AI</a></strong>
+      — ADC auth, project/region scoping, Gemini and Claude chat,
+      embeddings, partial TTS.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/gemini">Google Gemini (AI Studio)</a></strong>
+      — API-key-based direct API.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/cohere">Cohere</a></strong>
+      — Command family chat + Embed v3.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/providers/mistral">Mistral</a></strong>
+      — chat + <code>mistral-embed</code>.
+    </li>
+    <li>
+      <strong>Ten OpenAI-compatible providers verified</strong>:
+      OpenRouter, Together, Groq, DeepSeek, Fireworks, xAI (Grok),
+      Perplexity, Cerebras, vLLM, Ollama. All share the OpenAI
+      provider machinery via <code>WithBaseURL</code>.
+    </li>
+  </ul>
+
+  <h3>API additions</h3>
+  <ul>
+    <li>
+      <strong>Typed tool-call passthrough</strong>:
+      <code>ChatRequest.Tools []ToolDef</code> on the way out and
+      <code>Choice.Delta.ToolCalls</code> on the way back, with full
+      translation to Anthropic <code>tool_use</code> /
+      <code>tool_result</code>. Closes #1.
+    </li>
+    <li>
+      <strong>Extended thinking</strong>: Claude 3.7+ thinking blocks
+      surfaced via <code>Choice.Delta.Thinking</code>.
+    </li>
+    <li>
+      <strong>Prompt caching</strong>:
+      <code>Message.CacheControl</code> for Anthropic ephemeral cache;
+      <code>Usage.CachedTokens</code> populated for OpenAI auto-cache.
+    </li>
+    <li>
+      <strong>Multimodal content helpers</strong>:
+      <code>llmrouter.ImageURLContent</code> and
+      <code>ImageBytesContent</code>. Closes #2.
+    </li>
+    <li>
+      <strong>Mid-stream error surfacing</strong>: SSE-delivered error
+      events arriving after the stream opened are now surfaced via
+      <code>Stream.Err()</code> instead of silent EOF.
+    </li>
+  </ul>
+
+  <h3>Migration notes</h3>
+  <ul>
+    <li>
+      <code>WithExtra</code> is now a typed map per provider; if you
+      stored Azure deployment / Vertex project / Bedrock region there,
+      switch to the dedicated <code>azureopenai.WithDeployment</code>,
+      <code>vertex.WithProject</code>, <code>bedrock.WithRegion</code>
+      helpers.
+    </li>
+    <li>
+      <code>Choice.Delta.Content</code> remains a string for typed
+      callers; tool calls now arrive on
+      <code>Choice.Delta.ToolCalls</code>. Application code that
+      previously parsed tool calls from <code>Chunk.Raw</code>
+      continues to work.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.2.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.2.0</a>
+  </p>
+
   <h2 id="v0-1-1">v0.1.1 — 2026-05-15</h2>
   <p><strong>Tests / coverage. No source or API changes.</strong></p>
   <p>
@@ -187,23 +423,20 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     </li>
   </ul>
 
-  <h3>Known limitations</h3>
+  <h3>Known limitations (at v0.1.0 release)</h3>
   <p>
-    These are intentional and documented elsewhere; listed here so
-    early adopters know what to expect:
+    All of these have since been addressed in subsequent releases:
   </p>
   <ul>
     <li>
-      No Azure / Bedrock / Vertex provider — planned for v0.2. See
-      <a href="/llmrouter/docs/project/roadmap#v0-2">roadmap</a>.
+      No Azure / Bedrock / Vertex provider — landed in v0.2.0.
     </li>
     <li>
-      No typed tool-call surface yet — works today via
-      <code>Raw</code> passthrough; typed surface lands in v0.3.
+      No typed tool-call surface — landed in v0.2.0.
     </li>
-    <li>No embeddings API yet — v0.3.</li>
-    <li>No audio / vision API yet — v0.4.</li>
-    <li>Pre-1.0 — expect minor breakages between minor versions.</li>
+    <li>No embeddings API — landed in v0.3.0.</li>
+    <li>No audio (TTS / STT) — landed in v0.3.0.</li>
+    <li>Pre-1.0 — still applies; expect minor breakages between minor versions.</li>
   </ul>
   <p>
     <strong>Release link:</strong>
@@ -215,7 +448,8 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     Future versions are appended at the top of this page as they
     ship. The
     <a href="/llmrouter/docs/project/roadmap">roadmap</a> describes
-    what is planned for v0.2, v0.3, v0.4, and v1.0.
+    what is planned for v0.4 (WebSocket streaming for Deepgram and
+    Cartesia, typed tool-result messages) and v1.0 (API freeze).
   </p>
   <p>
     For commit-by-commit detail and signed release artifacts, see

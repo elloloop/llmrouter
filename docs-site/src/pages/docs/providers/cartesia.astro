@@ -1,0 +1,247 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Cartesia Provider">
+  <h1>Cartesia Provider</h1>
+  <p>
+    The <code>cartesia</code> provider implements
+    <a href="/llmrouter/docs/api/audio#speaker"><code>Speaker</code></a>
+    (text-to-speech) only. Cartesia's Sonic family is built around
+    real-time conversational synthesis with first-token latencies in
+    the ~40 ms range — choose this provider when end-to-end latency is
+    the critical constraint.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/cartesia"
+)`} />
+
+  <h2 id="defaults">Default endpoint</h2>
+  <p>
+    With no <code>WithBaseURL</code> override, the provider targets
+    <code>https://api.cartesia.ai</code>. TTS requests go to
+    <code>{`{BaseURL}/tts/bytes`}</code> for non-streaming and
+    <code>{`{BaseURL}/tts/sse`}</code> for streaming (SSE).
+  </p>
+  <p>
+    WebSocket streaming
+    (<code>wss://api.cartesia.ai/tts/websocket</code>) is on the
+    <a href="/llmrouter/docs/project/roadmap#v0-4">v0.4 roadmap</a>;
+    v0.3 streams via SSE which is sufficient for most server-side
+    pipelines.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := cartesia.New(
+    llmrouter.WithAPIKey(os.Getenv("CARTESIA_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    Authentication is via the <code>X-API-Key</code> header. Cartesia
+    also requires a <code>Cartesia-Version</code> header pinned to a
+    stable API version; the provider sets a sensible default
+    (currently <code>2024-11-13</code>) and will be bumped as Cartesia
+    publishes new versions.
+  </p>
+
+  <h2 id="models">Models</h2>
+  <ul>
+    <li>
+      <code>sonic-2</code> — current production model. 15 languages,
+      sub-100 ms first-token latency, the recommended default.
+    </li>
+    <li>
+      <code>sonic-2-2025-03-07</code> — pinned snapshot of
+      <code>sonic-2</code>. Use this when you need reproducible output.
+    </li>
+    <li>
+      <code>sonic-turbo</code> — even lower latency for English-only
+      use cases. Slightly lower quality.
+    </li>
+  </ul>
+
+  <h2 id="voices">Voice IDs</h2>
+  <p>
+    Cartesia voices are referenced by UUID-shaped IDs. Pass the ID
+    string in <code>SpeechRequest.Voice</code>. A handful of public
+    voice IDs from Cartesia's library (subject to change):
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Voice</th>
+          <th class="text-left p-3 border-b border-border">ID</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border">Newsman</td><td class="p-3 border-b border-border"><code>d46abd1d-2d02-43e8-819f-51fb652c1c61</code></td></tr>
+        <tr><td class="p-3 border-b border-border">Casual British woman</td><td class="p-3 border-b border-border"><code>156fb8d2-335b-4950-9cb3-a2d33befec77</code></td></tr>
+        <tr><td class="p-3"><code>Friendly Australian man</code></td><td class="p-3"><code>421b3369-f63f-4b03-8980-37a44df1d4e8</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    For custom-trained voices, use the voice ID returned by
+    Cartesia's voice-cloning endpoint. The library does not wrap voice
+    management — call the Cartesia REST API directly for that.
+  </p>
+
+  <h2 id="format">Output format mapping</h2>
+  <p>
+    Cartesia uses an <code>output_format</code> object with
+    <code>container</code>, <code>encoding</code>, and
+    <code>sample_rate</code>. The library maps
+    <code>SpeechRequest.Format</code> as follows:
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Library <code>Format</code></th>
+          <th class="text-left p-3 border-b border-border">Cartesia <code>output_format</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>mp3</code> (default)</td><td class="p-3 border-b border-border"><code>{`{container:"mp3", sample_rate:44100, bit_rate:128000}`}</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>wav</code></td><td class="p-3 border-b border-border"><code>{`{container:"wav", encoding:"pcm_s16le", sample_rate:22050}`}</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>pcm</code></td><td class="p-3 border-b border-border"><code>{`{container:"raw", encoding:"pcm_s16le", sample_rate:22050}`}</code></td></tr>
+        <tr><td class="p-3"><code>opus</code></td><td class="p-3"><code>{`{container:"webm", encoding:"opus", sample_rate:48000}`}</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    For custom sample rates or bit depths, set
+    <code>Format=""</code> and pass the full
+    <code>output_format</code> object via <code>Raw</code>.
+  </p>
+
+  <h2 id="example">Streaming TTS example</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/cartesia"
+)
+
+func main() {
+    p, err := cartesia.New(llmrouter.WithAPIKey(os.Getenv("CARTESIA_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.Speak(context.Background(), llmrouter.SpeechRequest{
+        Model:  "sonic-2",
+        Input:  "Cartesia streams audio with sub-100 millisecond latency.",
+        Voice:  "d46abd1d-2d02-43e8-819f-51fb652c1c61",
+        Format: "mp3",
+        Stream: true,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    out, _ := os.Create("cartesia.mp3")
+    defer out.Close()
+    for chunk := range stream.Chunks() {
+        out.Write(chunk.Data)
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("wrote cartesia.mp3 (%s)", stream.ContentType)
+}`} />
+
+  <h2 id="real-time">Real-time use cases</h2>
+  <p>
+    Cartesia's defining property is first-token latency low enough for
+    barge-in voice agents. The end-to-end pattern looks like:
+  </p>
+  <ol>
+    <li>Chat provider emits a delta chunk.</li>
+    <li>You buffer until a sentence boundary or N characters.</li>
+    <li>You call <code>Speak</code> with <code>Stream=true</code> and pipe the audio to the client (WebRTC / WebSocket / phone).</li>
+    <li>If the user interrupts, cancel both the chat <code>Stream</code> and the audio <code>AudioStream</code> via context.</li>
+  </ol>
+  <p>
+    Cancellation propagates: cancelling the audio context closes the
+    Cartesia HTTP request, which stops billing immediately.
+  </p>
+
+  <h2 id="speed-emotion">Speed and emotion</h2>
+  <p>
+    <code>SpeechRequest.Speed</code> maps to Cartesia's
+    <code>speed</code> field (range <code>-1.0</code> to
+    <code>1.0</code>; the library rescales <code>0.5..2.0</code> to
+    that range). Emotion controls are not on the typed surface; pass
+    them via <code>Raw</code>:
+  </p>
+  <Code lang="go" code={`raw := []byte(` + "`" + `{
+  "voice": {
+    "mode": "id",
+    "id": "d46abd1d-2d02-43e8-819f-51fb652c1c61",
+    "__experimental_controls": {
+      "emotion": ["positivity:high", "curiosity"],
+      "speed": "normal"
+    }
+  }
+}` + "`" + `)
+
+stream, err := p.Speak(ctx, llmrouter.SpeechRequest{
+    Model: "sonic-2",
+    Input: "What a wonderful evening!",
+    Raw:   raw,
+})`} />
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "cartesia"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — bad or missing API key.</li>
+    <li><code>402</code> — quota exhausted.</li>
+    <li><code>422</code> — invalid voice ID or unsupported language/model pair.</li>
+    <li><code>400</code> — invalid <code>output_format</code>.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>No STT.</strong> Cartesia is TTS-only. Pair with
+      <a href="/llmrouter/docs/providers/deepgram">Deepgram</a> or
+      <a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs Scribe</a>
+      for transcription.
+    </li>
+    <li>
+      <strong>WebSocket streaming lands in v0.4.</strong> The SSE path
+      is sufficient for server-side use; WebSocket matters for
+      browser-direct streaming where every millisecond of handshake
+      counts.
+    </li>
+    <li>
+      <strong>API version header.</strong> Cartesia versions its API
+      via a header rather than a path prefix. The provider sets the
+      header; if Cartesia ships a breaking change, bump
+      <code>llmrouter</code>.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/audio">Audio concept</a> — Speaker semantics.</li>
+    <li><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs provider</a> — TTS + STT, higher quality at higher latency.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — TTS-1 / TTS-1-HD.</li>
+  </ul>
+</DocsLayout>

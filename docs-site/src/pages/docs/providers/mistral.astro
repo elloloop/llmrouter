@@ -1,0 +1,104 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Mistral Provider">
+  <h1>Mistral Provider</h1>
+  <p>
+    The <code>mistral</code> provider implements
+    <a href="/llmrouter/docs/api/llmrouter#provider"><code>Provider</code></a>
+    (chat) and
+    <a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>
+    against
+    <a href="https://api.mistral.ai" target="_blank" rel="noopener noreferrer">api.mistral.ai</a>.
+    Mistral's REST surface is OpenAI-compatible, so this provider is a
+    thin wrapper that pins the base URL and known model ids; under the
+    hood it reuses the
+    <a href="/llmrouter/docs/providers/openai">OpenAI provider</a>
+    machinery.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/mistral"
+)`} />
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := mistral.New(
+    llmrouter.WithAPIKey(os.Getenv("MISTRAL_API_KEY")),
+)`} />
+  <p>
+    Default endpoint: <code>https://api.mistral.ai/v1</code>. Auth via
+    <code>Authorization: Bearer &lt;key&gt;</code>.
+  </p>
+
+  <h2 id="chat-models">Chat models</h2>
+  <ul>
+    <li><code>mistral-large-latest</code> — flagship.</li>
+    <li><code>mistral-small-latest</code> — balanced cost/quality.</li>
+    <li><code>codestral-latest</code> — code-specialised.</li>
+    <li><code>open-mistral-nemo</code> — open-weights 12B.</li>
+    <li><code>pixtral-large-latest</code> — multimodal (image input).</li>
+    <li><code>ministral-8b-latest</code>, <code>ministral-3b-latest</code> — small models.</li>
+  </ul>
+
+  <h2 id="chat-example">Chat example</h2>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "mistral-large-latest",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are concise."),
+        llmrouter.TextMessage("user", "What is Mixture of Experts?"),
+    },
+})
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+}`} />
+
+  <h2 id="embeddings">Embeddings</h2>
+  <p>
+    Mistral exposes a single embedding model:
+  </p>
+  <ul>
+    <li><code>mistral-embed</code> — 1024 dims, multilingual.</li>
+  </ul>
+  <Code lang="go" code={`resp, err := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model:  "mistral-embed",
+    Inputs: []string{"Bonjour le monde"},
+})`} />
+  <p>
+    <code>TaskType</code> is not modelled on the wire; the library
+    ignores it for Mistral.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "mistral"</code>.
+  </p>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>Strict JSON mode.</strong> Mistral's
+      <code>response_format</code> is OpenAI-compatible; pass via
+      <code>Raw</code>.
+    </li>
+    <li>
+      <strong>EU data residency.</strong> Mistral hosts in the EU by
+      default. For US users, latency is slightly higher than US-hosted
+      vendors.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/openai-compatible">OpenAI-compatible endpoints</a> — same machinery, different base URLs.</li>
+    <li><a href="/llmrouter/docs/concepts/embeddings">Embeddings concept</a>.</li>
+  </ul>
+</DocsLayout>

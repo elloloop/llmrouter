@@ -1,0 +1,294 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="ElevenLabs Provider">
+  <h1>ElevenLabs Provider</h1>
+  <p>
+    The <code>elevenlabs</code> provider implements both
+    <a href="/llmrouter/docs/api/audio#speaker"><code>Speaker</code></a>
+    (text-to-speech) and
+    <a href="/llmrouter/docs/api/audio#transcriber"><code>Transcriber</code></a>
+    (speech-to-text via the Scribe family). It does not implement
+    <code>Provider</code> — ElevenLabs has no chat endpoint. Pair it
+    with one of the chat providers
+    (<a href="/llmrouter/docs/providers/openai">OpenAI</a>,
+    <a href="/llmrouter/docs/providers/anthropic">Anthropic</a>, or any
+    other) for end-to-end voice pipelines.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/elevenlabs"
+)`} />
+
+  <h2 id="defaults">Default endpoint</h2>
+  <p>
+    With no <code>WithBaseURL</code> override, the provider targets
+    <code>https://api.elevenlabs.io/v1</code>. TTS requests go to
+    <code>{`{BaseURL}/text-to-speech/{voice_id}`}</code> (or
+    <code>{`/text-to-speech/{voice_id}/stream`}</code> when
+    <code>SpeechRequest.Stream</code> is true). STT requests go to
+    <code>{`{BaseURL}/speech-to-text`}</code>.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := elevenlabs.New(
+    llmrouter.WithAPIKey(os.Getenv("ELEVENLABS_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    Authentication is via the <code>xi-api-key</code> header — the
+    provider sets it automatically from the API key. There is no Bearer
+    token form for ElevenLabs.
+  </p>
+
+  <h2 id="tts">Text-to-speech</h2>
+
+  <h3 id="tts-models">Models</h3>
+  <ul>
+    <li>
+      <code>eleven_turbo_v2_5</code> — lowest latency, recommended for
+      conversational and real-time use cases. Multilingual (32
+      languages).
+    </li>
+    <li>
+      <code>eleven_multilingual_v2</code> — highest quality, 29
+      languages. Higher latency than <code>turbo</code>.
+    </li>
+    <li>
+      <code>eleven_flash_v2_5</code> — ultra-low latency (~75 ms),
+      English-only.
+    </li>
+    <li>
+      <code>eleven_monolingual_v1</code> — legacy, English-only.
+    </li>
+  </ul>
+
+  <h3 id="tts-voices">Voice IDs</h3>
+  <p>
+    ElevenLabs voices are referenced by opaque IDs (often 20-character
+    alphanumeric strings) — set <code>SpeechRequest.Voice</code> to the
+    ID, not the display name. Find IDs in your account at
+    <a href="https://elevenlabs.io/app/voice-library" target="_blank" rel="noopener noreferrer">elevenlabs.io/app/voice-library</a>
+    or via the ElevenLabs <code>/v1/voices</code> endpoint. A handful of
+    public voice IDs (subject to change):
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Voice</th>
+          <th class="text-left p-3 border-b border-border">ID</th>
+          <th class="text-left p-3 border-b border-border">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border">Rachel</td><td class="p-3 border-b border-border"><code>21m00Tcm4TlvDq8ikWAM</code></td><td class="p-3 border-b border-border">default female</td></tr>
+        <tr><td class="p-3 border-b border-border">Adam</td><td class="p-3 border-b border-border"><code>pNInz6obpgDQGcFmaJgB</code></td><td class="p-3 border-b border-border">default male</td></tr>
+        <tr><td class="p-3 border-b border-border">Bella</td><td class="p-3 border-b border-border"><code>EXAVITQu4vr4xnSDxMaL</code></td><td class="p-3 border-b border-border">soft female</td></tr>
+        <tr><td class="p-3"><code>Antoni</code></td><td class="p-3"><code>ErXwobaYiN019PkySvjV</code></td><td class="p-3">narrator male</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="tts-format">Output format mapping</h3>
+  <p>
+    ElevenLabs uses compound format codes
+    (<code>{`{codec}_{sample_rate}_{bitrate}`}</code>). The library
+    maps the canonical <code>Format</code> field as follows:
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Library <code>Format</code></th>
+          <th class="text-left p-3 border-b border-border">ElevenLabs <code>output_format</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>mp3</code> (default)</td><td class="p-3 border-b border-border"><code>mp3_44100_128</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>pcm</code></td><td class="p-3 border-b border-border"><code>pcm_22050</code></td></tr>
+        <tr><td class="p-3"><code>ulaw</code></td><td class="p-3"><code>ulaw_8000</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    For non-default sample rates or bitrates, set
+    <code>Format=""</code> and pass <code>output_format</code> on
+    <code>Raw</code>.
+  </p>
+
+  <h3 id="tts-example">Streaming TTS example</h3>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/elevenlabs"
+)
+
+func main() {
+    p, err := elevenlabs.New(llmrouter.WithAPIKey(os.Getenv("ELEVENLABS_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.Speak(context.Background(), llmrouter.SpeechRequest{
+        Model:  "eleven_turbo_v2_5",
+        Input:  "Welcome to the future of voice synthesis.",
+        Voice:  "21m00Tcm4TlvDq8ikWAM", // Rachel
+        Format: "mp3",
+        Stream: true,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    out, _ := os.Create("welcome.mp3")
+    defer out.Close()
+    for chunk := range stream.Chunks() {
+        out.Write(chunk.Data)
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+
+  <h3 id="tts-stability">Voice stability and style</h3>
+  <p>
+    ElevenLabs' <code>voice_settings</code> object (<code>stability</code>,
+    <code>similarity_boost</code>, <code>style</code>,
+    <code>use_speaker_boost</code>) is not on the typed surface. Pass
+    it via <code>Raw</code>:
+  </p>
+  <Code lang="go" code={`raw := []byte(` + "`" + `{
+  "voice_settings": {
+    "stability": 0.65,
+    "similarity_boost": 0.85,
+    "style": 0.2,
+    "use_speaker_boost": true
+  }
+}` + "`" + `)
+
+stream, err := p.Speak(ctx, llmrouter.SpeechRequest{
+    Model: "eleven_multilingual_v2",
+    Input: "Hello world.",
+    Voice: "21m00Tcm4TlvDq8ikWAM",
+    Raw:   raw,
+})`} />
+
+  <h2 id="stt">Speech-to-text (Scribe)</h2>
+
+  <h3 id="stt-models">Models</h3>
+  <ul>
+    <li>
+      <code>scribe_v1</code> — current production model. 99 languages,
+      word-level timing, speaker diarization, and (optionally) profanity
+      filtering.
+    </li>
+  </ul>
+
+  <h3 id="stt-language">Language detection</h3>
+  <p>
+    Scribe auto-detects language by default. Set
+    <code>TranscribeRequest.Language</code> to an ISO-639-1 code to
+    skip detection and improve accuracy on short clips.
+  </p>
+
+  <h3 id="stt-example">STT example</h3>
+  <Code lang="go" code={`f, err := os.Open("interview.m4a")
+if err != nil {
+    log.Fatal(err)
+}
+defer f.Close()
+
+stream, err := p.Transcribe(ctx, llmrouter.TranscribeRequest{
+    Model:          "scribe_v1",
+    Audio:          f,
+    AudioFormat:    "audio/m4a",
+    Filename:       "interview.m4a",
+    Language:       "en",
+    ResponseFormat: "verbose_json",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for seg := range stream.Segments() {
+    fmt.Printf("[%s] %s\\n", seg.Start, seg.Text)
+    for _, w := range seg.Words {
+        fmt.Printf("  %s @ %s\\n", w.Word, w.Start)
+    }
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}`} />
+
+  <h3 id="diarization">Speaker diarization</h3>
+  <p>
+    Diarization is enabled via Scribe's
+    <code>diarize</code> field, which is not on the typed surface. Pass
+    it via <code>Raw</code>:
+  </p>
+  <Code lang="go" code={`raw := []byte(` + "`" + `{"diarize": true, "num_speakers": 2}` + "`" + `)
+
+stream, err := p.Transcribe(ctx, llmrouter.TranscribeRequest{
+    Model:       "scribe_v1",
+    Audio:       f,
+    AudioFormat: "audio/m4a",
+    Raw:         raw,
+})
+
+// Each segment's Raw json contains "speaker_id" when diarize is on.
+for seg := range stream.Segments() {
+    fmt.Printf("%s\\n", string(seg.Raw))
+}`} />
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "elevenlabs"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — bad or missing API key.</li>
+    <li><code>402</code> — quota exhausted (insufficient characters).</li>
+    <li><code>422</code> — invalid voice ID or model id.</li>
+    <li><code>429</code> — concurrent-request limit hit.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>No chat.</strong> ElevenLabs does not offer text
+      generation. Calling <code>CompletionStream</code> on this provider
+      is a compile error — the type doesn't have the method.
+    </li>
+    <li>
+      <strong>Streaming TTS uses HTTP chunked transfer</strong>, not
+      SSE. The library wraps the stream identically to other providers,
+      so consumer code is unchanged.
+    </li>
+    <li>
+      <strong>STT uses multipart upload.</strong> The
+      <code>Audio io.Reader</code> is consumed once; for retries, the
+      caller must rewind.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/audio">Audio concept</a> — Speaker/Transcriber semantics.</li>
+    <li><a href="/llmrouter/docs/providers/cartesia">Cartesia provider</a> — TTS-only, optimised for real-time.</li>
+    <li><a href="/llmrouter/docs/providers/deepgram">Deepgram provider</a> — STT-only, Nova-3.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — TTS + Whisper STT.</li>
+  </ul>
+</DocsLayout>

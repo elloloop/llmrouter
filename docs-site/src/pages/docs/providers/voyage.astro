@@ -1,0 +1,261 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Voyage AI Provider">
+  <h1>Voyage AI Provider</h1>
+  <p>
+    The <code>voyage</code> provider implements
+    <a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>
+    only. Voyage AI specialises in retrieval-grade embeddings and is
+    the
+    <a href="https://www.anthropic.com/news/voyage-ai" target="_blank" rel="noopener noreferrer">recommended embedding partner</a>
+    for Anthropic Claude users — Anthropic does not offer first-party
+    embeddings, and <code>llmrouter</code> pairs Claude with Voyage by
+    default in its examples.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/voyage"
+)`} />
+
+  <h2 id="defaults">Default endpoint</h2>
+  <p>
+    With no <code>WithBaseURL</code> override, the provider targets
+    <code>https://api.voyageai.com/v1</code>. Embedding requests go to
+    <code>{`{BaseURL}/embeddings`}</code>.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := voyage.New(
+    llmrouter.WithAPIKey(os.Getenv("VOYAGE_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    Authentication is via <code>Authorization: Bearer &lt;key&gt;</code>.
+  </p>
+
+  <h2 id="models">Models</h2>
+  <ul>
+    <li>
+      <code>voyage-3</code> — current general-purpose model (1024
+      dims, supports 256/512/1024/2048 via <code>Dimensions</code>).
+      The recommended default for most retrieval tasks.
+    </li>
+    <li>
+      <code>voyage-3-large</code> — higher quality, also 1024 dims
+      with the same dimension options. Use this when retrieval
+      accuracy matters more than cost.
+    </li>
+    <li>
+      <code>voyage-3-lite</code> — 512 dims, lowest cost. Strong
+      baseline for small-scale RAG.
+    </li>
+    <li>
+      <code>voyage-code-3</code> — tuned for source code, identifiers,
+      and technical documentation.
+    </li>
+    <li>
+      <code>voyage-finance-2</code> — tuned for financial documents,
+      filings, and earnings transcripts.
+    </li>
+    <li>
+      <code>voyage-law-2</code> — tuned for legal documents and
+      caselaw.
+    </li>
+    <li>
+      <code>voyage-multilingual-2</code> — multilingual support across
+      29 languages, 1024 dims. Use this for non-English corpora.
+    </li>
+  </ul>
+
+  <h2 id="input-type">Input type</h2>
+  <p>
+    Voyage distinguishes <em>query</em> embeddings from
+    <em>document</em> embeddings — using the wrong one significantly
+    hurts retrieval recall. The library maps
+    <a href="/llmrouter/docs/concepts/embeddings#task-type-mapping"><code>TaskType</code></a>
+    as follows:
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Canonical <code>TaskType</code></th>
+          <th class="text-left p-3 border-b border-border">Voyage <code>input_type</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>RETRIEVAL_QUERY</code> / <code>QUESTION_ANSWERING</code></td><td class="p-3 border-b border-border"><code>query</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>RETRIEVAL_DOCUMENT</code></td><td class="p-3 border-b border-border"><code>document</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>SEMANTIC_SIMILARITY</code></td><td class="p-3 border-b border-border"><code>document</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>CLASSIFICATION</code></td><td class="p-3 border-b border-border"><code>document</code></td></tr>
+        <tr><td class="p-3"><code>CLUSTERING</code></td><td class="p-3"><code>document</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Empty <code>TaskType</code> sends no <code>input_type</code>,
+    which Voyage treats as <code>document</code>.
+  </p>
+
+  <h2 id="output-dimension">Output dimension</h2>
+  <p>
+    Voyage 3-family models support
+    <code>output_dimension</code> — the library forwards
+    <code>EmbedRequest.Dimensions</code> as that field. Valid values
+    depend on the model:
+  </p>
+  <ul>
+    <li><code>voyage-3</code>, <code>voyage-3-large</code>: 256, 512, 1024 (default), 2048.</li>
+    <li><code>voyage-3-lite</code>: 512 (fixed).</li>
+    <li><code>voyage-code-3</code>: 256, 512, 1024 (default), 2048.</li>
+    <li><code>voyage-multilingual-2</code>: 1024 (fixed).</li>
+  </ul>
+
+  <h2 id="example-rag">RAG example: embed documents, embed query, retrieve</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "math"
+    "os"
+    "sort"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/voyage"
+)
+
+func main() {
+    p, err := voyage.New(llmrouter.WithAPIKey(os.Getenv("VOYAGE_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+    ctx := context.Background()
+
+    docs := []string{
+        "The mitochondrion is the powerhouse of the cell.",
+        "ATP synthase produces adenosine triphosphate.",
+        "Photosynthesis converts light energy into chemical energy.",
+    }
+
+    docEmb, err := p.Embed(ctx, llmrouter.EmbedRequest{
+        Model:      "voyage-3",
+        Inputs:     docs,
+        Dimensions: 1024,
+        TaskType:   "RETRIEVAL_DOCUMENT",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    queryEmb, err := p.Embed(ctx, llmrouter.EmbedRequest{
+        Model:    "voyage-3",
+        Inputs:   []string{"What makes ATP?"},
+        TaskType: "RETRIEVAL_QUERY",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    type hit struct {
+        idx int
+        sim float32
+    }
+    var hits []hit
+    for i, dv := range docEmb.Embeddings {
+        hits = append(hits, hit{i, cosine(queryEmb.Embeddings[0], dv)})
+    }
+    sort.Slice(hits, func(i, j int) bool { return hits[i].sim > hits[j].sim })
+    for _, h := range hits {
+        fmt.Printf("%.3f  %s\\n", h.sim, docs[h.idx])
+    }
+}
+
+func cosine(a, b []float32) float32 {
+    var dot, na, nb float64
+    for i := range a {
+        dot += float64(a[i]) * float64(b[i])
+        na += float64(a[i]) * float64(a[i])
+        nb += float64(b[i]) * float64(b[i])
+    }
+    return float32(dot / (math.Sqrt(na) * math.Sqrt(nb)))
+}`} />
+
+  <h2 id="claude-pairing">Pairing with Anthropic Claude</h2>
+  <p>
+    Anthropic does not offer a first-party embedding endpoint and
+    explicitly recommends Voyage. The canonical pairing:
+  </p>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/voyage"
+)
+
+chat, _ := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+embed, _ := voyage.New(llmrouter.WithAPIKey(os.Getenv("VOYAGE_API_KEY")))
+
+// embed.Embed(...) for retrieval; chat.CompletionStream(...) for generation.`} />
+
+  <h2 id="truncation">Truncation</h2>
+  <p>
+    Voyage truncates inputs that exceed the model's context window by
+    default. To error instead of truncating, pass
+    <code>truncation=false</code> via <code>Raw</code>:
+  </p>
+  <Code lang="go" code={`raw := []byte(` + "`" + `{
+  "input": ["..."],
+  "input_type": "document",
+  "truncation": false
+}` + "`" + `)
+
+resp, err := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model: "voyage-3",
+    Raw:   raw,
+})`} />
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "voyage"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — bad or missing API key.</li>
+    <li><code>400</code> — invalid <code>output_dimension</code> for the chosen model, or input over context window with <code>truncation=false</code>.</li>
+    <li><code>429</code> — rate-limit (Voyage's rate limits are per-minute token throughput).</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>Embeddings only.</strong> No chat, no TTS, no STT.
+      Compose with a chat provider for full pipelines.
+    </li>
+    <li>
+      <strong>Batch size limit.</strong> Voyage caps requests at 128
+      inputs per call (1000 for <code>voyage-3-lite</code>). The
+      provider does not auto-batch; chunk client-side.
+    </li>
+    <li>
+      <strong>Asymmetric query/document.</strong> Always set
+      <code>TaskType</code> correctly — the difference is large
+      (5-10% recall on standard benchmarks).
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/embeddings">Embeddings concept</a> — Embedder semantics.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a> — canonical Voyage chat partner.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — alternative embeddings.</li>
+    <li><a href="/llmrouter/docs/providers/cohere">Cohere provider</a> — alternative embeddings with input-type support.</li>
+  </ul>
+</DocsLayout>

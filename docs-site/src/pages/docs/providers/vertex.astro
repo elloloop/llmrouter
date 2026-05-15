@@ -1,0 +1,158 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Google Vertex AI Provider">
+  <h1>Google Vertex AI Provider</h1>
+  <p>
+    The <code>vertex</code> provider talks to Google's Vertex AI
+    platform — enterprise-grade hosting for Gemini, Anthropic Claude
+    (via Vertex Marketplace), and Google's embedding models. Compared
+    to the
+    <a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio)</a>
+    provider, Vertex offers project-scoped quota, VPC service controls,
+    and IAM-based access.
+  </p>
+  <p>
+    Capabilities: chat
+    (<a href="/llmrouter/docs/api/llmrouter#provider"><code>Provider</code></a>),
+    embeddings
+    (<a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>),
+    and partial TTS via the Gemini audio path
+    (<a href="/llmrouter/docs/api/audio#speaker"><code>Speaker</code></a>).
+    STT is not yet wrapped — use the standalone Cloud
+    Speech-to-Text SDK or
+    <a href="/llmrouter/docs/providers/deepgram">Deepgram</a>.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/vertex"
+)`} />
+
+  <h2 id="auth">Authentication</h2>
+  <p>
+    Vertex uses Application Default Credentials (ADC). No API key
+    option; instead, the SDK resolves credentials via the standard
+    Google chain (gcloud auth, service-account JSON,
+    GCE/GKE/Cloud Run metadata server).
+  </p>
+  <Code lang="go" code={`p, err := vertex.New(
+    vertex.WithProject(os.Getenv("GOOGLE_PROJECT_ID")),
+    vertex.WithRegion("us-central1"),
+)`} />
+
+  <h2 id="endpoint">Endpoint</h2>
+  <p>
+    The provider constructs the per-region endpoint:
+    <code>{`https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/{publisher}/models/{model}:streamGenerateContent`}</code>.
+    Publisher is derived from the model id
+    (<code>gemini-*</code> → <code>google</code>,
+    <code>claude-*</code> → <code>anthropic</code>).
+  </p>
+
+  <h2 id="chat-example">Chat example (Gemini)</h2>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "gemini-2.0-flash",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are a helpful assistant."),
+        llmrouter.TextMessage("user", "What's new in Vertex AI?"),
+    },
+})
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+}`} />
+
+  <h2 id="claude-on-vertex">Claude on Vertex</h2>
+  <p>
+    Claude models on Vertex use the <code>claude-*@*</code> versioning
+    convention:
+  </p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-5-sonnet-v2@20241022",
+    MaxTokens: 1024,
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello from Vertex."),
+    },
+})`} />
+
+  <h2 id="embeddings">Embeddings</h2>
+  <p>
+    Vertex's text embedding models live under the
+    <code>publishers/google/models/...</code> path. The library routes
+    via the same <code>EmbedRequest.Model</code>:
+  </p>
+  <ul>
+    <li><code>text-embedding-005</code> — current default, 768 dims.</li>
+    <li><code>text-embedding-004</code> — previous generation.</li>
+    <li><code>text-multilingual-embedding-002</code> — 250+ languages.</li>
+  </ul>
+  <Code lang="go" code={`resp, err := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model:    "text-embedding-005",
+    Inputs:   []string{"What is Vertex AI?"},
+    TaskType: "RETRIEVAL_QUERY",
+})`} />
+
+  <h2 id="audio-partial">Audio (partial)</h2>
+  <p>
+    Gemini 2.0 Flash supports speech generation as part of its
+    multimodal output. The library wraps this behind <code>Speak</code>
+    for parity with other TTS providers, but support is partial: voice
+    selection is limited compared to the dedicated TTS providers, and
+    streaming chunks arrive at sentence granularity rather than
+    word/phoneme.
+  </p>
+  <Code lang="go" code={`stream, err := p.Speak(ctx, llmrouter.SpeechRequest{
+    Model:  "gemini-2.0-flash",
+    Input:  "Hello from Vertex.",
+    Voice:  "Aoede",
+    Format: "wav",
+})`} />
+  <p>
+    For production TTS, prefer
+    <a href="/llmrouter/docs/providers/cartesia">Cartesia</a> or
+    <a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a>.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "vertex"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>403</code> — service account missing <code>roles/aiplatform.user</code>.</li>
+    <li><code>404</code> — model not available in the region; try <code>us-central1</code>.</li>
+    <li><code>429</code> — per-project quota exhausted.</li>
+    <li><code>400</code> — safety filter; inspect the response body.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>Pin the region.</strong> Model availability and pricing
+      vary by region. Vertex does not auto-fall-back.
+    </li>
+    <li>
+      <strong>Safety filters.</strong> Vertex applies its own safety
+      filters on top of model-level filters; tune via
+      <code>safetySettings</code> on <code>Raw</code>.
+    </li>
+    <li>
+      <strong>VPC-SC compatible.</strong> Honours VPC Service Controls
+      because all traffic uses Google's standard SDK transport.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio)</a> — direct API, simpler auth.</li>
+    <li><a href="/llmrouter/docs/providers/bedrock">AWS Bedrock</a> — equivalent cloud-hosting story for AWS.</li>
+    <li><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI</a> — equivalent for Azure.</li>
+  </ul>
+</DocsLayout>

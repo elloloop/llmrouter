@@ -1,0 +1,239 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Deepgram Provider">
+  <h1>Deepgram Provider</h1>
+  <p>
+    The <code>deepgram</code> provider implements
+    <a href="/llmrouter/docs/api/audio#transcriber"><code>Transcriber</code></a>
+    (speech-to-text). It does not implement <code>Speaker</code>,
+    <code>Provider</code>, or <code>Embedder</code> — Deepgram is an
+    STT-only vendor in <code>llmrouter</code>'s scope.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/deepgram"
+)`} />
+
+  <h2 id="defaults">Default endpoint</h2>
+  <p>
+    With no <code>WithBaseURL</code> override, the provider targets
+    <code>https://api.deepgram.com/v1</code>. Pre-recorded transcription
+    requests go to <code>{`{BaseURL}/listen`}</code>.
+  </p>
+  <p>
+    WebSocket streaming
+    (<code>wss://api.deepgram.com/v1/listen</code>) is on the
+    <a href="/llmrouter/docs/project/roadmap#v0-4">v0.4 roadmap</a>;
+    v0.3 supports pre-recorded transcription only. Setting
+    <code>TranscribeRequest.Stream = true</code> currently falls back
+    to a single final segment.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := deepgram.New(
+    llmrouter.WithAPIKey(os.Getenv("DEEPGRAM_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    Authentication is via the <code>Authorization: Token &lt;key&gt;</code>
+    header — note the <code>Token</code> scheme, not <code>Bearer</code>.
+    The provider sets this automatically.
+  </p>
+
+  <h2 id="models">Models</h2>
+  <ul>
+    <li>
+      <code>nova-3</code> — latest production model (May 2025). Highest
+      accuracy, lowest latency. Recommended default. 36 languages.
+    </li>
+    <li>
+      <code>nova-2</code> — previous generation. Wider language
+      coverage in some edge cases.
+    </li>
+    <li>
+      <code>nova-2-meeting</code>, <code>nova-2-phonecall</code>,
+      <code>nova-2-finance</code>, <code>nova-2-medical</code> —
+      domain-tuned variants of <code>nova-2</code>.
+    </li>
+    <li>
+      <code>enhanced</code> — older non-Nova model. Still supported.
+    </li>
+    <li>
+      <code>base</code> — legacy model. Lowest cost, lowest accuracy.
+    </li>
+  </ul>
+
+  <h2 id="language-codes">Language codes</h2>
+  <p>
+    Deepgram uses ISO-639-1 codes plus optional regional suffixes
+    (<code>en-US</code>, <code>en-GB</code>, <code>es-419</code>,
+    <code>pt-BR</code>, etc.). The library passes
+    <code>TranscribeRequest.Language</code> through unchanged — set
+    either the bare ISO code or the regional variant. Empty means
+    "auto-detect."
+  </p>
+
+  <h2 id="response-format">Response format</h2>
+  <p>
+    Deepgram returns JSON with channels, alternatives, and per-word
+    timing. The library always emits
+    <a href="/llmrouter/docs/api/audio#transcript-segment"><code>TranscriptSegment</code></a>s.
+    With <code>ResponseFormat=""</code> or <code>"json"</code>, you get
+    one <code>Final=true</code> segment with the concatenated transcript
+    and <code>Words</code> populated. With
+    <code>ResponseFormat="verbose_json"</code>, the library splits per
+    Deepgram utterance into multiple segments.
+  </p>
+
+  <h2 id="example">Full STT example</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/deepgram"
+)
+
+func main() {
+    p, err := deepgram.New(llmrouter.WithAPIKey(os.Getenv("DEEPGRAM_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    f, err := os.Open("call.wav")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer f.Close()
+
+    stream, err := p.Transcribe(context.Background(), llmrouter.TranscribeRequest{
+        Model:          "nova-3",
+        Audio:          f,
+        AudioFormat:    "audio/wav",
+        Language:       "en-US",
+        ResponseFormat: "verbose_json",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for seg := range stream.Segments() {
+        fmt.Printf("[%s] (%.2f) %s\\n", seg.Start, seg.Confidence, seg.Text)
+        for _, w := range seg.Words {
+            fmt.Printf("  %-20s @ %s (%.2f)\\n", w.Word, w.Start, w.Confidence)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+
+  <h2 id="diarization">Speaker diarization</h2>
+  <p>
+    Deepgram's <code>diarize</code> parameter is not on the typed
+    surface. Pass it via <code>Raw</code>:
+  </p>
+  <Code lang="go" code={`raw := []byte(` + "`" + `{
+  "diarize": true,
+  "smart_format": true,
+  "punctuate": true,
+  "utterances": true
+}` + "`" + `)
+
+stream, err := p.Transcribe(ctx, llmrouter.TranscribeRequest{
+    Model:       "nova-3",
+    Audio:       f,
+    AudioFormat: "audio/wav",
+    Language:    "en",
+    Raw:         raw,
+})
+
+// Per-word speaker ids land on segment.Raw.
+for seg := range stream.Segments() {
+    fmt.Println(string(seg.Raw))
+}`} />
+  <p>
+    Diarized output puts <code>speaker</code> on each word in the wire
+    JSON. Read it off <code>TranscriptSegment.Raw</code> until the
+    typed surface grows a <code>SpeakerID</code> field (tracked in the
+    v0.4 work).
+  </p>
+
+  <h2 id="confidence">Confidence scores</h2>
+  <p>
+    Deepgram returns per-word confidence and an aggregate per-segment
+    confidence. Both are populated:
+  </p>
+  <ul>
+    <li><code>TranscriptSegment.Confidence</code> — aggregate over the segment, in [0, 1].</li>
+    <li><code>TranscriptWord.Confidence</code> — per-word, in [0, 1].</li>
+  </ul>
+
+  <h2 id="features-raw">Other features via Raw</h2>
+  <p>
+    Deepgram has a large feature surface; the typed
+    <code>TranscribeRequest</code> models the common ones, and the rest
+    travel through <code>Raw</code>:
+  </p>
+  <ul>
+    <li><code>smart_format</code> — automatic punctuation and number formatting.</li>
+    <li><code>punctuate</code> — add punctuation without smart formatting.</li>
+    <li><code>profanity_filter</code> — replace profanity with asterisks.</li>
+    <li><code>redact</code> — redact PII (<code>pci</code>, <code>numbers</code>, <code>ssn</code>).</li>
+    <li><code>summarize</code> — append a summary segment.</li>
+    <li><code>detect_topics</code> — surface topic labels.</li>
+    <li><code>keywords</code> — boost specific terms.</li>
+    <li><code>search</code> — return matches for query phrases.</li>
+  </ul>
+  <p>
+    All of these survive byte-passthrough and surface on
+    <code>segment.Raw</code>.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "deepgram"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — bad or missing API key.</li>
+    <li><code>402</code> — insufficient credit.</li>
+    <li><code>400</code> — unsupported model + language combination, or invalid <code>AudioFormat</code>.</li>
+    <li><code>429</code> — concurrent-request limit hit.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>v0.3: pre-recorded only.</strong> WebSocket streaming
+      lands in v0.4. The <code>Stream</code> flag is accepted but the
+      provider currently treats it as a no-op on pre-recorded audio.
+    </li>
+    <li>
+      <strong>No TTS.</strong> Deepgram offers an Aura TTS endpoint; in
+      v0.3, <code>llmrouter</code> only wraps the STT side. Consider
+      <a href="/llmrouter/docs/providers/cartesia">Cartesia</a> or
+      <a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a> for
+      TTS.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/audio">Audio concept</a> — Transcriber semantics.</li>
+    <li><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs Scribe</a> — alternative STT with diarization.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI Whisper</a> — alternative STT.</li>
+  </ul>
+</DocsLayout>

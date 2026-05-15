@@ -1,0 +1,129 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Cohere Provider">
+  <h1>Cohere Provider</h1>
+  <p>
+    The <code>cohere</code> provider implements
+    <a href="/llmrouter/docs/api/llmrouter#provider"><code>Provider</code></a>
+    (chat via the Command family) and
+    <a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>
+    (Embed v3 family). No TTS, no STT. Cohere's embedding models are
+    particularly strong for multilingual retrieval and offer
+    asymmetric query/document encoding.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/cohere"
+)`} />
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := cohere.New(
+    llmrouter.WithAPIKey(os.Getenv("COHERE_API_KEY")),
+)`} />
+  <p>
+    Default endpoint: <code>https://api.cohere.com/v2</code>. Auth is
+    via <code>Authorization: Bearer &lt;key&gt;</code>.
+  </p>
+
+  <h2 id="chat-models">Chat models</h2>
+  <ul>
+    <li><code>command-r-plus</code> — flagship, 128K context, tool use.</li>
+    <li><code>command-r</code> — balanced.</li>
+    <li><code>command-r7b</code> — small, fast, on-prem-friendly.</li>
+    <li><code>command-light</code> — legacy lightweight.</li>
+  </ul>
+
+  <h2 id="chat-example">Chat example</h2>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "command-r-plus",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are concise."),
+        llmrouter.TextMessage("user", "What is RAG?"),
+    },
+})
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+}`} />
+  <p>
+    The provider translates the OpenAI <code>messages</code> array
+    into Cohere's v2 <code>/chat</code> body (Cohere v2 also uses
+    <code>messages</code>, but with a slightly different content-block
+    shape that the library rewrites). The SSE stream is translated
+    back to <code>llmrouter.Chunk</code>.
+  </p>
+
+  <h2 id="embeddings">Embeddings</h2>
+  <ul>
+    <li><code>embed-english-v3.0</code> — 1024 dims, English.</li>
+    <li><code>embed-multilingual-v3.0</code> — 1024 dims, 100+ languages.</li>
+    <li><code>embed-english-light-v3.0</code> — 384 dims, cheaper.</li>
+    <li><code>embed-multilingual-light-v3.0</code> — 384 dims, cheaper.</li>
+  </ul>
+  <Code lang="go" code={`resp, err := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model:    "embed-english-v3.0",
+    Inputs:   []string{"What is RAG?"},
+    TaskType: "RETRIEVAL_QUERY", // → Cohere input_type "search_query"
+})`} />
+
+  <h3 id="input-type">input_type mapping</h3>
+  <p>
+    Cohere's <code>input_type</code> is mandatory on v3 models. The
+    library derives it from <code>TaskType</code>:
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Canonical <code>TaskType</code></th>
+          <th class="text-left p-3 border-b border-border">Cohere <code>input_type</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>RETRIEVAL_QUERY</code></td><td class="p-3 border-b border-border"><code>search_query</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>RETRIEVAL_DOCUMENT</code></td><td class="p-3 border-b border-border"><code>search_document</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>CLASSIFICATION</code></td><td class="p-3 border-b border-border"><code>classification</code></td></tr>
+        <tr><td class="p-3"><code>CLUSTERING</code></td><td class="p-3"><code>clustering</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    When <code>TaskType</code> is empty, the provider defaults to
+    <code>search_document</code> to match Cohere's most common use
+    case.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "cohere"</code>.
+  </p>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>Trial vs. production keys.</strong> Trial keys are
+      heavily rate-limited; production keys live in the dashboard
+      under "API keys" → "Production."
+    </li>
+    <li>
+      <strong>input_type is required.</strong> Sending an embedding
+      request without it (i.e. with no <code>TaskType</code>) used to
+      400; the library now defaults to <code>search_document</code>.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/voyage">Voyage AI</a> — alternative embedding specialist.</li>
+    <li><a href="/llmrouter/docs/concepts/embeddings">Embeddings concept</a> — TaskType mapping table.</li>
+  </ul>
+</DocsLayout>

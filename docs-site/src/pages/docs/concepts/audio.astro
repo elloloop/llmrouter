@@ -1,0 +1,359 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Audio: TTS + STT">
+  <h1>Audio: TTS + STT</h1>
+  <p>
+    <code>llmrouter</code> models speech in two directions with two
+    separate interfaces: <code>Speaker</code> for text-to-speech (TTS)
+    and <code>Transcriber</code> for speech-to-text (STT). Each one is
+    independent of <code>Provider</code> (chat) and of
+    <code>Embedder</code>, so a provider package can implement any
+    subset — OpenAI implements all three, ElevenLabs implements both
+    audio interfaces but not chat, Deepgram implements only
+    <code>Transcriber</code>, Cartesia implements only
+    <code>Speaker</code>.
+  </p>
+
+  <h2 id="interfaces">The two interfaces</h2>
+  <Code lang="go" code={`type Speaker interface {
+    Speak(ctx context.Context, req SpeechRequest) (*AudioStream, error)
+}
+
+type Transcriber interface {
+    Transcribe(ctx context.Context, req TranscribeRequest) (*TranscriptStream, error)
+}`} />
+  <p>
+    Both return a stream handle with the same shape as
+    <a href="/llmrouter/docs/concepts/streaming-model"><code>Stream</code></a>:
+    a buffered channel, a terminal <code>Err()</code> error, a
+    <code>Cancel()</code> hook, and full <code>context.Context</code>
+    cancellation propagation. The lifecycle rules below are identical
+    to chat streaming — if you've used <code>CompletionStream</code>,
+    you already know how to use these.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Why streams for non-streaming providers.</strong> Some
+    vendors return the whole audio file or the whole transcript as a
+    single HTTP response. The library still wraps that response in an
+    <code>AudioStream</code> / <code>TranscriptStream</code> so the
+    consumer API is uniform — non-streaming responses simply arrive as
+    a single chunk or a single <code>Final=true</code> segment.
+  </aside>
+
+  <h2 id="tts">Text-to-speech (Speaker)</h2>
+
+  <h3 id="speech-request">SpeechRequest</h3>
+  <Code lang="go" code={`type SpeechRequest struct {
+    Model  string          // "tts-1", "tts-1-hd", "eleven_turbo_v2_5", "sonic-2"
+    Input  string          // text to synthesise; required
+    Voice  string          // "alloy", "echo", or a vendor voice id
+    Format string          // "mp3" (default), "opus", "aac", "flac", "wav", "pcm", "ulaw"
+    Speed  *float64        // 0.25-4.0; nil for default
+    Stream bool            // request chunked audio
+    Raw    json.RawMessage // optional byte passthrough; Model + Input are overlaid
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      Provider-specific TTS model id. OpenAI:
+      <code>tts-1</code> / <code>tts-1-hd</code>. ElevenLabs:
+      <code>eleven_turbo_v2_5</code>, <code>eleven_multilingual_v2</code>.
+      Cartesia: <code>sonic-2</code>.
+    </dd>
+    <dt><code>Voice</code></dt>
+    <dd>
+      Voice identifier. OpenAI's seven canonical voices are
+      <code>alloy</code>, <code>echo</code>, <code>fable</code>,
+      <code>onyx</code>, <code>nova</code>, <code>shimmer</code>,
+      <code>coral</code>. ElevenLabs and Cartesia use opaque voice IDs
+      (often UUID-shaped) — see those providers' docs.
+    </dd>
+    <dt><code>Format</code></dt>
+    <dd>
+      Library-canonical audio format. The provider maps this to the
+      upstream's native enum (OpenAI uses
+      <code>response_format</code> directly; ElevenLabs uses its
+      <code>output_format</code> codes such as
+      <code>mp3_44100_128</code>). Empty defaults to
+      <code>mp3</code>.
+    </dd>
+    <dt><code>Speed</code></dt>
+    <dd>
+      Playback-rate multiplier. <code>1.0</code> is normal,
+      <code>0.5</code> is half speed, <code>2.0</code> is double.
+      Providers clamp to their supported range.
+    </dd>
+    <dt><code>Stream</code></dt>
+    <dd>
+      When <code>true</code>, the upstream produces chunked audio (HTTP
+      chunked transfer or SSE depending on vendor) and
+      <code>AudioStream.Chunks()</code> emits many
+      <code>AudioChunk</code>s. When <code>false</code>, the entire
+      audio arrives as a single chunk.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough escape hatch for fields the typed surface doesn't
+      model — voice-stability parameters, style controls, language
+      hints.
+    </dd>
+  </dl>
+
+  <h3 id="audio-stream">AudioStream</h3>
+  <Code lang="go" code={`type AudioStream struct {
+    ContentType string // "audio/mpeg", "audio/opus", "audio/wav", "audio/pcm", ...
+    // unexported: chunks chan, cancel func, errMu chan, err error
+}
+
+func (s *AudioStream) Chunks() <-chan AudioChunk
+func (s *AudioStream) Err() error
+func (s *AudioStream) Cancel()`} />
+  <p>
+    <code>ContentType</code> is populated by the producer before any
+    chunks are emitted, so it is safe to read after the first chunk has
+    arrived. <code>Chunks()</code> is single-consumer; <code>Err()</code>
+    blocks until the producer finishes; <code>Cancel()</code> is
+    idempotent.
+  </p>
+
+  <h3 id="audio-chunk">AudioChunk</h3>
+  <Code lang="go" code={`type AudioChunk struct {
+    Data []byte // decoded audio bytes for this frame
+    Raw  []byte // original wire bytes (often == Data)
+}`} />
+
+  <h3 id="tts-example">Full TTS example</h3>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "io"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.Speak(context.Background(), llmrouter.SpeechRequest{
+        Model:  "tts-1",
+        Input:  "The quick brown fox jumps over the lazy dog.",
+        Voice:  "nova",
+        Format: "mp3",
+        Stream: true,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    out, err := os.Create("out.mp3")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer out.Close()
+
+    for chunk := range stream.Chunks() {
+        if _, err := out.Write(chunk.Data); err != nil {
+            stream.Cancel()
+            log.Fatal(err)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("wrote out.mp3 (%s)", stream.ContentType)
+    _ = io.EOF // for the import if unused
+}`} />
+
+  <h2 id="stt">Speech-to-text (Transcriber)</h2>
+
+  <h3 id="transcribe-request">TranscribeRequest</h3>
+  <Code lang="go" code={`type TranscribeRequest struct {
+    Model          string          // "whisper-1", "nova-3", "scribe_v1"
+    Audio          io.Reader       // binary audio source; required
+    AudioFormat    string          // "audio/mpeg", "audio/wav", "audio/webm", ...
+    Filename       string          // optional metadata for multipart-upload providers
+    Language       string          // ISO-639-1 hint ("en", "fr", ...)
+    Prompt         string          // context hint (Whisper, ElevenLabs)
+    ResponseFormat string          // "json" (default), "text", "srt", "vtt", "verbose_json"
+    Temperature    *float64        // Whisper sampling temperature
+    Stream         bool            // request live transcription
+    Raw            json.RawMessage // optional byte passthrough; Model is overlaid
+}`} />
+  <dl>
+    <dt><code>Audio</code></dt>
+    <dd>
+      Any <code>io.Reader</code>. The library reads until
+      <code>EOF</code>. For retries, you must rewind yourself — the
+      library does not buffer the input.
+    </dd>
+    <dt><code>AudioFormat</code></dt>
+    <dd>
+      Source MIME type. Some providers sniff (Whisper);
+      others require an explicit format. When in doubt, set it.
+    </dd>
+    <dt><code>Filename</code></dt>
+    <dd>
+      Optional. Used by multipart-upload providers (OpenAI Whisper,
+      Azure). Defaults to <code>"audio"</code> + an extension derived
+      from <code>AudioFormat</code> when empty.
+    </dd>
+    <dt><code>Language</code></dt>
+    <dd>
+      ISO-639-1 hint. Speeds up detection and improves accuracy on
+      Whisper-class models. Leave empty for automatic detection.
+    </dd>
+    <dt><code>Prompt</code></dt>
+    <dd>
+      Optional priming context. Whisper uses this as a glossary of
+      proper nouns or domain terms.
+    </dd>
+    <dt><code>ResponseFormat</code></dt>
+    <dd>
+      <code>json</code> (default) → segments with text only.
+      <code>text</code> → plain string in a single segment.
+      <code>srt</code> / <code>vtt</code> → subtitle wire format,
+      surfaced as one segment with the captions string in
+      <code>Text</code>. <code>verbose_json</code> → per-word timing
+      and confidence in <code>Words</code>. The library always emits
+      <code>TranscriptSegment</code>s regardless.
+    </dd>
+    <dt><code>Stream</code></dt>
+    <dd>
+      Live transcription. Providers that don't support streaming send
+      a single final segment regardless of this field.
+    </dd>
+  </dl>
+
+  <h3 id="transcript-stream">TranscriptStream</h3>
+  <Code lang="go" code={`type TranscriptStream struct {
+    // unexported: segments chan, cancel func, errMu chan, err error
+}
+
+func (s *TranscriptStream) Segments() <-chan TranscriptSegment
+func (s *TranscriptStream) Err() error
+func (s *TranscriptStream) Cancel()`} />
+
+  <h3 id="transcript-segment">TranscriptSegment</h3>
+  <Code lang="go" code={`type TranscriptSegment struct {
+    Text       string             // transcribed text for this segment
+    Final      bool               // true on the terminal segment
+    Start, End time.Duration      // timestamps relative to audio start
+    Words      []TranscriptWord   // per-word timing (verbose_json, Deepgram, ElevenLabs)
+    Confidence float32            // per-segment confidence in [0,1]
+    Raw        json.RawMessage    // original wire-format JSON
+}`} />
+  <p>
+    Streaming providers emit interim segments
+    (<code>Final=false</code>) followed by exactly one final segment.
+    Non-streaming providers emit one <code>Final=true</code> segment
+    and close the channel.
+  </p>
+
+  <h3 id="stt-example">Full STT example</h3>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    f, err := os.Open("meeting.mp3")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer f.Close()
+
+    stream, err := p.Transcribe(context.Background(), llmrouter.TranscribeRequest{
+        Model:          "whisper-1",
+        Audio:          f,
+        AudioFormat:    "audio/mpeg",
+        Filename:       "meeting.mp3",
+        Language:       "en",
+        ResponseFormat: "verbose_json",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for seg := range stream.Segments() {
+        fmt.Printf("[%s -> %s] %s\\n", seg.Start, seg.End, seg.Text)
+        for _, w := range seg.Words {
+            fmt.Printf("  %-20s @ %s (%.2f)\\n", w.Word, w.Start, w.Confidence)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+
+  <h2 id="format-normalisation">Cross-vendor format normalisation</h2>
+  <p>
+    Vendors disagree on how to spell audio formats. The library uses
+    short library-canonical strings and translates per-provider on the
+    way out, and surfaces canonical MIME types on
+    <code>AudioStream.ContentType</code> on the way in.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Library <code>Format</code></th>
+          <th class="text-left p-3 border-b border-border">MIME type</th>
+          <th class="text-left p-3 border-b border-border">OpenAI</th>
+          <th class="text-left p-3 border-b border-border">ElevenLabs</th>
+          <th class="text-left p-3 border-b border-border">Cartesia</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>mp3</code></td><td class="p-3 border-b border-border"><code>audio/mpeg</code></td><td class="p-3 border-b border-border"><code>mp3</code></td><td class="p-3 border-b border-border"><code>mp3_44100_128</code></td><td class="p-3 border-b border-border"><code>mp3</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>opus</code></td><td class="p-3 border-b border-border"><code>audio/opus</code></td><td class="p-3 border-b border-border"><code>opus</code></td><td class="p-3 border-b border-border">(unsupported)</td><td class="p-3 border-b border-border"><code>opus</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>flac</code></td><td class="p-3 border-b border-border"><code>audio/flac</code></td><td class="p-3 border-b border-border"><code>flac</code></td><td class="p-3 border-b border-border">(unsupported)</td><td class="p-3 border-b border-border">(unsupported)</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>wav</code></td><td class="p-3 border-b border-border"><code>audio/wav</code></td><td class="p-3 border-b border-border"><code>wav</code></td><td class="p-3 border-b border-border"><code>pcm_16000</code></td><td class="p-3 border-b border-border"><code>wav</code></td></tr>
+        <tr><td class="p-3"><code>pcm</code></td><td class="p-3"><code>audio/pcm</code></td><td class="p-3"><code>pcm</code></td><td class="p-3"><code>pcm_22050</code></td><td class="p-3"><code>raw</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="cancellation">Cancellation and timeouts</h2>
+  <p>
+    Cancelling the <code>ctx</code> passed to <code>Speak</code> or
+    <code>Transcribe</code> closes the upstream HTTP request and
+    unwinds the producer. <code>stream.Cancel()</code> is equivalent
+    and idempotent. For long audio files, set a
+    <code>WithTimeout</code> on the provider (default is 120 seconds)
+    or wrap the <code>ctx</code> with
+    <code>context.WithTimeout</code>.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/api/audio">API reference: Speaker, Transcriber, all types</a></li>
+    <li><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs provider</a> — TTS + STT only.</li>
+    <li><a href="/llmrouter/docs/providers/deepgram">Deepgram provider</a> — STT only, Nova-3.</li>
+    <li><a href="/llmrouter/docs/providers/cartesia">Cartesia provider</a> — TTS only, real-time Sonic.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — TTS + Whisper STT.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming-model">Streaming model</a> — same lifecycle as chat.</li>
+  </ul>
+</DocsLayout>

@@ -1,0 +1,170 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Google Gemini (AI Studio) Provider">
+  <h1>Google Gemini (AI Studio) Provider</h1>
+  <p>
+    The <code>gemini</code> provider talks to Google's
+    <em>AI Studio</em> endpoint — the API-key-based, consumer-facing
+    side of Gemini. Use this provider for prototypes, side projects,
+    and small-scale production where IAM / VPC-SC are not required.
+    For project-scoped quota and enterprise controls, use the
+    <a href="/llmrouter/docs/providers/vertex">Vertex AI</a> provider
+    instead.
+  </p>
+  <p>
+    Capabilities: chat
+    (<a href="/llmrouter/docs/api/llmrouter#provider"><code>Provider</code></a>),
+    embeddings
+    (<a href="/llmrouter/docs/api/embeddings#embedder"><code>Embedder</code></a>),
+    TTS (<a href="/llmrouter/docs/api/audio#speaker"><code>Speaker</code></a>),
+    and STT via audio understanding
+    (<a href="/llmrouter/docs/api/audio#transcriber"><code>Transcriber</code></a>).
+    Gemini is the only chat-first provider that ships all four
+    interfaces in v0.3.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/gemini"
+)`} />
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := gemini.New(
+    llmrouter.WithAPIKey(os.Getenv("GOOGLE_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    Default endpoint:
+    <code>https://generativelanguage.googleapis.com/v1beta</code>.
+    Auth is via the <code>x-goog-api-key</code> header.
+  </p>
+
+  <h2 id="models">Models</h2>
+  <ul>
+    <li><code>gemini-2.0-flash</code> — fast, multimodal, recommended default.</li>
+    <li><code>gemini-2.0-flash-lite</code> — cheapest, text-only.</li>
+    <li><code>gemini-2.5-pro</code> — frontier reasoning, longer context.</li>
+    <li><code>gemini-2.5-flash</code> — balanced cost/quality.</li>
+    <li><code>text-embedding-004</code> / <code>text-embedding-005</code> — embeddings.</li>
+  </ul>
+
+  <h2 id="chat-example">Chat example</h2>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "gemini-2.0-flash",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "Reply in haiku."),
+        llmrouter.TextMessage("user", "Describe a server room."),
+    },
+})
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+}`} />
+  <p>
+    The provider translates the OpenAI-shaped request into Gemini's
+    <code>{`{contents:[{role, parts:[{text}]}]}`}</code> body and the
+    <code>:streamGenerateContent</code> SSE stream back to
+    <code>llmrouter.Chunk</code>.
+  </p>
+
+  <h2 id="embeddings">Embeddings</h2>
+  <Code lang="go" code={`resp, err := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model:    "text-embedding-005",
+    Inputs:   []string{"What is a transformer?"},
+    TaskType: "RETRIEVAL_QUERY",
+})`} />
+  <p>
+    <code>TaskType</code> is passed through verbatim because Gemini
+    uses the canonical Vertex vocabulary.
+  </p>
+
+  <h2 id="tts">TTS</h2>
+  <p>
+    Gemini 2.0 Flash supports speech generation via the same model
+    endpoint. The provider wraps it behind <code>Speak</code>:
+  </p>
+  <Code lang="go" code={`stream, err := p.Speak(ctx, llmrouter.SpeechRequest{
+    Model: "gemini-2.0-flash",
+    Input: "Hello from Gemini.",
+    Voice: "Aoede",
+})
+
+out, _ := os.Create("gemini.wav")
+defer out.Close()
+for chunk := range stream.Chunks() {
+    out.Write(chunk.Data)
+}`} />
+  <p>
+    Available voice names depend on the model version; consult
+    Google's docs. The library does not validate voice names locally.
+  </p>
+
+  <h2 id="stt">STT (audio understanding)</h2>
+  <p>
+    Gemini accepts audio as an input modality and can return a
+    transcript. The provider wraps this behind <code>Transcribe</code>:
+  </p>
+  <Code lang="go" code={`f, _ := os.Open("meeting.mp3")
+defer f.Close()
+
+stream, err := p.Transcribe(ctx, llmrouter.TranscribeRequest{
+    Model:       "gemini-2.0-flash",
+    Audio:       f,
+    AudioFormat: "audio/mpeg",
+    Prompt:      "Transcribe this audio verbatim.",
+})
+
+for seg := range stream.Segments() {
+    fmt.Println(seg.Text)
+}`} />
+  <p>
+    Note this is not a dedicated STT model — it's Gemini being asked
+    to transcribe audio it understands. Accuracy is solid for
+    English; for production STT prefer
+    <a href="/llmrouter/docs/providers/deepgram">Deepgram Nova</a> or
+    OpenAI Whisper.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "gemini"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>403</code> — API key not enabled for the model.</li>
+    <li><code>400</code> — safety filter (response body has <code>promptFeedback</code>).</li>
+    <li><code>429</code> — per-API-key rate limit.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>API in v1beta.</strong> Gemini's REST API is still in
+      beta; expect occasional non-breaking changes upstream.
+    </li>
+    <li>
+      <strong>Safety filters.</strong> AI Studio applies a more
+      conservative default than Vertex. Tune via
+      <code>safetySettings</code> on <code>Raw</code>.
+    </li>
+    <li>
+      <strong>No SLA on free tier.</strong> For production, either pay
+      per-token or move to Vertex.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/vertex">Vertex AI provider</a> — same Gemini models, enterprise auth.</li>
+    <li><a href="/llmrouter/docs/concepts/audio">Audio concept</a> — Speaker / Transcriber semantics.</li>
+  </ul>
+</DocsLayout>

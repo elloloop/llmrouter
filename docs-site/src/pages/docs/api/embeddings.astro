@@ -1,0 +1,141 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Embeddings">
+  <h1>Package llmrouter — Embeddings</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/embeddings.go"><code>embeddings.go</code></a>.
+    One interface — <a href="#embedder"><code>Embedder</code></a> —
+    plus the request and response types it speaks.
+  </p>
+  <p>
+    Import path:
+    <Code lang="go" code={`import "github.com/elloloop/llmrouter"`} />
+  </p>
+
+  <h2 id="embedder">Embedder</h2>
+  <p>
+    The embedding contract. Implementations are concurrency-safe.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/embeddings.go#L11">embeddings.go#L11</a>.
+  </p>
+  <Code lang="go" code={`type Embedder interface {
+    Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
+}`} />
+  <p>
+    <code>Embed</code> is a single-round-trip call — there is no
+    streaming, no <code>Stream</code> handle. A non-nil error is
+    returned on synchronous failures (bad config, non-2xx HTTP
+    status, malformed response body).
+  </p>
+
+  <h2 id="embed-request">EmbedRequest</h2>
+  <p>
+    The polymorphic embedding-request shape. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/embeddings.go#L17">embeddings.go#L17</a>.
+  </p>
+  <Code lang="go" code={`type EmbedRequest struct {
+    Model          string          // model id; e.g. "text-embedding-3-small"
+    Inputs         []string        // texts to embed; index-aligned with response
+    Dimensions     int             // optional lower-dim output (OpenAI v3, Voyage, ...)
+    TaskType       string          // task hint, normalised cross-vendor
+    EncodingFormat string          // "float" (default) or "base64"
+    User           string          // OpenAI-style end-user id
+    Raw            json.RawMessage // byte passthrough; Model is overlaid
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      The model identifier. The literal string is sent to the
+      upstream; providers don't alias.
+    </dd>
+    <dt><code>Inputs</code></dt>
+    <dd>
+      The list of strings to embed. <code>EmbedResponse.Embeddings</code>
+      is index-aligned with this slice.
+    </dd>
+    <dt><code>Dimensions</code></dt>
+    <dd>
+      Requests a lower-dimensional output. Supported by OpenAI
+      <code>text-embedding-3-*</code>, Voyage, and a few others. Zero
+      means "use the model default."
+    </dd>
+    <dt><code>TaskType</code></dt>
+    <dd>
+      Canonical task hint
+      (<code>RETRIEVAL_QUERY</code> / <code>RETRIEVAL_DOCUMENT</code> /
+      <code>SEMANTIC_SIMILARITY</code> / <code>CLASSIFICATION</code> /
+      <code>CLUSTERING</code> / <code>QUESTION_ANSWERING</code> /
+      <code>FACT_VERIFICATION</code>). Providers translate to their
+      native vocabulary (Cohere <code>input_type</code>, Voyage
+      <code>input_type</code>). See
+      <a href="/llmrouter/docs/concepts/embeddings#task-type-mapping">cross-vendor task-type mapping</a>.
+    </dd>
+    <dt><code>EncodingFormat</code></dt>
+    <dd>
+      <code>"float"</code> (default) or <code>"base64"</code>. Only
+      affects wire format; the response always contains
+      <code>[][]float32</code>.
+    </dd>
+    <dt><code>User</code></dt>
+    <dd>
+      OpenAI-style end-user identifier for telemetry and abuse
+      tracking. Forwarded by OpenAI / Azure; ignored elsewhere.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough escape hatch. The library overlays
+      <code>Model</code>; everything else (Cohere's
+      <code>embedding_types</code>, Voyage's <code>truncation</code>,
+      Titan's <code>normalize</code>) survives.
+    </dd>
+  </dl>
+
+  <h2 id="embed-response">EmbedResponse</h2>
+  <p>
+    The embedding-response shape. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/embeddings.go#L51">embeddings.go#L51</a>.
+  </p>
+  <Code lang="go" code={`type EmbedResponse struct {
+    Model      string          // resolved model id echoed by the provider
+    Embeddings [][]float32     // index-aligned with EmbedRequest.Inputs
+    Usage      *Usage          // token counts; may be nil
+    Raw        json.RawMessage // original wire-format JSON
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      The model id the upstream actually used. May include a version
+      suffix (<code>text-embedding-3-small-2024</code>).
+    </dd>
+    <dt><code>Embeddings</code></dt>
+    <dd>
+      One vector per input.
+      <code>len(Embeddings) == len(req.Inputs)</code> always — the
+      library reorders if the wire response is out-of-order tagged
+      (Cohere v1 was, v3 is not).
+    </dd>
+    <dt><code>Usage</code></dt>
+    <dd>
+      Token usage. Embedding endpoints populate
+      <code>PromptTokens</code> (sometimes also
+      <code>TotalTokens</code>). May be nil.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Original wire bytes for callers that want to forward the
+      response without re-marshaling.
+    </dd>
+  </dl>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/embeddings">Embeddings concept</a> — narrative overview with examples.</li>
+    <li><a href="/llmrouter/docs/providers/voyage">Voyage AI provider</a> — embedding specialist.</li>
+    <li><a href="/llmrouter/docs/providers/cohere">Cohere provider</a> — input-type semantics.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — default embedding backend.</li>
+  </ul>
+</DocsLayout>
