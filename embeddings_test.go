@@ -26,9 +26,11 @@ func (f *fakeEmbedder) Embed(ctx context.Context, req llmrouter.EmbedRequest) (*
 var _ llmrouter.Embedder = (*fakeEmbedder)(nil)
 
 func TestEmbedder_InterfaceSatisfied(t *testing.T) {
-	var e llmrouter.Embedder = &fakeEmbedder{}
-	if e == nil {
-		t.Fatal("nil Embedder")
+	// Compile-time assertion already at package scope (line 26);
+	// this runtime test exercises a non-nil value via the interface.
+	var e llmrouter.Embedder = &fakeEmbedder{resp: &llmrouter.EmbedResponse{}}
+	if _, err := e.Embed(context.Background(), llmrouter.EmbedRequest{Model: "m"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
