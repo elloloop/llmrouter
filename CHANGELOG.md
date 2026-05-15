@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/elloloop/llmrouter/compare/v0.2.0...v0.3.0) (2026-05-15)
+
+
+### Features
+
+* add Speaker, Transcriber, Embedder interfaces + root types ([a8482c3](https://github.com/elloloop/llmrouter/commit/a8482c3b0aeeaf44745df39588b4e878a27b271c))
+* **bedrock:** embeddings via InvokeModel for Titan + Cohere ([de3ad80](https://github.com/elloloop/llmrouter/commit/de3ad80dee568f2db5cb132c8598a291ca38a05a))
+* **cartesia:** TTS (Speaker) for real-time voice agents ([10d7301](https://github.com/elloloop/llmrouter/commit/10d73010d5412b843d9baf3c96395af15100b560))
+* **cohere,mistral,together:** embeddings ([e28ba12](https://github.com/elloloop/llmrouter/commit/e28ba121c5c675ecc4a20e6263acd22370cf80d3))
+* **deepgram:** STT via Nova-3 (Transcriber) ([db17bed](https://github.com/elloloop/llmrouter/commit/db17bedd790329a3d23a4f9d20c0828aa3cc1185))
+* **elevenlabs:** TTS (Speaker) + STT (Transcriber) ([91ebbf7](https://github.com/elloloop/llmrouter/commit/91ebbf7669f44aef3a09f798813f5097c2e26e32))
+* **gemini,vertex:** audio (TTS+STT) + embeddings ([1228a66](https://github.com/elloloop/llmrouter/commit/1228a660fd283b2fee4de14a5eb313afea1b3e47))
+* **groq:** Whisper STT via OpenAI-compatible audio endpoint ([0881281](https://github.com/elloloop/llmrouter/commit/08812817c142d1a7f9868a5e4eb3cfbf4c1620d3))
+* **openai,azureopenai:** audio (TTS+STT) + embeddings ([2af970e](https://github.com/elloloop/llmrouter/commit/2af970e8e8188decec5ff4f16ea22db82a3323ad))
+* **voyage:** Voyage AI embeddings (Embedder) ([a4a3f6a](https://github.com/elloloop/llmrouter/commit/a4a3f6a0ddeded4fad13dac0f6a14390531a0573))
+
 ## [0.2.0](https://github.com/elloloop/llmrouter/compare/v0.1.1...v0.2.0) (2026-05-15)
 
 
