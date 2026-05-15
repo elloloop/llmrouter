@@ -88,12 +88,16 @@ func TestNew_InvalidCredentialsJSON(t *testing.T) {
 }
 
 func TestNew_Succeeds(t *testing.T) {
-	// Without WithCredentialsJSON, genai's vertex backend won't try to
-	// fetch tokens until a request is made, so construction should succeed
-	// even in test envs without ADC. (genai.NewClient itself does not
-	// short-circuit; it accepts the project/location and defers auth.)
+	// genai.NewClient resolves Application Default Credentials eagerly. CI
+	// runners don't have ADC, so this test only exercises a real successful
+	// construction when local credentials happen to be present (e.g. during
+	// development). Skip cleanly otherwise — the option-storage and
+	// validation tests cover the rest of New's behaviour.
 	p, err := New(WithProject("my-proj"), WithRegion("us-central1"))
 	if err != nil {
+		if strings.Contains(err.Error(), "credentials") {
+			t.Skipf("skipping: no ADC available (%v)", err)
+		}
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if p == nil {
