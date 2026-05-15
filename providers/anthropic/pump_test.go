@@ -44,25 +44,9 @@ func TestMapStopReason_Table(t *testing.T) {
 // handleEvent — message_start
 // ---------------------------------------------------------------------------
 
-func newHooks() (sent []llmrouter.Chunk, finishErr *error, hooks llmrouter.ProducerHooks) {
-	var captured []llmrouter.Chunk
-	var fErr error
-	stream, _, _ := llmrouter.NewStream(context.Background())
-	_ = stream
-	// We capture chunks via a synchronous Send shim rather than reading
-	// from a Stream channel to keep these tests pure-unit.
-	hooks = llmrouter.ProducerHooks{
-		Send: func(c llmrouter.Chunk) bool {
-			captured = append(captured, c)
-			return true
-		},
-		Finish: func(err error) { fErr = err },
-	}
-	return captured, &fErr, hooks
-}
-
-// captureHooks is a simpler helper that returns the sent chunks (slice
-// pointer so callers see the appends made by Send).
+// captureHooks builds a synchronous ProducerHooks pair for unit-testing
+// handleEvent in isolation. Returns a pointer to the slice of captured
+// chunks so callers see the appends made by Send.
 func captureHooks() (*[]llmrouter.Chunk, llmrouter.ProducerHooks) {
 	var sent []llmrouter.Chunk
 	cancelled := false
