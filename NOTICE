@@ -1,0 +1,10 @@
+llmrouter
+Copyright 2026 elloloop contributors
+
+The OpenAI and Anthropic provider implementations were originally written
+for the Kite AI Router (codename: Tollgate) project at tinykite-co/monorepo
+and extracted to this repository in May 2026.
+
+This product includes software developed at:
+- The Go Authors (https://golang.org), under BSD-3-Clause
+- Google LLC (github.com/google/uuid), under BSD-3-Clause
