@@ -745,6 +745,224 @@ func TestNew_PropagatesOptionError(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// errorPayload — recognise in-band SSE error envelopes
+// ---------------------------------------------------------------------------
+
+func TestErrorPayload_RecognisedShapes(t *testing.T) {
+	cases := []struct {
+		name        string
+		payload     string
+		wantIsErr   bool
+		wantContain string
+	}{
+		{
+			"canonical-object-with-message",
+			`{"error":{"message":"context overflow","type":"context_length_exceeded","code":"x"}}`,
+			true,
+			"context overflow",
+		},
+		{
+			"canonical-object-type-prefix",
+			`{"error":{"message":"too long","type":"context_length_exceeded"}}`,
+			true,
+			"context_length_exceeded: too long",
+		},
+		{
+			"canonical-object-type-only",
+			`{"error":{"type":"overloaded_error"}}`,
+			true,
+			"overloaded_error",
+		},
+		{
+			"canonical-object-code-only",
+			`{"error":{"code":"rate_limited"}}`,
+			true,
+			"rate_limited",
+		},
+		{
+			"plain-string-error",
+			`{"error":"upstream rate limited"}`,
+			true,
+			"upstream rate limited",
+		},
+		{
+			"non-error-envelope-skipped",
+			`{"random":"data"}`,
+			false,
+			"",
+		},
+		{
+			"choices-shaped-skipped",
+			`{"choices":[]}`,
+			false,
+			"",
+		},
+		{
+			"non-object-skipped",
+			`[1,2,3]`,
+			false,
+			"",
+		},
+		{
+			"empty-skipped",
+			``,
+			false,
+			"",
+		},
+		{
+			"garbage-skipped",
+			`not json`,
+			false,
+			"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, isErr := errorPayload(tc.payload)
+			if isErr != tc.wantIsErr {
+				t.Fatalf("isErr = %v, want %v (msg=%q)", isErr, tc.wantIsErr, msg)
+			}
+			if tc.wantIsErr && !strings.Contains(msg, tc.wantContain) {
+				t.Errorf("msg = %q, want contains %q", msg, tc.wantContain)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSE — mid-stream error envelope terminates with ErrUpstream
+// ---------------------------------------------------------------------------
+
+func TestSSE_MidStreamErrorTerminatesStream(t *testing.T) {
+	validChunk := `data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}`
+	cases := []struct {
+		name         string
+		errorLine    string
+		wantBody     string
+		wantProvider string
+	}{
+		{
+			"canonical-error-object",
+			`data: {"error":{"message":"context overflow","type":"context_length_exceeded"}}`,
+			"context overflow",
+			"openai",
+		},
+		{
+			"plain-string-error",
+			`data: {"error":"upstream rate limited"}`,
+			"upstream rate limited",
+			"openai",
+		},
+		{
+			"type-only-error",
+			`data: {"error":{"type":"overloaded_error"}}`,
+			"overloaded_error",
+			"openai",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Build body: one valid chunk, then error envelope, then a
+			// trailing chunk the consumer should NEVER see because the
+			// stream must have terminated already.
+			body := strings.Join([]string{
+				validChunk,
+				``,
+				tc.errorLine,
+				``,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"AFTER"}}]}`,
+				``,
+				`data: [DONE]`,
+				``,
+			}, "\n")
+			srv := newFakeServer(t, body)
+			defer srv.Close()
+			p := newConfiguredProvider(t, srv.URL)
+			got, err := runStreamCollect(t, p)
+			if err == nil {
+				t.Fatalf("expected error, got nil (chunks=%d)", len(got))
+			}
+			var ue *llmrouter.ErrUpstream
+			if !errors.As(err, &ue) {
+				t.Fatalf("err = %T %v, want *ErrUpstream", err, err)
+			}
+			if ue.Provider != tc.wantProvider {
+				t.Errorf("Provider = %q, want %q", ue.Provider, tc.wantProvider)
+			}
+			if ue.StatusCode != 0 {
+				t.Errorf("StatusCode = %d, want 0 (mid-stream marker)", ue.StatusCode)
+			}
+			if !strings.Contains(ue.Body, tc.wantBody) {
+				t.Errorf("Body = %q, want contains %q", ue.Body, tc.wantBody)
+			}
+			// At least the first valid chunk must have been delivered.
+			if len(got) < 1 {
+				t.Fatalf("expected >=1 chunk delivered before error, got %d", len(got))
+			}
+			if got[0].Choices[0].Delta.Content != "hi" {
+				t.Errorf("first chunk content = %q, want 'hi'", got[0].Choices[0].Delta.Content)
+			}
+			// The post-error chunk must NOT have been delivered.
+			for _, c := range got {
+				for _, ch := range c.Choices {
+					if ch.Delta.Content == "AFTER" {
+						t.Errorf("post-error chunk leaked through: %+v", c)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSSE_MidStreamErrorMessageMentionsMidStream(t *testing.T) {
+	body := "data: {\"error\":{\"message\":\"boom\",\"type\":\"overloaded_error\"}}\n\n"
+	srv := newFakeServer(t, body)
+	defer srv.Close()
+	p := newConfiguredProvider(t, srv.URL)
+	_, err := runStreamCollect(t, p)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "mid-stream") {
+		t.Errorf("error %q should mention mid-stream", err.Error())
+	}
+}
+
+func TestSSE_NonErrorMalformedJSONStillSkipped(t *testing.T) {
+	// Regression: {"random":"data"} is not an error envelope and must
+	// continue to be silently dropped (existing behaviour).
+	body := strings.Join([]string{
+		`data: {"random":"data"}`,
+		``,
+		`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	srv := newFakeServer(t, body)
+	defer srv.Close()
+	p := newConfiguredProvider(t, srv.URL)
+	got, err := runStreamCollect(t, p)
+	if err != nil {
+		t.Fatalf("expected clean stream, got err = %v", err)
+	}
+	// The random-data payload is parseable as a chat completion (no
+	// choices, no usage), so the decoder accepts it and emits a chunk.
+	// What matters here is that no ErrUpstream surfaces.
+	foundHi := false
+	for _, c := range got {
+		for _, ch := range c.Choices {
+			if ch.Delta.Content == "hi" {
+				foundHi = true
+			}
+		}
+	}
+	if !foundHi {
+		t.Errorf("expected 'hi' chunk, got %+v", got)
+	}
+}
+
 func TestProvider_NameIsStable(t *testing.T) {
 	p, _ := New(llmrouter.WithAPIKey("k"))
 	for i := 0; i < 5; i++ {
@@ -753,3 +971,178 @@ func TestProvider_NameIsStable(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// decodeChunk — tool_calls in delta
+// ---------------------------------------------------------------------------
+
+func TestDecodeChunk_ToolCalls_FirstFragmentWithNameAndID(t *testing.T) {
+	payload := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`
+	c, ok := decodeChunk(payload)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	tcs := c.Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 {
+		t.Fatalf("len = %d", len(tcs))
+	}
+	if tcs[0].Index != 0 {
+		t.Errorf("Index = %d", tcs[0].Index)
+	}
+	if tcs[0].ID != "call_1" {
+		t.Errorf("ID = %q", tcs[0].ID)
+	}
+	if tcs[0].Type != "function" {
+		t.Errorf("Type = %q", tcs[0].Type)
+	}
+	if tcs[0].Function == nil || tcs[0].Function.Name != "get_weather" {
+		t.Errorf("Function = %+v", tcs[0].Function)
+	}
+}
+
+func TestDecodeChunk_ToolCalls_ArgumentFragment(t *testing.T) {
+	payload := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`
+	c, ok := decodeChunk(payload)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	tcs := c.Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 {
+		t.Fatalf("len = %d", len(tcs))
+	}
+	if tcs[0].Function == nil || tcs[0].Function.Arguments != `{"city":` {
+		t.Errorf("Arguments = %+v", tcs[0].Function)
+	}
+}
+
+func TestDecodeChunk_ToolCalls_NoToolCallsAbsent(t *testing.T) {
+	payload := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}`
+	c, ok := decodeChunk(payload)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	if c.Choices[0].Delta.ToolCalls != nil {
+		t.Errorf("ToolCalls should be nil, got %+v", c.Choices[0].Delta.ToolCalls)
+	}
+}
+
+func TestDecodeChunk_ToolCalls_MultipleToolsByIndex(t *testing.T) {
+	payload := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"f1"}},{"index":1,"id":"b","type":"function","function":{"name":"f2"}}]}}]}`
+	c, ok := decodeChunk(payload)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	tcs := c.Choices[0].Delta.ToolCalls
+	if len(tcs) != 2 {
+		t.Fatalf("len = %d", len(tcs))
+	}
+	if tcs[0].Index != 0 || tcs[0].Function.Name != "f1" {
+		t.Errorf("tcs[0] = %+v", tcs[0])
+	}
+	if tcs[1].Index != 1 || tcs[1].Function.Name != "f2" {
+		t.Errorf("tcs[1] = %+v", tcs[1])
+	}
+}
+
+func TestDecodeChunk_ToolCalls_ArgumentsConcatenateAcrossChunks(t *testing.T) {
+	// Simulate a stream of fragments — each chunk decoded independently;
+	// callers concatenate by Index. Verifies that decodeChunk preserves
+	// each fragment as-is rather than mutating/joining it.
+	fragments := []string{
+		`{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"add","arguments":""}}]}}]}`,
+		`{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]}}]}`,
+		`{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1"}}]}}]}`,
+		`{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\"b\":2}"}}]}}]}`,
+	}
+	var concatenated string
+	var name string
+	var id string
+	for _, p := range fragments {
+		c, ok := decodeChunk(p)
+		if !ok {
+			t.Fatalf("decodeChunk failed for %s", p)
+		}
+		tcs := c.Choices[0].Delta.ToolCalls
+		if len(tcs) != 1 || tcs[0].Index != 0 {
+			t.Fatalf("unexpected tool_calls shape: %+v", tcs)
+		}
+		if tcs[0].ID != "" {
+			id = tcs[0].ID
+		}
+		if tcs[0].Function != nil {
+			if tcs[0].Function.Name != "" {
+				name = tcs[0].Function.Name
+			}
+			concatenated += tcs[0].Function.Arguments
+		}
+	}
+	if id != "c1" {
+		t.Errorf("id = %q", id)
+	}
+	if name != "add" {
+		t.Errorf("name = %q", name)
+	}
+	if concatenated != `{"a":1,"b":2}` {
+		t.Errorf("concatenated = %q", concatenated)
+	}
+}
+
+func TestDecodeChunk_ToolCalls_IndexCorrelationAcrossChunks(t *testing.T) {
+	// Two tool calls interleaved across chunks; check Index identifies them.
+	frag1 := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"f0"}}]}}]}`
+	frag2 := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"f1"}}]}}]}`
+	frag3 := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"args0"}}]}}]}`
+	frag4 := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"args1"}}]}}]}`
+
+	args := map[int]string{}
+	names := map[int]string{}
+	for _, p := range []string{frag1, frag2, frag3, frag4} {
+		c, ok := decodeChunk(p)
+		if !ok {
+			t.Fatalf("decodeChunk failed")
+		}
+		for _, tc := range c.Choices[0].Delta.ToolCalls {
+			if tc.Function != nil {
+				if tc.Function.Name != "" {
+					names[tc.Index] = tc.Function.Name
+				}
+				args[tc.Index] += tc.Function.Arguments
+			}
+		}
+	}
+	if names[0] != "f0" || names[1] != "f1" {
+		t.Errorf("names = %v", names)
+	}
+	if args[0] != "args0" || args[1] != "args1" {
+		t.Errorf("args = %v", args)
+	}
+}
+
+func TestDecodeChunk_ToolCalls_NilFunctionTolerated(t *testing.T) {
+	// Some upstreams emit `tool_calls` entries with no function block on
+	// terminal/scaffolding chunks. Should decode without panicking.
+	payload := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0}]}}]}`
+	c, ok := decodeChunk(payload)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	tcs := c.Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 {
+		t.Fatalf("len = %d", len(tcs))
+	}
+	if tcs[0].Function != nil {
+		t.Errorf("Function should be nil: %+v", tcs[0].Function)
+	}
+}
+
+func TestDecodeChunk_ToolCalls_FinishReasonToolCalls(t *testing.T) {
+	payload := `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`
+	c, ok := decodeChunk(payload)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	if c.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("FinishReason = %q", c.Choices[0].FinishReason)
+	}
+}
+

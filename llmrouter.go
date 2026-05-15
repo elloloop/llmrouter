@@ -57,7 +57,46 @@ type ChatRequest struct {
 	Stop        []string        `json:"stop,omitempty"`
 	User        string          `json:"user,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
+	Tools       []Tool          `json:"tools,omitempty"`
+	ToolChoice  *ToolChoice     `json:"tool_choice,omitempty"`
 	Raw         json.RawMessage `json:"-"`
+}
+
+// Tool describes a callable function/tool. OpenAI-shaped (the Anthropic
+// provider translates).
+type Tool struct {
+	Type     string       `json:"type"` // always "function" for v0.1
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the function descriptor inside a Tool.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema
+}
+
+// ToolChoice controls whether/which tool the model must call.
+// One of: "auto" | "none" | "required" | {type:"function", function:{name:"..."}}
+type ToolChoice struct {
+	Mode     string `json:"-"` // "auto" | "none" | "required" | "specific"
+	Function string `json:"-"` // set when Mode == "specific"
+}
+
+// MarshalJSON renders the ToolChoice as either a string or the OpenAI
+// object form for specific function selection.
+func (tc ToolChoice) MarshalJSON() ([]byte, error) {
+	switch tc.Mode {
+	case "specific":
+		return json.Marshal(map[string]any{
+			"type":     "function",
+			"function": map[string]string{"name": tc.Function},
+		})
+	case "auto", "none", "required":
+		return json.Marshal(tc.Mode)
+	default:
+		return json.Marshal("auto")
+	}
 }
 
 // Message is one item in a chat completion request. Content is
@@ -123,14 +162,47 @@ type Choice struct {
 }
 
 // Delta is the incremental content within a streaming Choice.
+//
+// Thinking is Anthropic-specific; it carries the model's internal reasoning
+// stream when the upstream emits "thinking_delta" events. OpenAI's o*
+// reasoning models do not stream reasoning tokens, so this field stays
+// empty for them.
 type Delta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// ToolCallDelta is one incremental tool-call fragment. Mirrors OpenAI's
+// streaming shape: each tool_call has an Index that correlates fragments
+// across multiple chunks; Function.Arguments streams as a JSON fragment
+// that callers must concatenate by Index.
+type ToolCallDelta struct {
+	Index    int                    `json:"index"`
+	ID       string                 `json:"id,omitempty"`
+	Type     string                 `json:"type,omitempty"` // "function"
+	Function *ToolCallFunctionDelta `json:"function,omitempty"`
+}
+
+// ToolCallFunctionDelta is the function-call body of a streaming
+// ToolCallDelta. Name typically appears on the first fragment for an
+// Index; Arguments streams incrementally as JSON text.
+type ToolCallFunctionDelta struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"` // incrementally streamed JSON fragment
 }
 
 // Usage is the token-count summary reported by the upstream.
+//
+// CachedPromptTokens / CacheCreationTokens are Anthropic-specific and
+// reflect prompt caching: how many prompt tokens were served from cache
+// (read) and how many were written into the cache (creation). They are
+// zero for providers that don't support prompt caching.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	CachedPromptTokens  int `json:"cached_prompt_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 }

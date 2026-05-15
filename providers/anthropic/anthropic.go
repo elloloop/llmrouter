@@ -106,7 +106,8 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 			system += m.PlainText()
 			continue
 		}
-		msgs = append(msgs, anMsg{Role: m.Role, Content: m.Content})
+		content := translateMultipartContent(m.Content)
+		msgs = append(msgs, anMsg{Role: m.Role, Content: content})
 	}
 
 	maxTokens := req.MaxTokens
@@ -122,6 +123,41 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 	}
 	if system != "" {
 		out["system"] = system
+	}
+
+	// Translate typed Tools -> Anthropic tools shape.
+	if len(req.Tools) > 0 {
+		atools := make([]map[string]any, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			at := map[string]any{"name": t.Function.Name}
+			if t.Function.Description != "" {
+				at["description"] = t.Function.Description
+			}
+			if len(t.Function.Parameters) > 0 {
+				at["input_schema"] = json.RawMessage(t.Function.Parameters)
+			}
+			atools = append(atools, at)
+		}
+		out["tools"] = atools
+	}
+
+	// Translate typed ToolChoice -> Anthropic tool_choice shape.
+	if req.ToolChoice != nil {
+		switch req.ToolChoice.Mode {
+		case "auto":
+			out["tool_choice"] = map[string]any{"type": "auto"}
+		case "none":
+			out["tool_choice"] = map[string]any{"type": "none"}
+		case "required":
+			out["tool_choice"] = map[string]any{"type": "any"}
+		case "specific":
+			out["tool_choice"] = map[string]any{
+				"type": "tool",
+				"name": req.ToolChoice.Function,
+			}
+		default:
+			out["tool_choice"] = map[string]any{"type": "auto"}
+		}
 	}
 
 	// Pull optional tuning knobs from the original raw body if present.
@@ -154,6 +190,76 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+// translateMultipartContent converts OpenAI-shaped multipart content
+// blocks to Anthropic's content-block shape. Plain-string content (a JSON
+// string) and unrecognized shapes are returned unchanged so they pass
+// through the wire body untouched.
+func translateMultipartContent(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	// Try to decode as an array of blocks. If it isn't an array, leave it.
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return raw
+	}
+	out := make([]map[string]any, 0, len(blocks))
+	for _, b := range blocks {
+		var typ string
+		if rawType, ok := b["type"]; ok {
+			_ = json.Unmarshal(rawType, &typ)
+		}
+		switch typ {
+		case "text":
+			var text string
+			_ = json.Unmarshal(b["text"], &text)
+			out = append(out, map[string]any{"type": "text", "text": text})
+		case "image_url":
+			var iu struct {
+				URL string `json:"url"`
+			}
+			_ = json.Unmarshal(b["image_url"], &iu)
+			if strings.HasPrefix(iu.URL, "data:") {
+				rest := strings.TrimPrefix(iu.URL, "data:")
+				mediaType := ""
+				data := ""
+				if idx := strings.Index(rest, ";base64,"); idx >= 0 {
+					mediaType = rest[:idx]
+					data = rest[idx+len(";base64,"):]
+				}
+				out = append(out, map[string]any{
+					"type": "image",
+					"source": map[string]any{
+						"type":       "base64",
+						"media_type": mediaType,
+						"data":       data,
+					},
+				})
+			} else {
+				out = append(out, map[string]any{
+					"type": "image",
+					"source": map[string]any{
+						"type": "url",
+						"url":  iu.URL,
+					},
+				})
+			}
+		default:
+			// Preserve unknown shapes by passing original fields through.
+			passthrough := map[string]any{}
+			for k, v := range b {
+				passthrough[k] = json.RawMessage(v)
+			}
+			out = append(out, passthrough)
+		}
+	}
+	enc, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return enc
 }
 
 // pump reads Anthropic SSE events from resp.Body and emits OpenAI-shaped
@@ -219,11 +325,17 @@ func pump(ctx context.Context, resp *http.Response, model string, hooks llmroute
 
 // pumpState carries identifiers and usage accumulated across events.
 type pumpState struct {
-	chatID       string
-	created      int64
-	model        string
-	inputTokens  int
-	outputTokens int
+	chatID              string
+	created             int64
+	model               string
+	inputTokens         int
+	outputTokens        int
+	cachedPromptTokens  int
+	cacheCreationTokens int
+	// contentBlockIndex tracks the most recently started content block so
+	// content_block_delta events can correlate input_json_delta fragments
+	// to the originating tool_use block.
+	contentBlockIndex int
 }
 
 // handleEvent processes a single Anthropic SSE event and emits the
@@ -235,14 +347,22 @@ func handleEvent(ctx context.Context, evType, payload string, st *pumpState, hoo
 			Message struct {
 				Model string `json:"model"`
 				Usage struct {
-					InputTokens  int `json:"input_tokens"`
-					OutputTokens int `json:"output_tokens"`
+					InputTokens              int `json:"input_tokens"`
+					OutputTokens             int `json:"output_tokens"`
+					CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`
 		}
 		_ = json.Unmarshal([]byte(payload), &ev)
 		if ev.Message.Usage.InputTokens > 0 {
 			st.inputTokens = ev.Message.Usage.InputTokens
+		}
+		if ev.Message.Usage.CacheReadInputTokens > 0 {
+			st.cachedPromptTokens = ev.Message.Usage.CacheReadInputTokens
+		}
+		if ev.Message.Usage.CacheCreationInputTokens > 0 {
+			st.cacheCreationTokens = ev.Message.Usage.CacheCreationInputTokens
 		}
 		if ev.Message.Model != "" {
 			st.model = ev.Message.Model
@@ -253,24 +373,91 @@ func handleEvent(ctx context.Context, evType, payload string, st *pumpState, hoo
 		}
 		return false, nil
 
+	case "content_block_start":
+		var ev struct {
+			Index        int `json:"index"`
+			ContentBlock struct {
+				Type  string `json:"type"`
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+			} `json:"content_block"`
+		}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			return false, nil
+		}
+		st.contentBlockIndex = ev.Index
+		if ev.ContentBlock.Type != "tool_use" {
+			return false, nil
+		}
+		chunk := newChunk(st, llmrouter.Delta{
+			ToolCalls: []llmrouter.ToolCallDelta{{
+				Index: ev.Index,
+				ID:    ev.ContentBlock.ID,
+				Type:  "function",
+				Function: &llmrouter.ToolCallFunctionDelta{
+					Name: ev.ContentBlock.Name,
+				},
+			}},
+		}, "")
+		if !sendChunk(ctx, hooks, chunk) {
+			return false, ctx.Err()
+		}
+		return false, nil
+
 	case "content_block_delta":
 		var ev struct {
+			Index int `json:"index"`
 			Delta struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				PartialJSON string `json:"partial_json"`
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 			return false, nil // tolerate malformed individual events
 		}
-		if ev.Delta.Type != "text_delta" || ev.Delta.Text == "" {
+		// content_block_delta carries the block's own index; prefer it when
+		// present (defaults to 0 if missing, which matches the prior single-
+		// block streaming behavior).
+		blockIdx := ev.Index
+		switch ev.Delta.Type {
+		case "text_delta":
+			if ev.Delta.Text == "" {
+				return false, nil
+			}
+			chunk := newChunk(st, llmrouter.Delta{Content: ev.Delta.Text}, "")
+			if !sendChunk(ctx, hooks, chunk) {
+				return false, ctx.Err()
+			}
+			return false, nil
+		case "thinking_delta":
+			if ev.Delta.Text == "" {
+				return false, nil
+			}
+			chunk := newChunk(st, llmrouter.Delta{Thinking: ev.Delta.Text}, "")
+			if !sendChunk(ctx, hooks, chunk) {
+				return false, ctx.Err()
+			}
+			return false, nil
+		case "input_json_delta":
+			if ev.Delta.PartialJSON == "" {
+				return false, nil
+			}
+			chunk := newChunk(st, llmrouter.Delta{
+				ToolCalls: []llmrouter.ToolCallDelta{{
+					Index: blockIdx,
+					Function: &llmrouter.ToolCallFunctionDelta{
+						Arguments: ev.Delta.PartialJSON,
+					},
+				}},
+			}, "")
+			if !sendChunk(ctx, hooks, chunk) {
+				return false, ctx.Err()
+			}
+			return false, nil
+		default:
 			return false, nil
 		}
-		chunk := newChunk(st, llmrouter.Delta{Content: ev.Delta.Text}, "")
-		if !sendChunk(ctx, hooks, chunk) {
-			return false, ctx.Err()
-		}
-		return false, nil
 
 	case "message_delta":
 		var ev struct {
@@ -278,7 +465,9 @@ func handleEvent(ctx context.Context, evType, payload string, st *pumpState, hoo
 				StopReason string `json:"stop_reason"`
 			} `json:"delta"`
 			Usage struct {
-				OutputTokens int `json:"output_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
@@ -286,6 +475,12 @@ func handleEvent(ctx context.Context, evType, payload string, st *pumpState, hoo
 		}
 		if ev.Usage.OutputTokens > 0 {
 			st.outputTokens = ev.Usage.OutputTokens
+		}
+		if ev.Usage.CacheReadInputTokens > 0 {
+			st.cachedPromptTokens = ev.Usage.CacheReadInputTokens
+		}
+		if ev.Usage.CacheCreationInputTokens > 0 {
+			st.cacheCreationTokens = ev.Usage.CacheCreationInputTokens
 		}
 		if ev.Delta.StopReason != "" {
 			finish := mapStopReason(ev.Delta.StopReason)
@@ -303,6 +498,35 @@ func handleEvent(ctx context.Context, evType, payload string, st *pumpState, hoo
 
 	case "message_stop":
 		return true, nil
+
+	case "error":
+		// Anthropic emits `event: error` mid-stream for overloaded_error,
+		// context-overflow, quota exhaustion, etc. Surface as ErrUpstream
+		// with StatusCode 0 so callers can distinguish in-band errors
+		// from a clean end-of-stream.
+		var ev struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal([]byte(payload), &ev)
+		body := ev.Error.Message
+		if ev.Error.Type != "" {
+			if body == "" {
+				body = ev.Error.Type
+			} else {
+				body = ev.Error.Type + ": " + body
+			}
+		}
+		if body == "" {
+			body = strings.TrimSpace(payload)
+		}
+		return false, &llmrouter.ErrUpstream{
+			Provider:   providerName,
+			StatusCode: 0,
+			Body:       body,
+		}
 
 	default:
 		// content_block_start, content_block_stop, ping, thinking_delta — ignored.
@@ -331,15 +555,19 @@ func newChunk(st *pumpState, delta llmrouter.Delta, finish string) llmrouter.Chu
 }
 
 // currentUsage returns the accumulated token usage, or nil if nothing is
-// known yet.
+// known yet. Anthropic cache token counters (read/creation) are surfaced
+// alongside the standard prompt/completion counts.
 func currentUsage(st *pumpState) *llmrouter.Usage {
-	if st.inputTokens == 0 && st.outputTokens == 0 {
+	if st.inputTokens == 0 && st.outputTokens == 0 &&
+		st.cachedPromptTokens == 0 && st.cacheCreationTokens == 0 {
 		return nil
 	}
 	return &llmrouter.Usage{
-		PromptTokens:     st.inputTokens,
-		CompletionTokens: st.outputTokens,
-		TotalTokens:      st.inputTokens + st.outputTokens,
+		PromptTokens:        st.inputTokens,
+		CompletionTokens:    st.outputTokens,
+		TotalTokens:         st.inputTokens + st.outputTokens,
+		CachedPromptTokens:  st.cachedPromptTokens,
+		CacheCreationTokens: st.cacheCreationTokens,
 	}
 }
 

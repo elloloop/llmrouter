@@ -410,10 +410,10 @@ func TestDelta_OmitemptyBehavior(t *testing.T) {
 
 func TestUsage_RoundTrip(t *testing.T) {
 	cases := []llmrouter.Usage{
-		{0, 0, 0},
-		{1, 1, 2},
-		{1000, 500, 1500},
-		{2147483647, 0, 2147483647},
+		{PromptTokens: 0, CompletionTokens: 0, TotalTokens: 0},
+		{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500},
+		{PromptTokens: 2147483647, CompletionTokens: 0, TotalTokens: 2147483647},
 	}
 	for i, u := range cases {
 		t.Run(string(rune('a'+i)), func(t *testing.T) {
@@ -429,5 +429,471 @@ func TestUsage_RoundTrip(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, u)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ToolChoice.MarshalJSON
+// ---------------------------------------------------------------------------
+
+func TestToolChoice_MarshalJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		tc   llmrouter.ToolChoice
+		want string
+	}{
+		{"auto", llmrouter.ToolChoice{Mode: "auto"}, `"auto"`},
+		{"none", llmrouter.ToolChoice{Mode: "none"}, `"none"`},
+		{"required", llmrouter.ToolChoice{Mode: "required"}, `"required"`},
+		{"specific", llmrouter.ToolChoice{Mode: "specific", Function: "get_weather"}, `{"function":{"name":"get_weather"},"type":"function"}`},
+		{"specific-empty-name", llmrouter.ToolChoice{Mode: "specific"}, `{"function":{"name":""},"type":"function"}`},
+		{"empty-mode-defaults-auto", llmrouter.ToolChoice{}, `"auto"`},
+		{"unknown-mode-defaults-auto", llmrouter.ToolChoice{Mode: "xyz"}, `"auto"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.tc)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(b) != tc.want {
+				t.Fatalf("got %s, want %s", b, tc.want)
+			}
+		})
+	}
+}
+
+func TestToolChoice_MarshalsThroughPointer(t *testing.T) {
+	cases := []struct {
+		name string
+		tc   *llmrouter.ToolChoice
+	}{
+		{"auto", &llmrouter.ToolChoice{Mode: "auto"}},
+		{"required", &llmrouter.ToolChoice{Mode: "required"}},
+		{"specific", &llmrouter.ToolChoice{Mode: "specific", Function: "f"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.tc)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if len(b) == 0 || string(b) == "null" {
+				t.Fatalf("unexpected null: %s", b)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tool / ToolFunction JSON round-trip
+// ---------------------------------------------------------------------------
+
+func TestTool_JSONRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		tool llmrouter.Tool
+	}{
+		{
+			"basic-function",
+			llmrouter.Tool{
+				Type: "function",
+				Function: llmrouter.ToolFunction{
+					Name:        "get_weather",
+					Description: "Get current weather",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+				},
+			},
+		},
+		{
+			"no-description",
+			llmrouter.Tool{
+				Type:     "function",
+				Function: llmrouter.ToolFunction{Name: "ping"},
+			},
+		},
+		{
+			"no-parameters",
+			llmrouter.Tool{
+				Type:     "function",
+				Function: llmrouter.ToolFunction{Name: "now", Description: "current time"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.tool)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got llmrouter.Tool
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Type != tc.tool.Type || got.Function.Name != tc.tool.Function.Name {
+				t.Errorf("mismatch: %+v vs %+v", got, tc.tool)
+			}
+		})
+	}
+}
+
+func TestToolFunction_OmitemptyDescriptionAndParameters(t *testing.T) {
+	tf := llmrouter.ToolFunction{Name: "x"}
+	b, _ := json.Marshal(tf)
+	if strings.Contains(string(b), "description") {
+		t.Errorf("description not omitted: %s", b)
+	}
+	if strings.Contains(string(b), "parameters") {
+		t.Errorf("parameters not omitted: %s", b)
+	}
+}
+
+func TestChatRequest_ToolsAndToolChoiceMarshaled(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model:    "gpt-4o-mini",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+		Tools: []llmrouter.Tool{
+			{Type: "function", Function: llmrouter.ToolFunction{Name: "f"}},
+		},
+		ToolChoice: &llmrouter.ToolChoice{Mode: "required"},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `"tools":`) {
+		t.Errorf("tools missing: %s", s)
+	}
+	if !strings.Contains(s, `"tool_choice":"required"`) {
+		t.Errorf("tool_choice missing: %s", s)
+	}
+}
+
+func TestChatRequest_ToolsOmittedWhenEmpty(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+	}
+	b, _ := json.Marshal(req)
+	s := string(b)
+	if strings.Contains(s, "tools") {
+		t.Errorf("tools should be omitted: %s", s)
+	}
+	if strings.Contains(s, "tool_choice") {
+		t.Errorf("tool_choice should be omitted: %s", s)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ToolCallDelta JSON round-trip
+// ---------------------------------------------------------------------------
+
+func TestToolCallDelta_JSONRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		tcd  llmrouter.ToolCallDelta
+	}{
+		{
+			"full",
+			llmrouter.ToolCallDelta{
+				Index: 0,
+				ID:    "call_abc",
+				Type:  "function",
+				Function: &llmrouter.ToolCallFunctionDelta{
+					Name:      "get_weather",
+					Arguments: `{"city":`,
+				},
+			},
+		},
+		{
+			"index-only",
+			llmrouter.ToolCallDelta{Index: 2},
+		},
+		{
+			"arguments-fragment",
+			llmrouter.ToolCallDelta{
+				Index:    1,
+				Function: &llmrouter.ToolCallFunctionDelta{Arguments: `"NYC"}`},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.tcd)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got llmrouter.ToolCallDelta
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Index != tc.tcd.Index || got.ID != tc.tcd.ID || got.Type != tc.tcd.Type {
+				t.Errorf("header mismatch: %+v vs %+v", got, tc.tcd)
+			}
+			if (got.Function == nil) != (tc.tcd.Function == nil) {
+				t.Errorf("Function nilness mismatch")
+			}
+			if got.Function != nil && tc.tcd.Function != nil {
+				if got.Function.Name != tc.tcd.Function.Name || got.Function.Arguments != tc.tcd.Function.Arguments {
+					t.Errorf("Function mismatch: %+v vs %+v", got.Function, tc.tcd.Function)
+				}
+			}
+		})
+	}
+}
+
+func TestDelta_WithToolCallsMarshalShape(t *testing.T) {
+	d := llmrouter.Delta{
+		ToolCalls: []llmrouter.ToolCallDelta{
+			{Index: 0, ID: "x", Type: "function", Function: &llmrouter.ToolCallFunctionDelta{Name: "f"}},
+		},
+	}
+	b, _ := json.Marshal(d)
+	s := string(b)
+	if !strings.Contains(s, `"tool_calls"`) {
+		t.Errorf("tool_calls missing: %s", s)
+	}
+	if !strings.Contains(s, `"index":0`) {
+		t.Errorf("index missing: %s", s)
+	}
+}
+
+func TestDelta_ToolCallsOmittedWhenEmpty(t *testing.T) {
+	d := llmrouter.Delta{Content: "hi"}
+	b, _ := json.Marshal(d)
+	if strings.Contains(string(b), "tool_calls") {
+		t.Errorf("tool_calls should be omitted: %s", b)
+	}
+}
+
+func TestDelta_ThinkingMarshaling(t *testing.T) {
+	cases := []struct {
+		name string
+		d    llmrouter.Delta
+		want string
+	}{
+		{"empty-thinking-omitted", llmrouter.Delta{Content: "x"}, `{"content":"x"}`},
+		{"thinking-set", llmrouter.Delta{Thinking: "reasoning"}, `{"thinking":"reasoning"}`},
+		{"both", llmrouter.Delta{Content: "x", Thinking: "y"}, `{"content":"x","thinking":"y"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := json.Marshal(tc.d)
+			if string(b) != tc.want {
+				t.Fatalf("got %s, want %s", b, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Usage cache token fields
+// ---------------------------------------------------------------------------
+
+func TestUsage_CacheTokenFields(t *testing.T) {
+	u := llmrouter.Usage{
+		PromptTokens:        100,
+		CompletionTokens:    50,
+		TotalTokens:         150,
+		CachedPromptTokens:  80,
+		CacheCreationTokens: 20,
+	}
+	b, err := json.Marshal(u)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `"cached_prompt_tokens":80`) {
+		t.Errorf("cached_prompt_tokens missing: %s", s)
+	}
+	if !strings.Contains(s, `"cache_creation_tokens":20`) {
+		t.Errorf("cache_creation_tokens missing: %s", s)
+	}
+	var got llmrouter.Usage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != u {
+		t.Errorf("round-trip mismatch: %+v vs %+v", got, u)
+	}
+}
+
+func TestUsage_CacheTokensOmittedWhenZero(t *testing.T) {
+	u := llmrouter.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}
+	b, _ := json.Marshal(u)
+	s := string(b)
+	if strings.Contains(s, "cached_prompt_tokens") {
+		t.Errorf("cached_prompt_tokens leaked: %s", s)
+	}
+	if strings.Contains(s, "cache_creation_tokens") {
+		t.Errorf("cache_creation_tokens leaked: %s", s)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContentPart constructors and MultipartMessage
+// ---------------------------------------------------------------------------
+
+func TestText_Constructor(t *testing.T) {
+	cases := []string{"", "hi", "héllo", "multi\nline", "🎉"}
+	for _, s := range cases {
+		t.Run(s, func(t *testing.T) {
+			p := llmrouter.Text(s)
+			if p.Type != "text" {
+				t.Errorf("Type = %q", p.Type)
+			}
+			if p.Text != s {
+				t.Errorf("Text = %q", p.Text)
+			}
+		})
+	}
+}
+
+func TestImageURL_Constructor(t *testing.T) {
+	cases := []string{
+		"https://example.com/a.png",
+		"https://example.com/b.jpg",
+		"http://localhost/c",
+		"",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			p := llmrouter.ImageURL(u)
+			if p.Type != "image_url" {
+				t.Errorf("Type = %q", p.Type)
+			}
+			if p.URL != u {
+				t.Errorf("URL = %q", p.URL)
+			}
+		})
+	}
+}
+
+func TestImageBytes_Constructor(t *testing.T) {
+	cases := []struct {
+		name      string
+		data      []byte
+		mediaType string
+	}{
+		{"png-1byte", []byte{1}, "image/png"},
+		{"png-empty", []byte{}, "image/png"},
+		{"jpg-many", []byte{1, 2, 3, 4, 5}, "image/jpeg"},
+		{"webp", []byte{9, 9, 9}, "image/webp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := llmrouter.ImageBytes(tc.data, tc.mediaType)
+			if p.Type != "image_bytes" {
+				t.Errorf("Type = %q", p.Type)
+			}
+			if p.MediaType != tc.mediaType {
+				t.Errorf("MediaType = %q", p.MediaType)
+			}
+			if len(p.Data) != len(tc.data) {
+				t.Errorf("Data len = %d", len(p.Data))
+			}
+		})
+	}
+}
+
+func TestMultipartMessage_TextOnly(t *testing.T) {
+	m := llmrouter.MultipartMessage("user", llmrouter.Text("hello"), llmrouter.Text(" world"))
+	if m.Role != "user" {
+		t.Errorf("Role = %q", m.Role)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d", len(blocks))
+	}
+	if blocks[0]["type"] != "text" || blocks[0]["text"] != "hello" {
+		t.Errorf("block[0] = %+v", blocks[0])
+	}
+	if blocks[1]["type"] != "text" || blocks[1]["text"] != " world" {
+		t.Errorf("block[1] = %+v", blocks[1])
+	}
+}
+
+func TestMultipartMessage_WithImageURL(t *testing.T) {
+	m := llmrouter.MultipartMessage("user",
+		llmrouter.Text("see:"),
+		llmrouter.ImageURL("https://example.com/cat.png"),
+	)
+	var blocks []map[string]any
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d", len(blocks))
+	}
+	if blocks[1]["type"] != "image_url" {
+		t.Errorf("block[1].type = %v", blocks[1]["type"])
+	}
+	imgURL, _ := blocks[1]["image_url"].(map[string]any)
+	if imgURL["url"] != "https://example.com/cat.png" {
+		t.Errorf("url = %v", imgURL["url"])
+	}
+}
+
+func TestMultipartMessage_WithImageBytes(t *testing.T) {
+	data := []byte{0x89, 0x50, 0x4e, 0x47}
+	m := llmrouter.MultipartMessage("user", llmrouter.ImageBytes(data, "image/png"))
+	var blocks []map[string]any
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d", len(blocks))
+	}
+	imgURL, _ := blocks[0]["image_url"].(map[string]any)
+	url, _ := imgURL["url"].(string)
+	if !strings.HasPrefix(url, "data:image/png;base64,") {
+		t.Errorf("url prefix wrong: %s", url)
+	}
+	// The base64 of {0x89,0x50,0x4e,0x47} is "iVBORw=="
+	if !strings.HasSuffix(url, "iVBORw==") {
+		t.Errorf("url suffix wrong: %s", url)
+	}
+}
+
+func TestMultipartMessage_EmptyParts(t *testing.T) {
+	m := llmrouter.MultipartMessage("user")
+	var blocks []map[string]any
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(blocks) != 0 {
+		t.Fatalf("blocks should be empty: %d", len(blocks))
+	}
+}
+
+func TestMultipartMessage_RoleVariations(t *testing.T) {
+	cases := []string{"user", "assistant", "system", "tool", ""}
+	for _, role := range cases {
+		t.Run("role="+role, func(t *testing.T) {
+			m := llmrouter.MultipartMessage(role, llmrouter.Text("x"))
+			if m.Role != role {
+				t.Errorf("Role = %q", m.Role)
+			}
+		})
+	}
+}
+
+func TestMultipartMessage_UnknownPartTypeSkipped(t *testing.T) {
+	// Construct a ContentPart with an unrecognized Type.
+	part := llmrouter.ContentPart{Type: "audio", Text: "ignored"}
+	m := llmrouter.MultipartMessage("user", part, llmrouter.Text("kept"))
+	var blocks []map[string]any
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1 (unknown skipped)", len(blocks))
+	}
+	if blocks[0]["text"] != "kept" {
+		t.Errorf("kept block missing: %+v", blocks[0])
 	}
 }

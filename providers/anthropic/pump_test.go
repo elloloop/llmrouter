@@ -147,8 +147,8 @@ func TestHandleEvent_ContentBlockDelta_Skipped(t *testing.T) {
 		payload string
 	}{
 		{"empty-text", `{"type":"content_block_delta","delta":{"type":"text_delta","text":""}}`},
-		{"thinking-delta", `{"type":"content_block_delta","delta":{"type":"thinking_delta","text":"silent"}}`},
-		{"input-json-delta", `{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}}`},
+		{"empty-thinking", `{"type":"content_block_delta","delta":{"type":"thinking_delta","text":""}}`},
+		{"empty-input-json", `{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":""}}`},
 		{"unknown-type", `{"type":"content_block_delta","delta":{"type":"future_thing","text":"x"}}`},
 		{"malformed", `not json`},
 	}
@@ -578,24 +578,27 @@ func TestPump_FullFixtureTranslatesCorrectly(t *testing.T) {
 	if err := stream.Err(); err != nil {
 		t.Fatalf("Err = %v", err)
 	}
-	// primer + 2 text + finish = 4
-	if len(chunks) != 4 {
-		t.Fatalf("got %d chunks, want 4: %+v", len(chunks), chunks)
+	// primer + thinking + 2 text + finish = 5
+	if len(chunks) != 5 {
+		t.Fatalf("got %d chunks, want 5: %+v", len(chunks), chunks)
 	}
 	if chunks[0].Choices[0].Delta.Role != "assistant" {
 		t.Errorf("primer role")
 	}
-	if chunks[1].Choices[0].Delta.Content != "Hello" {
-		t.Errorf("chunk[1] = %q", chunks[1].Choices[0].Delta.Content)
+	if chunks[1].Choices[0].Delta.Thinking != "silent thoughts" {
+		t.Errorf("chunk[1] thinking = %q", chunks[1].Choices[0].Delta.Thinking)
 	}
-	if chunks[2].Choices[0].Delta.Content != " world" {
+	if chunks[2].Choices[0].Delta.Content != "Hello" {
 		t.Errorf("chunk[2] = %q", chunks[2].Choices[0].Delta.Content)
 	}
-	if chunks[3].Choices[0].FinishReason != "stop" {
-		t.Errorf("final.FinishReason = %q", chunks[3].Choices[0].FinishReason)
+	if chunks[3].Choices[0].Delta.Content != " world" {
+		t.Errorf("chunk[3] = %q", chunks[3].Choices[0].Delta.Content)
 	}
-	if chunks[3].Usage == nil || chunks[3].Usage.TotalTokens != 15 {
-		t.Fatalf("Usage = %+v", chunks[3].Usage)
+	if chunks[4].Choices[0].FinishReason != "stop" {
+		t.Errorf("final.FinishReason = %q", chunks[4].Choices[0].FinishReason)
+	}
+	if chunks[4].Usage == nil || chunks[4].Usage.TotalTokens != 15 {
+		t.Fatalf("Usage = %+v", chunks[4].Usage)
 	}
 }
 
@@ -627,6 +630,167 @@ func TestPump_AllChunksShareStableID(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// handleEvent — error events terminate the stream
+// ---------------------------------------------------------------------------
+
+func TestHandleEvent_Error_TerminatesStream(t *testing.T) {
+	cases := []struct {
+		name        string
+		payload     string
+		wantContain string
+	}{
+		{
+			"overloaded-with-message-and-type",
+			`{"type":"error","error":{"type":"overloaded_error","message":"upstream is overloaded"}}`,
+			"overloaded_error: upstream is overloaded",
+		},
+		{
+			"context-overflow",
+			`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`,
+			"invalid_request_error: prompt is too long",
+		},
+		{
+			"message-only",
+			`{"type":"error","error":{"message":"something went wrong"}}`,
+			"something went wrong",
+		},
+		{
+			"type-only",
+			`{"type":"error","error":{"type":"rate_limited"}}`,
+			"rate_limited",
+		},
+		{
+			"malformed-payload-still-errors",
+			`not json`,
+			"not json",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &pumpState{model: "claude"}
+			_, hooks := captureHooks()
+			done, err := handleEvent(context.Background(), "error", tc.payload, st, hooks)
+			if err == nil {
+				t.Fatal("expected non-nil error")
+			}
+			if done {
+				t.Error("done should be false on error path")
+			}
+			var ue *llmrouter.ErrUpstream
+			if !errors.As(err, &ue) {
+				t.Fatalf("err = %T %v, want *ErrUpstream", err, err)
+			}
+			if ue.Provider != providerName {
+				t.Errorf("Provider = %q, want %q", ue.Provider, providerName)
+			}
+			if ue.StatusCode != 0 {
+				t.Errorf("StatusCode = %d, want 0 (mid-stream marker)", ue.StatusCode)
+			}
+			if !strings.Contains(ue.Body, tc.wantContain) {
+				t.Errorf("Body = %q, want contains %q", ue.Body, tc.wantContain)
+			}
+		})
+	}
+}
+
+func TestPump_MidStreamErrorViaPumpFunction(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-3-5-sonnet","usage":{"input_tokens":3,"output_tokens":0}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,
+		``,
+		`event: error`,
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"too busy"}}`,
+		``,
+		// These trailing events must never be processed.
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"AFTER"}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	p, _ := New(llmrouter.WithAPIKey("k"), llmrouter.WithBaseURL(srv.URL))
+	stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+		Model:    "claude",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+	})
+	if err != nil {
+		t.Fatalf("CompletionStream = %v", err)
+	}
+
+	var chunks []llmrouter.Chunk
+	for c := range stream.Chunks() {
+		chunks = append(chunks, c)
+	}
+	streamErr := stream.Err()
+	if streamErr == nil {
+		t.Fatal("expected stream.Err() non-nil")
+	}
+	var ue *llmrouter.ErrUpstream
+	if !errors.As(streamErr, &ue) {
+		t.Fatalf("err = %T %v, want *ErrUpstream", streamErr, streamErr)
+	}
+	if ue.Provider != providerName {
+		t.Errorf("Provider = %q", ue.Provider)
+	}
+	if ue.StatusCode != 0 {
+		t.Errorf("StatusCode = %d, want 0", ue.StatusCode)
+	}
+	if !strings.Contains(ue.Body, "overloaded_error") || !strings.Contains(ue.Body, "too busy") {
+		t.Errorf("Body = %q, want contains overloaded_error+too busy", ue.Body)
+	}
+
+	// Some chunks should have made it through (primer + hello).
+	if len(chunks) < 1 {
+		t.Fatalf("expected >=1 chunk before error, got %d", len(chunks))
+	}
+	// Post-error chunks must not have leaked.
+	for _, c := range chunks {
+		for _, ch := range c.Choices {
+			if ch.Delta.Content == "AFTER" {
+				t.Errorf("post-error chunk leaked: %+v", c)
+			}
+		}
+	}
+}
+
+func TestPump_MidStreamErrorMessageMentionsMidStream(t *testing.T) {
+	body := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"x\",\"message\":\"y\"}}\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	p, _ := New(llmrouter.WithAPIKey("k"), llmrouter.WithBaseURL(srv.URL))
+	stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+		Model:    "claude",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+	})
+	if err != nil {
+		t.Fatalf("CompletionStream = %v", err)
+	}
+	for range stream.Chunks() {
+	}
+	streamErr := stream.Err()
+	if streamErr == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(streamErr.Error(), "mid-stream") {
+		t.Errorf("error %q should mention mid-stream", streamErr.Error())
+	}
+}
+
 func TestPump_RawByteFieldPopulated(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -644,3 +808,270 @@ func TestPump_RawByteFieldPopulated(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// handleEvent — tool use (content_block_start + input_json_delta)
+// ---------------------------------------------------------------------------
+
+func TestHandleEvent_ContentBlockStart_ToolUseEmitsToolCallDelta(t *testing.T) {
+	st := &pumpState{model: "claude", chatID: "x", created: 1}
+	sent, hooks := captureHooks()
+	payload := `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_abc","name":"get_weather"}}`
+	_, err := handleEvent(context.Background(), "content_block_start", payload, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("got %d chunks, want 1", len(*sent))
+	}
+	tcs := (*sent)[0].Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 {
+		t.Fatalf("tool_calls len = %d", len(tcs))
+	}
+	if tcs[0].Index != 1 {
+		t.Errorf("Index = %d", tcs[0].Index)
+	}
+	if tcs[0].ID != "toolu_abc" {
+		t.Errorf("ID = %q", tcs[0].ID)
+	}
+	if tcs[0].Type != "function" {
+		t.Errorf("Type = %q, want function", tcs[0].Type)
+	}
+	if tcs[0].Function == nil || tcs[0].Function.Name != "get_weather" {
+		t.Errorf("Function = %+v", tcs[0].Function)
+	}
+	if st.contentBlockIndex != 1 {
+		t.Errorf("state.contentBlockIndex = %d", st.contentBlockIndex)
+	}
+}
+
+func TestHandleEvent_ContentBlockStart_TextBlockNotEmitted(t *testing.T) {
+	st := &pumpState{model: "claude"}
+	sent, hooks := captureHooks()
+	payload := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+	_, err := handleEvent(context.Background(), "content_block_start", payload, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(*sent) != 0 {
+		t.Errorf("got %d chunks, want 0", len(*sent))
+	}
+	if st.contentBlockIndex != 0 {
+		t.Errorf("state.contentBlockIndex = %d", st.contentBlockIndex)
+	}
+}
+
+func TestHandleEvent_ContentBlockStart_MalformedTolerated(t *testing.T) {
+	st := &pumpState{}
+	_, hooks := captureHooks()
+	_, err := handleEvent(context.Background(), "content_block_start", `garbage`, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestHandleEvent_ContentBlockDelta_InputJSONDeltaEmitsArgumentsFragment(t *testing.T) {
+	st := &pumpState{model: "claude", chatID: "x", created: 1, contentBlockIndex: 2}
+	sent, hooks := captureHooks()
+	payload := `{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}`
+	_, err := handleEvent(context.Background(), "content_block_delta", payload, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("got %d chunks", len(*sent))
+	}
+	tcs := (*sent)[0].Choices[0].Delta.ToolCalls
+	if len(tcs) != 1 {
+		t.Fatalf("tool_calls len = %d", len(tcs))
+	}
+	if tcs[0].Index != 2 {
+		t.Errorf("Index = %d, want 2 (block index)", tcs[0].Index)
+	}
+	if tcs[0].Function == nil || tcs[0].Function.Arguments != `{"city":` {
+		t.Errorf("Arguments = %+v", tcs[0].Function)
+	}
+}
+
+func TestHandleEvent_ContentBlockDelta_InputJSONFragmentsConcatenate(t *testing.T) {
+	st := &pumpState{model: "claude"}
+	sent, hooks := captureHooks()
+	fragments := []string{
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"1"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":",\"b\":2}"}}`,
+	}
+	for _, p := range fragments {
+		_, _ = handleEvent(context.Background(), "content_block_delta", p, st, hooks)
+	}
+	if len(*sent) != 3 {
+		t.Fatalf("got %d chunks", len(*sent))
+	}
+	var concat string
+	for _, c := range *sent {
+		for _, tc := range c.Choices[0].Delta.ToolCalls {
+			if tc.Function != nil {
+				concat += tc.Function.Arguments
+			}
+		}
+	}
+	if concat != `{"a":1,"b":2}` {
+		t.Errorf("concat = %q", concat)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleEvent — thinking deltas
+// ---------------------------------------------------------------------------
+
+func TestHandleEvent_ContentBlockDelta_ThinkingDeltaEmitsThinking(t *testing.T) {
+	st := &pumpState{model: "claude", chatID: "x", created: 1}
+	sent, hooks := captureHooks()
+	payload := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","text":"reasoning..."}}`
+	_, err := handleEvent(context.Background(), "content_block_delta", payload, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("got %d chunks", len(*sent))
+	}
+	if (*sent)[0].Choices[0].Delta.Thinking != "reasoning..." {
+		t.Errorf("Thinking = %q", (*sent)[0].Choices[0].Delta.Thinking)
+	}
+	if (*sent)[0].Choices[0].Delta.Content != "" {
+		t.Errorf("Content should be empty: %q", (*sent)[0].Choices[0].Delta.Content)
+	}
+}
+
+func TestHandleEvent_ContentBlockDelta_ThinkingFragmentsAccumulate(t *testing.T) {
+	st := &pumpState{model: "claude"}
+	sent, hooks := captureHooks()
+	for _, frag := range []string{"step 1. ", "step 2. ", "done."} {
+		payload := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","text":"` + frag + `"}}`
+		_, _ = handleEvent(context.Background(), "content_block_delta", payload, st, hooks)
+	}
+	if len(*sent) != 3 {
+		t.Fatalf("got %d chunks", len(*sent))
+	}
+	var concat string
+	for _, c := range *sent {
+		concat += c.Choices[0].Delta.Thinking
+	}
+	if concat != "step 1. step 2. done." {
+		t.Errorf("concat = %q", concat)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleEvent — prompt caching usage
+// ---------------------------------------------------------------------------
+
+func TestHandleEvent_MessageStart_CapturesCacheTokens(t *testing.T) {
+	st := &pumpState{model: "claude", chatID: "x", created: 1}
+	_, hooks := captureHooks()
+	payload := `{"type":"message_start","message":{"id":"msg","model":"claude","usage":{"input_tokens":50,"cache_read_input_tokens":40,"cache_creation_input_tokens":10}}}`
+	_, err := handleEvent(context.Background(), "message_start", payload, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if st.cachedPromptTokens != 40 {
+		t.Errorf("cachedPromptTokens = %d, want 40", st.cachedPromptTokens)
+	}
+	if st.cacheCreationTokens != 10 {
+		t.Errorf("cacheCreationTokens = %d, want 10", st.cacheCreationTokens)
+	}
+	if st.inputTokens != 50 {
+		t.Errorf("inputTokens = %d", st.inputTokens)
+	}
+}
+
+func TestHandleEvent_MessageDelta_CapturesCacheTokens(t *testing.T) {
+	st := &pumpState{model: "claude", chatID: "x", created: 1, inputTokens: 100}
+	sent, hooks := captureHooks()
+	payload := `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20,"cache_read_input_tokens":60,"cache_creation_input_tokens":15}}`
+	_, err := handleEvent(context.Background(), "message_delta", payload, st, hooks)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if st.cachedPromptTokens != 60 {
+		t.Errorf("cachedPromptTokens = %d", st.cachedPromptTokens)
+	}
+	if st.cacheCreationTokens != 15 {
+		t.Errorf("cacheCreationTokens = %d", st.cacheCreationTokens)
+	}
+	// Final chunk should carry cache tokens in Usage.
+	if len(*sent) != 1 {
+		t.Fatalf("got %d chunks", len(*sent))
+	}
+	u := (*sent)[0].Usage
+	if u == nil {
+		t.Fatal("Usage nil")
+	}
+	if u.CachedPromptTokens != 60 {
+		t.Errorf("Usage.CachedPromptTokens = %d", u.CachedPromptTokens)
+	}
+	if u.CacheCreationTokens != 15 {
+		t.Errorf("Usage.CacheCreationTokens = %d", u.CacheCreationTokens)
+	}
+}
+
+func TestHandleEvent_MessageDelta_NoCacheTokensWhenAbsent(t *testing.T) {
+	st := &pumpState{model: "claude", inputTokens: 100}
+	sent, hooks := captureHooks()
+	payload := `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}`
+	_, _ = handleEvent(context.Background(), "message_delta", payload, st, hooks)
+	if st.cachedPromptTokens != 0 || st.cacheCreationTokens != 0 {
+		t.Errorf("cache tokens should be 0: %+v", st)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("got %d chunks", len(*sent))
+	}
+	// Usage JSON should NOT include cache fields (omitempty).
+	if len((*sent)[0].Raw) == 0 {
+		t.Fatal("Raw empty")
+	}
+	if strings.Contains(string((*sent)[0].Raw), "cached_prompt_tokens") {
+		t.Errorf("cached_prompt_tokens leaked into Raw: %s", (*sent)[0].Raw)
+	}
+}
+
+func TestCurrentUsage_IncludesCacheTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		st   pumpState
+		want llmrouter.Usage
+	}{
+		{
+			"cache-read-only",
+			pumpState{inputTokens: 100, cachedPromptTokens: 60},
+			llmrouter.Usage{PromptTokens: 100, TotalTokens: 100, CachedPromptTokens: 60},
+		},
+		{
+			"cache-creation-only",
+			pumpState{inputTokens: 100, cacheCreationTokens: 30},
+			llmrouter.Usage{PromptTokens: 100, TotalTokens: 100, CacheCreationTokens: 30},
+		},
+		{
+			"both-cache-fields",
+			pumpState{inputTokens: 100, outputTokens: 20, cachedPromptTokens: 60, cacheCreationTokens: 30},
+			llmrouter.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CachedPromptTokens: 60, CacheCreationTokens: 30},
+		},
+		{
+			"only-cache-no-other",
+			pumpState{cachedPromptTokens: 50},
+			llmrouter.Usage{CachedPromptTokens: 50},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := currentUsage(&tc.st)
+			if got == nil {
+				t.Fatal("nil")
+			}
+			if *got != tc.want {
+				t.Errorf("got %+v, want %+v", *got, tc.want)
+			}
+		})
+	}
+}
+

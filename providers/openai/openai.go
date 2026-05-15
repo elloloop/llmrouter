@@ -150,6 +150,20 @@ func pumpSSE(ctx context.Context, resp *http.Response, hooks llmrouter.ProducerH
 				hooks.Finish(nil)
 				return
 			}
+			// Detect mid-stream error envelopes before attempting normal
+			// chunk decoding. Some upstreams (Azure passthrough, OpenRouter,
+			// some compatibility proxies) emit `data: {"error": ...}`
+			// payloads on rate-limit, quota, or overflow conditions. These
+			// must terminate the stream with a typed ErrUpstream rather
+			// than being silently dropped or accepted as an empty chunk.
+			if msg, isErr := errorPayload(payload); isErr {
+				hooks.Finish(&llmrouter.ErrUpstream{
+					Provider:   "openai",
+					StatusCode: 0,
+					Body:       msg,
+				})
+				return
+			}
 			chunk, ok := decodeChunk(payload)
 			if !ok {
 				// Unparseable payload — skip rather than abort the stream.
@@ -187,8 +201,17 @@ func decodeChunk(payload string) (llmrouter.Chunk, bool) {
 		Choices []struct {
 			Index int `json:"index"`
 			Delta struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
+				Role      string `json:"role"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function *struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"delta"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -204,11 +227,30 @@ func decodeChunk(payload string) (llmrouter.Chunk, bool) {
 
 	choices := make([]llmrouter.Choice, 0, len(wire.Choices))
 	for _, c := range wire.Choices {
+		var toolCalls []llmrouter.ToolCallDelta
+		if len(c.Delta.ToolCalls) > 0 {
+			toolCalls = make([]llmrouter.ToolCallDelta, 0, len(c.Delta.ToolCalls))
+			for _, tc := range c.Delta.ToolCalls {
+				out := llmrouter.ToolCallDelta{
+					Index: tc.Index,
+					ID:    tc.ID,
+					Type:  tc.Type,
+				}
+				if tc.Function != nil {
+					out.Function = &llmrouter.ToolCallFunctionDelta{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					}
+				}
+				toolCalls = append(toolCalls, out)
+			}
+		}
 		choices = append(choices, llmrouter.Choice{
 			Index: c.Index,
 			Delta: llmrouter.Delta{
-				Role:    c.Delta.Role,
-				Content: c.Delta.Content,
+				Role:      c.Delta.Role,
+				Content:   c.Delta.Content,
+				ToolCalls: toolCalls,
 			},
 			FinishReason: c.FinishReason,
 		})
@@ -230,6 +272,62 @@ func decodeChunk(payload string) (llmrouter.Chunk, bool) {
 		}
 	}
 	return chunk, true
+}
+
+// errorPayload inspects a SSE data payload that decodeChunk could not
+// parse as a chat completion and reports whether it represents an
+// upstream error envelope.
+//
+// Two wire shapes are recognised:
+//   - OpenAI canonical: {"error":{"message":"...","type":"...","code":"..."}}
+//     returns the message (prefixed with type when present).
+//   - Simpler proxies: {"error":"plain string message"} — returns the
+//     string value.
+//
+// Anything else (random JSON, non-JSON, etc) returns isErr=false so the
+// caller falls back to the existing skip-this-payload behaviour.
+func errorPayload(payload string) (msg string, isErr bool) {
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" || trimmed[0] != '{' {
+		return "", false
+	}
+	var probe struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &probe); err != nil {
+		return "", false
+	}
+	if len(probe.Error) == 0 {
+		return "", false
+	}
+	// Try canonical object shape first.
+	var obj struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal(probe.Error, &obj); err == nil && (obj.Message != "" || obj.Type != "" || obj.Code != "") {
+		out := obj.Message
+		if obj.Type != "" {
+			if out == "" {
+				out = obj.Type
+			} else {
+				out = obj.Type + ": " + out
+			}
+		}
+		if out == "" {
+			out = obj.Code
+		}
+		return out, true
+	}
+	// Fall back to string shape.
+	var s string
+	if err := json.Unmarshal(probe.Error, &s); err == nil && s != "" {
+		return s, true
+	}
+	// Field present but unrecognised — still treat as an error so the
+	// caller surfaces it rather than silently dropping it.
+	return strings.TrimSpace(string(probe.Error)), true
 }
 
 // readUpstreamErrorBody reads up to 1KB of the error response body for

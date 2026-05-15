@@ -64,6 +64,23 @@ func TestErrUpstream_StatusCodeRangeCommonValues(t *testing.T) {
 	}
 }
 
+func TestErrUpstream_MidStreamMessage(t *testing.T) {
+	e := &llmrouter.ErrUpstream{Provider: "p", StatusCode: 0, Body: "x"}
+	msg := e.Error()
+	if !strings.Contains(msg, "mid-stream") {
+		t.Errorf("expected mid-stream marker, got %q", msg)
+	}
+	if strings.Contains(msg, " 0:") {
+		t.Errorf("mid-stream error should not render '0' status, got %q", msg)
+	}
+	if !strings.Contains(msg, "p") {
+		t.Errorf("missing provider, got %q", msg)
+	}
+	if !strings.Contains(msg, "x") {
+		t.Errorf("missing body, got %q", msg)
+	}
+}
+
 func TestErrInvalidConfig_IsExported(t *testing.T) {
 	if llmrouter.ErrInvalidConfig == nil {
 		t.Fatal("ErrInvalidConfig nil")
