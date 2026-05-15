@@ -1,0 +1,285 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Introduction" hidePrevNext>
+  <h1>llmrouter</h1>
+  <p>
+    A polyglot Go client for LLM providers. One OpenAI-shaped API surface
+    fans out to multiple vendors; pluggable backends translate the request
+    body, the response stream, and the auth scheme to whatever the upstream
+    speaks. Streaming-first, byte-passthrough where possible, and built
+    around <code>context.Context</code> cancellation that propagates all the
+    way to the upstream HTTP request.
+  </p>
+
+  <p>
+    Today the library ships with two providers: <strong>OpenAI</strong>
+    (and any OpenAI-compatible endpoint via a base-URL override) and
+    <strong>Anthropic</strong> (with full request and SSE event
+    translation). Azure OpenAI, AWS Bedrock, and Google Vertex AI are on
+    the v0.2 roadmap.
+  </p>
+
+  <h2 id="what-is-llmrouter">What is llmrouter?</h2>
+  <p>
+    llmrouter is a single Go module that exposes one
+    <a href="/llmrouter/docs/api/llmrouter/"><code>Provider</code> interface</a>
+    backed by pluggable provider implementations. The public type surface
+    is shaped after OpenAI's <code>/v1/chat/completions</code> endpoint:
+    you build a <code>ChatRequest</code>, hand it to a
+    <code>Provider.CompletionStream</code>, and read normalized
+    <code>Chunk</code> values off a channel until the upstream finishes.
+  </p>
+  <p>The library has four design pillars:</p>
+  <ul>
+    <li>
+      <strong>One API surface.</strong> Application code does not branch
+      on provider. The same <code>ChatRequest</code> works for OpenAI,
+      Anthropic, OpenRouter, Together, Groq, a self-hosted vLLM, or
+      whatever you point a base URL at.
+    </li>
+    <li>
+      <strong>Pluggable backends.</strong> Each provider lives in its
+      own subpackage under <code>providers/</code>, depends on
+      <code>llmrouter</code> for the shared types, and decides how to
+      translate. OpenAI is a passthrough; Anthropic is a full translator.
+      Future Azure / Bedrock / Vertex implementations follow the same
+      contract.
+    </li>
+    <li>
+      <strong>Per-provider configuration.</strong> Every provider's
+      <code>New(opts ...Option)</code> accepts the same shared options:
+      <code>WithAPIKey</code>, <code>WithBaseURL</code>,
+      <code>WithHTTPClient</code>, <code>WithTimeout</code>,
+      <code>WithExtra</code>. Provider-specific knobs (Azure
+      <code>api-version</code>, Bedrock region, Vertex project) flow
+      through <code>WithExtra</code> so the public surface never grows
+      a special case.
+    </li>
+    <li>
+      <strong>Streaming-first.</strong> The library does not have a
+      blocking "wait for the full completion" helper. Everything is
+      a <a href="/llmrouter/docs/concepts/streaming"><code>Stream</code></a>;
+      use a context with a deadline if you want a bound on wall time.
+    </li>
+  </ul>
+
+  <h2 id="why-llmrouter">Why llmrouter?</h2>
+  <p>
+    Go already has excellent per-vendor SDKs — <code>openai-go</code>,
+    <code>anthropic-sdk-go</code>, <code>google.golang.org/genai</code> —
+    and one notable unified library, <code>mozilla-ai/any-llm-go</code>.
+    llmrouter exists for a specific shape of project that none of those
+    serve well:
+  </p>
+  <ul>
+    <li>
+      <strong>Per-vendor SDKs branch your application code.</strong>
+      Every new provider you adopt means a new import, a new request
+      type, a new streaming idiom, a new error type, and a new place to
+      put the model id. If you support three vendors, your call site
+      either has a three-way <code>switch</code> or a hand-rolled
+      adapter you have to maintain forever.
+    </li>
+    <li>
+      <strong>The Python equivalents have a Go shaped hole.</strong>
+      LiteLLM and friends are well loved in Python; <code>any-llm-go</code>
+      is the closest Go analogue, supports ten providers, and is a good
+      pick if its provider matrix matches your needs. It does not
+      currently cover <strong>Azure Foundry</strong> (deployment URL +
+      <code>api-key</code> header + <code>api-version</code> query
+      param), <strong>AWS Bedrock</strong> (SigV4 + per-model-family
+      body shapes), or <strong>Google Vertex AI</strong> (ADC auth,
+      project/region) — the three cloud-vendor surfaces enterprise
+      deployments almost always need.
+    </li>
+    <li>
+      <strong>Existing libraries parse the wire format.</strong> They
+      decode the upstream stream into typed Go shapes, drop fields they
+      don't model, and re-marshal on the way out. That is fine for
+      application code; it is a problem if you are building a proxy or
+      gateway, because anything you don't model (tool calls, vision
+      content, <code>response_format</code>, structured outputs,
+      vendor-specific extensions) is silently lost.
+    </li>
+    <li>
+      <strong>llmrouter exposes byte passthrough.</strong> Every
+      <code>Chunk</code> carries the original wire-format JSON in a
+      <code>Raw</code> field, and <code>ChatRequest</code> carries a
+      <code>Raw</code> request body. Passthrough providers (OpenAI and
+      OpenAI-compatibles) forward the bytes unchanged. Translating
+      providers (Anthropic now, Bedrock/Vertex later) still expose
+      <code>Raw</code> on each chunk so a proxy can forward the
+      translated bytes without re-marshaling.
+    </li>
+  </ul>
+  <p>
+    In short: llmrouter targets the <strong>proxy/gateway</strong> use
+    case <em>and</em> the <strong>multi-vendor application</strong> use
+    case in the same library. If you only call one vendor, use that
+    vendor's official SDK. If your needs match LiteLLM-in-Python and
+    every provider you care about ships in <code>any-llm-go</code>, use
+    that. Otherwise, llmrouter.
+  </p>
+
+  <h2 id="v01">What ships in v0.1</h2>
+  <p>The 0.1 line is small on purpose. It contains:</p>
+  <ul>
+    <li>
+      <strong>OpenAI provider</strong> — a thin passthrough adapter for
+      <code>/v1/chat/completions</code>. The request body is serialized
+      from <code>ChatRequest</code> (or forwarded verbatim if
+      <code>Raw</code> is set), the SSE event stream is parsed enough
+      to surface <code>Chunk</code> values, and every chunk's
+      <code>Raw</code> is the original wire bytes. Pointing this
+      provider at <code>https://openrouter.ai/api/v1</code> or
+      <code>https://api.together.xyz/v1</code> or
+      <code>http://localhost:11434/v1</code> (Ollama) Just Works.
+    </li>
+    <li>
+      <strong>Anthropic provider</strong> — a full translator. The
+      request body is rewritten from OpenAI <code>messages</code> +
+      <code>max_tokens</code> + <code>temperature</code> + sampling
+      knobs into Anthropic's <code>/v1/messages</code> shape, with the
+      <code>system</code> role lifted into Anthropic's top-level
+      <code>system</code> field. The SSE event stream
+      (<code>message_start</code>,
+      <code>content_block_delta</code>, <code>message_delta</code>,
+      <code>message_stop</code>) is translated into OpenAI delta chunks
+      on the fly. <code>x-api-key</code> + <code>anthropic-version</code>
+      headers are set automatically.
+    </li>
+    <li>
+      <strong><a href="/llmrouter/docs/concepts/streaming">Stream</a>
+      type</strong> with single-consumer semantics, a buffered chunk
+      channel, context cancellation that propagates to the in-flight
+      HTTP request, and a terminal <code>Err()</code> for the final
+      error.
+    </li>
+    <li>
+      <strong>Shared options</strong> — <code>WithAPIKey</code>,
+      <code>WithBaseURL</code>, <code>WithHTTPClient</code>,
+      <code>WithTimeout</code>, <code>WithExtra</code>. Every provider
+      reads from the same <code>Config</code>; only the upstream URL
+      and translation logic differ.
+    </li>
+    <li>
+      <strong><code>ErrUpstream</code></strong> — non-2xx responses
+      surface as a typed error with the provider name, status code,
+      and response body, so application code can branch on the wire
+      response without parsing strings.
+    </li>
+  </ul>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Pre-1.0 churn.</strong> llmrouter is on the 0.x line.
+    Expect minor breaking changes between 0.x.y releases as the
+    provider matrix grows and the shared shapes settle. The
+    <code>Provider</code>, <code>ChatRequest</code>, and
+    <code>Stream</code> contracts are the most stable; the
+    <code>Chunk.Raw</code> contract is intentionally fixed because
+    proxies depend on it. Pin a version in <code>go.mod</code>.
+  </aside>
+
+  <h2 id="roadmap">On the v0.2 roadmap</h2>
+  <p>
+    The next minor version brings the three cloud-vendor providers
+    that distinguish llmrouter from the existing Go ecosystem:
+  </p>
+  <ul>
+    <li>
+      <strong>Azure OpenAI</strong> — deployment URL of the form
+      <code>{`https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions`}</code>,
+      <code>api-key</code> header (not <code>Authorization: Bearer</code>),
+      and a required <code>api-version</code> query parameter passed
+      via <code>WithExtra("api-version", "2024-10-21")</code>. Request
+      and response bodies are OpenAI-shaped, so the translation cost
+      is zero — only auth and URL construction change.
+    </li>
+    <li>
+      <strong>AWS Bedrock</strong> — SigV4-signed requests to
+      <code>{`https://bedrock-runtime.{region}.amazonaws.com/model/{model-id}/invoke-with-response-stream`}</code>
+      with per-model-family body shapes (Anthropic on Bedrock uses
+      Anthropic's body; Cohere uses Cohere's; Meta Llama uses its own).
+      The provider negotiates the body shape from the model id and
+      streams Bedrock's event-stream framing into OpenAI-shaped
+      chunks. Region travels via
+      <code>WithExtra("region", "us-east-1")</code>.
+    </li>
+    <li>
+      <strong>Google Vertex AI</strong> — Application Default
+      Credentials (ADC) for auth, with
+      <code>WithExtra("project", "my-gcp-proj")</code> and
+      <code>WithExtra("region", "us-central1")</code>. The provider
+      targets Vertex's <code>generateContent</code> /
+      <code>streamGenerateContent</code> endpoints for Gemini, and
+      Vertex's Anthropic / Meta passthrough endpoints for the
+      partner models.
+    </li>
+  </ul>
+  <p>
+    Beyond v0.2, the v0.3 plan is to surface tool-call passthrough as a
+    first-class concept (today, tool calls reach providers via
+    <code>ChatRequest.Raw</code> but aren't part of the typed surface)
+    and to add multimodal content helpers. v1.0 is the API freeze.
+  </p>
+
+  <h2 id="use-cases">Use cases</h2>
+  <p>The library is designed for a handful of concrete shapes:</p>
+
+  <h3 id="use-case-gateway">Building an OpenAI-compatible gateway</h3>
+  <p>
+    You run an HTTP service that exposes
+    <code>/v1/chat/completions</code> to your applications and routes
+    each request to a different upstream — OpenAI for general traffic,
+    Anthropic for long-context, a self-hosted vLLM for cheap
+    development calls. llmrouter is your forwarder: the gateway
+    deserializes the incoming OpenAI request, picks a provider, calls
+    <code>CompletionStream</code>, and forwards <code>Chunk.Raw</code>
+    bytes directly back to the caller as SSE. Anything the gateway
+    doesn't model passes through.
+  </p>
+
+  <h3 id="use-case-fallback">Multi-provider fallback</h3>
+  <p>
+    Your application calls OpenAI for everything, but if OpenAI returns
+    a 429 or a 5xx you fall back to Anthropic without changing the
+    request shape. With llmrouter the fallback is a few lines:
+    construct two providers at startup, attempt the first, and on
+    <code>ErrUpstream</code> with a retryable status code, retry the
+    same <code>ChatRequest</code> against the second.
+  </p>
+
+  <h3 id="use-case-swap">Swapping providers without touching application code</h3>
+  <p>
+    You picked OpenAI for your prototype and now you want to switch to
+    Anthropic because pricing or context window changed. With
+    llmrouter, the only change is the provider constructor and the
+    model id — the call site, the request shape, the streaming
+    consumer, and the error handling are all unchanged.
+  </p>
+
+  <h3 id="use-case-proxy">Self-hosted model proxy</h3>
+  <p>
+    You run a vLLM or Ollama instance internally and you want to expose
+    it via the same code paths your team already uses for OpenAI. Point
+    the OpenAI provider at the self-hosted URL with
+    <code>WithBaseURL("http://localhost:11434/v1")</code>; everything
+    else is identical.
+  </p>
+
+  <h2 id="quick-links">Quick links</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/installation">Installation</a> — module path, Go version, verification snippet.</li>
+    <li><a href="/llmrouter/docs/quickstart">Quick start</a> — your first streaming completion, against OpenAI and Anthropic.</li>
+    <li><a href="/llmrouter/docs/architecture">Architecture overview</a> — how the <code>Provider</code> interface and the <code>Stream</code> producer fit together.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming">Streaming model</a> — chunk channel, context cancellation, <code>Err()</code> semantics.</li>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> — passthrough behavior, base-URL override, supported endpoints.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a> — request translation, SSE translation, headers.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type and option.</li>
+    <li><a href="https://github.com/elloloop/llmrouter">GitHub</a> — source, issues, releases.</li>
+    <li><a href="https://pkg.go.dev/github.com/elloloop/llmrouter">pkg.go.dev</a> — generated GoDoc.</li>
+  </ul>
+</DocsLayout>

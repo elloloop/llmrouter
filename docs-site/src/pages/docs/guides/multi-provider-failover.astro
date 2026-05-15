@@ -1,0 +1,487 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Multi-provider Failover">
+  <h1>Multi-provider Failover</h1>
+  <p>
+    A common ask: when OpenAI returns 429 or a 5xx, try Anthropic; if
+    that also fails, surface the original error. This page shows how to
+    build a <code>Failover</code> wrapper that implements the
+    <a href="/llmrouter/docs/concepts/provider-interface/"><code>llmrouter.Provider</code></a>
+    interface — so the rest of your code never knows it's there — and
+    walks through the subtleties that make this less trivial than it
+    looks.
+  </p>
+
+  <h2>Goal</h2>
+  <p>
+    Build a single <code>llmrouter.Provider</code> that wraps a slice of
+    underlying providers. On retriable errors, it iterates to the next
+    one. The caller's code stays unchanged:
+  </p>
+
+  <Code lang="go" code={`primary, _ := openai.New(llmrouter.WithAPIKey(openaiKey))
+backup,  _ := anthropic.New(llmrouter.WithAPIKey(anthropicKey))
+
+p := Failover{
+    providers: []llmrouter.Provider{primary, backup},
+    mapModel:  defaultModelMap,
+}
+
+// Same surface as any other Provider:
+stream, err := p.CompletionStream(ctx, req)`} />
+
+  <h2>Why this isn't in the library</h2>
+  <p>
+    Failover policy is not portable. Different teams disagree on:
+  </p>
+  <ul>
+    <li>
+      <strong>Which errors are retriable.</strong> 429 yes; 500 yes; 400
+      probably not (it's a client bug, not an upstream blip); 401 never
+      — that's an auth misconfig and another provider won't fix it.
+    </li>
+    <li>
+      <strong>How many providers to try.</strong> Two? Three? Are they
+      ordered by cost? By latency? By regional locality?
+    </li>
+    <li>
+      <strong>Whether the models are semantically interchangeable.</strong>
+      <code>gpt-4o-mini</code> and <code>claude-3-5-haiku-latest</code>
+      are roughly comparable for chat, but they have different tool-use
+      formats, different vision support, different context windows, and
+      meaningfully different prose styles. Failover that silently swaps
+      one for the other can produce confusing UX.
+    </li>
+  </ul>
+
+  <p>
+    A baked-in <code>llmrouter.NewFailover</code> would either be too
+    opinionated for some users or too generic to be useful. Instead, the
+    library gives you a clean interface and lets you write the 60 lines
+    of policy that match your app.
+  </p>
+
+  <h2>The shape of a Failover wrapper</h2>
+  <Code lang="go" code={`// Failover wraps an ordered list of providers. CompletionStream tries
+// each in turn; on a retriable error from one, it moves to the next.
+// The last error is returned if every provider fails.
+type Failover struct {
+    providers []llmrouter.Provider
+    // mapModel translates the requested model id for provider at index
+    // attempt. attempt 0 is the primary (usually identity), attempt 1
+    // is the backup, etc.
+    mapModel func(model string, attempt int) string
+}
+
+// Name returns a composite id like "failover[openai,anthropic]" so
+// metrics and logs can distinguish the wrapper from its members.
+func (f Failover) Name() string {
+    names := make([]string, 0, len(f.providers))
+    for _, p := range f.providers {
+        names = append(names, p.Name())
+    }
+    return "failover[" + strings.Join(names, ",") + "]"
+}
+
+// CompletionStream tries each provider until one succeeds at opening
+// the stream. Once a stream is open, no failover happens — see the
+// caveat below.
+func (f Failover) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error) {
+    if len(f.providers) == 0 {
+        return nil, errors.New("failover: no providers configured")
+    }
+    var lastErr error
+    for attempt, provider := range f.providers {
+        // Translate the model id for this attempt. The primary
+        // typically gets the user's original id; backups get whatever
+        // mapModel returns.
+        req.Model = f.mapModel(req.Model, attempt)
+
+        stream, err := provider.CompletionStream(ctx, req)
+        if err == nil {
+            return stream, nil
+        }
+        lastErr = err
+        if !isRetriable(err) {
+            return nil, err
+        }
+        // Honour cancellation in the loop too.
+        if ctx.Err() != nil {
+            return nil, ctx.Err()
+        }
+    }
+    return nil, lastErr
+}`} />
+
+  <h2>Defining "retriable"</h2>
+  <p>
+    The interesting decision is which errors trigger a failover. Look at
+    <code>*llmrouter.ErrUpstream.StatusCode</code> first; for network
+    errors (the upstream never answered), the wrapped error won't be an
+    <code>*ErrUpstream</code> — it'll be a plain <code>error</code>
+    with a message like <code>"openai: http: dial tcp: …"</code>.
+  </p>
+
+  <Code lang="go" code={`// isRetriable decides whether to fall over to the next provider.
+//
+// We retry on:
+//   - 429 (rate limit / quota)
+//   - 5xx (upstream having a bad day)
+//   - network errors (no response at all)
+//
+// We do NOT retry on:
+//   - 400 — the request body is wrong; the next provider will reject it too
+//   - 401, 403 — auth misconfig; failing over hides the real problem
+//   - 404 — model not found; mapModel didn't pick a real id
+//   - context cancellation — the caller told us to stop
+func isRetriable(err error) bool {
+    if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+        return false
+    }
+    var upstream *llmrouter.ErrUpstream
+    if errors.As(err, &upstream) {
+        switch upstream.StatusCode {
+        case 429, 500, 502, 503, 504:
+            return true
+        }
+        return false
+    }
+    // Not an *ErrUpstream — likely a network failure. Retry.
+    return true
+}`} />
+
+  <h2>Caveat: failover is impossible mid-stream</h2>
+  <p>
+    By the time the upstream has returned a 200 and you've started
+    streaming bytes back to your client, it's too late. You've already
+    sent <code>{`data: {...}`}</code> chunks downstream — switching to a
+    different provider mid-stream would produce gibberish (a different
+    chat id, a non-contiguous narrative, possibly a different model
+    field).
+  </p>
+
+  <p>
+    For that reason, <code>CompletionStream</code> in this wrapper only
+    fails over when the <strong>initial</strong> request fails — i.e.
+    before any chunks have arrived. If a stream dies after the first
+    chunk, the error propagates to the caller and they decide what to do
+    (typically: give up and retry the whole request at a higher level).
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>If you really need mid-stream resilience,</strong> you have
+    to buffer the entire upstream response before forwarding it. That
+    turns your streaming proxy back into a request-response one and is
+    rarely worth it. Most teams instead bias toward picking a stable
+    primary and treat the backup as a coarse outage hedge.
+  </aside>
+
+  <h2>Model mapping</h2>
+  <p>
+    The primary handles <code>gpt-4o-mini</code> natively. When we fail
+    over to Anthropic, that id is meaningless — we need to translate to
+    a comparable Anthropic model.
+  </p>
+
+  <Code lang="go" code={`// Translate the requested model id by attempt index. Attempt 0 is
+// usually identity (use the model the caller asked for). Higher
+// attempts map to comparable models on the backup providers.
+//
+// IMPORTANT: this is a coarse approximation. gpt-4o-mini and
+// claude-3-5-haiku-latest are similar in cost/latency/quality but not
+// identical. If your app cares about token-level reproducibility, do
+// NOT use failover — fail loud instead.
+func defaultModelMap(model string, attempt int) string {
+    if attempt == 0 {
+        return model
+    }
+    // Attempt 1 = Anthropic backup.
+    switch model {
+    case "gpt-4o-mini":
+        return "claude-3-5-haiku-latest"
+    case "gpt-4o":
+        return "claude-sonnet-4-5"
+    case "o1-mini":
+        return "claude-3-5-haiku-latest"
+    }
+    // Fall back to a safe default rather than passing an OpenAI id to
+    // Anthropic (which would 404).
+    return "claude-3-5-haiku-latest"
+}`} />
+
+  <h2>The complete program</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log"
+    "os"
+    "strings"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+type Failover struct {
+    providers []llmrouter.Provider
+    mapModel  func(model string, attempt int) string
+}
+
+func (f Failover) Name() string {
+    names := make([]string, 0, len(f.providers))
+    for _, p := range f.providers {
+        names = append(names, p.Name())
+    }
+    return "failover[" + strings.Join(names, ",") + "]"
+}
+
+func (f Failover) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error) {
+    if len(f.providers) == 0 {
+        return nil, errors.New("failover: no providers configured")
+    }
+    originalModel := req.Model
+    var lastErr error
+    for attempt, provider := range f.providers {
+        req.Model = f.mapModel(originalModel, attempt)
+        stream, err := provider.CompletionStream(ctx, req)
+        if err == nil {
+            log.Printf("failover: %s served %s (attempt %d)",
+                provider.Name(), req.Model, attempt)
+            return stream, nil
+        }
+        log.Printf("failover: %s failed (attempt %d): %v",
+            provider.Name(), attempt, err)
+        lastErr = err
+        if !isRetriable(err) {
+            return nil, err
+        }
+        if ctx.Err() != nil {
+            return nil, ctx.Err()
+        }
+    }
+    return nil, lastErr
+}
+
+func isRetriable(err error) bool {
+    if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+        return false
+    }
+    var upstream *llmrouter.ErrUpstream
+    if errors.As(err, &upstream) {
+        switch upstream.StatusCode {
+        case 429, 500, 502, 503, 504:
+            return true
+        }
+        return false
+    }
+    return true
+}
+
+func defaultModelMap(model string, attempt int) string {
+    if attempt == 0 {
+        return model
+    }
+    switch model {
+    case "gpt-4o-mini":
+        return "claude-3-5-haiku-latest"
+    case "gpt-4o":
+        return "claude-sonnet-4-5"
+    }
+    return "claude-3-5-haiku-latest"
+}
+
+func main() {
+    primary, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+    backup, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    p := Failover{
+        providers: []llmrouter.Provider{primary, backup},
+        mapModel:  defaultModelMap,
+    }
+
+    ctx := context.Background()
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "in one short sentence, what is a goroutine?"),
+        },
+        MaxTokens: 100,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    fmt.Println()
+    if err := stream.Err(); err != nil {
+        log.Printf("stream error: %v", err)
+    }
+}`} />
+
+  <h2>Testing the policy without a network</h2>
+  <p>
+    Because <code>Provider</code> is an interface, the failover wrapper
+    is trivially unit-testable. Build two fake providers — one that
+    returns 429, one that succeeds — and verify the wrapper falls
+    through.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "errors"
+    "io"
+    "strings"
+    "testing"
+
+    "github.com/elloloop/llmrouter"
+)
+
+// fakeProvider is a Provider that returns a canned error or a tiny
+// stream depending on configuration.
+type fakeProvider struct {
+    name string
+    err  error // if non-nil, returned by CompletionStream
+    body string
+}
+
+func (f *fakeProvider) Name() string { return f.name }
+
+func (f *fakeProvider) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error) {
+    if f.err != nil {
+        return nil, f.err
+    }
+    stream, _, hooks := llmrouter.NewStream(ctx)
+    go func() {
+        hooks.Send(llmrouter.Chunk{
+            Choices: []llmrouter.Choice{{
+                Delta: llmrouter.Delta{Content: f.body},
+            }},
+        })
+        hooks.Finish(nil)
+    }()
+    return stream, nil
+}
+
+func TestFailover_FallsThroughOn429(t *testing.T) {
+    primary := &fakeProvider{
+        name: "p1",
+        err:  &llmrouter.ErrUpstream{Provider: "p1", StatusCode: 429, Body: "rate limit"},
+    }
+    backup := &fakeProvider{name: "p2", body: "ok"}
+
+    f := Failover{
+        providers: []llmrouter.Provider{primary, backup},
+        mapModel:  func(m string, _ int) string { return m },
+    }
+    stream, err := f.CompletionStream(context.Background(), llmrouter.ChatRequest{Model: "x"})
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    got, _ := io.ReadAll(streamReader(stream))
+    if !strings.Contains(string(got), "ok") {
+        t.Fatalf("expected backup body, got %q", got)
+    }
+}
+
+func TestFailover_StopsOn400(t *testing.T) {
+    primary := &fakeProvider{
+        name: "p1",
+        err:  &llmrouter.ErrUpstream{Provider: "p1", StatusCode: 400, Body: "bad request"},
+    }
+    backup := &fakeProvider{name: "p2", body: "should not be reached"}
+
+    f := Failover{
+        providers: []llmrouter.Provider{primary, backup},
+        mapModel:  func(m string, _ int) string { return m },
+    }
+    _, err := f.CompletionStream(context.Background(), llmrouter.ChatRequest{Model: "x"})
+    var up *llmrouter.ErrUpstream
+    if !errors.As(err, &up) || up.StatusCode != 400 {
+        t.Fatalf("expected 400 ErrUpstream, got %v", err)
+    }
+}
+
+// streamReader drains a Stream into an io.Reader for test ergonomics.
+func streamReader(s *llmrouter.Stream) io.Reader {
+    var b strings.Builder
+    for chunk := range s.Chunks() {
+        for _, c := range chunk.Choices {
+            b.WriteString(c.Delta.Content)
+        }
+    }
+    return strings.NewReader(b.String())
+}`} />
+
+  <h2>When failover is the wrong tool</h2>
+  <ul>
+    <li>
+      <strong>Tool-use / function-calling.</strong> OpenAI and Anthropic
+      use different schemas. If your client expects OpenAI-shape tool
+      calls and the backup is Anthropic, you'll get back something the
+      client can't parse.
+    </li>
+    <li>
+      <strong>Vision / multimodal inputs.</strong> The two providers
+      have different content-array shapes. Passthrough mode (using
+      <code>ChatRequest.Raw</code>) hides this; the Anthropic provider
+      does best-effort conversion, but corner cases will bite.
+    </li>
+    <li>
+      <strong>Strict reproducibility.</strong> If a downstream system
+      caches by prompt+model — or evaluates output against a golden
+      file — silently swapping models invalidates the cache and breaks
+      the evals.
+    </li>
+    <li>
+      <strong>Cost accounting.</strong> Token pricing differs. A
+      failover that quietly moves traffic to a more expensive backup
+      during a 429 storm can torch your budget.
+    </li>
+  </ul>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>The honest take.</strong> Failover is great for blunt
+    "the primary's whole region just fell over" recovery. It's a poor
+    substitute for proper retries (see
+    <a href="/llmrouter/docs/guides/custom-http-client/">retries via a
+    custom HTTP client</a>), per-tenant quota management, or paying for a
+    higher rate tier. Use it as a last line of defense, not as a regular
+    load-balancing strategy.
+  </aside>
+
+  <h2>Related</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/guides/build-a-chat-gateway/">Build a chat gateway</a>
+      — drop the <code>Failover</code> wrapper into the gateway handler
+      and your routes survive provider outages.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/custom-http-client/">Custom HTTP client &amp; retries</a>
+      — for in-provider retries with exponential backoff, before
+      escalating to a different provider.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/provider-interface/">The provider interface</a>
+      — the contract that makes wrapping providers like this possible.
+    </li>
+  </ul>
+</DocsLayout>

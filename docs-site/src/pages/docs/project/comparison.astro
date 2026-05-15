@@ -1,0 +1,382 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Comparison vs alternatives">
+  <h1>Comparison vs alternatives</h1>
+  <p>
+    <code>llmrouter</code> is one of several reasonable answers to
+    &ldquo;how do I call an LLM from Go.&rdquo; This page is an honest
+    comparison against the alternatives, with explicit guidance on when
+    to pick each one. We are biased — but the goal here is to make
+    sure you do not adopt this library for a problem it was not built
+    to solve.
+  </p>
+  <p>
+    The short version: if you only ever call one vendor and want every
+    feature that vendor exposes, use that vendor&rsquo;s official Go
+    SDK. If you want a Python LiteLLM equivalent with typed wrappers
+    around embeddings and tool use across ten providers,
+    <code>mozilla-ai/any-llm-go</code> is closer to what you want.
+    <code>llmrouter</code> exists for the specific case where you want
+    a single OpenAI-shaped surface plus byte-level passthrough across
+    OpenAI, Anthropic, and any OpenAI-compatible endpoint.
+  </p>
+
+  <h2 id="at-a-glance">At a glance</h2>
+  <p>
+    The table below summarises the dimensions that usually decide the
+    answer. &ldquo;Byte passthrough&rdquo; means: can you forward an
+    upstream chunk to a downstream consumer without re-marshaling it.
+    &ldquo;Azure / Bedrock / Vertex&rdquo; refers to the three managed
+    cloud LLM endpoints that need different auth, body shape, and URL
+    structure from the vendor&rsquo;s own API.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40 text-left">
+        <tr>
+          <th class="px-4 py-3 font-semibold">&nbsp;</th>
+          <th class="px-4 py-3 font-semibold"><code>llmrouter</code></th>
+          <th class="px-4 py-3 font-semibold"><code>any-llm-go</code></th>
+          <th class="px-4 py-3 font-semibold">Per-vendor SDKs</th>
+          <th class="px-4 py-3 font-semibold">Direct HTTP</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-border">
+        <tr>
+          <td class="px-4 py-3">Providers shipped today</td>
+          <td class="px-4 py-3">OpenAI, Anthropic, any OpenAI-compat</td>
+          <td class="px-4 py-3">~10 (OpenAI, Anthropic, Gemini, Mistral, etc.)</td>
+          <td class="px-4 py-3">One per package</td>
+          <td class="px-4 py-3">Whatever you write</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">Byte passthrough</td>
+          <td class="px-4 py-3">Yes (<code>Chunk.Raw</code>, <code>ChatRequest.Raw</code>)</td>
+          <td class="px-4 py-3">No (parsed to typed shapes)</td>
+          <td class="px-4 py-3">N/A</td>
+          <td class="px-4 py-3">Yes (you have the bytes)</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">Azure / Bedrock / Vertex</td>
+          <td class="px-4 py-3">Planned v0.2</td>
+          <td class="px-4 py-3">Partial</td>
+          <td class="px-4 py-3">Yes, per vendor</td>
+          <td class="px-4 py-3">Hand-rolled</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">Streaming with <code>ctx</code> cancel</td>
+          <td class="px-4 py-3">Yes; propagates to HTTP</td>
+          <td class="px-4 py-3">Yes</td>
+          <td class="px-4 py-3">Varies; usually yes</td>
+          <td class="px-4 py-3">You write it</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">License</td>
+          <td class="px-4 py-3">Apache-2.0</td>
+          <td class="px-4 py-3">Apache-2.0</td>
+          <td class="px-4 py-3">Apache-2.0 / MIT</td>
+          <td class="px-4 py-3">N/A</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">Pre-1.0 API churn</td>
+          <td class="px-4 py-3">Yes (v0.1.x)</td>
+          <td class="px-4 py-3">Yes (pre-1.0)</td>
+          <td class="px-4 py-3">Mostly stable</td>
+          <td class="px-4 py-3">N/A</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">Dependency footprint</td>
+          <td class="px-4 py-3">stdlib + <code>google/uuid</code></td>
+          <td class="px-4 py-3">Several</td>
+          <td class="px-4 py-3">One per vendor SDK</td>
+          <td class="px-4 py-3">stdlib only</td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3">Embeddings / audio / vision API</td>
+          <td class="px-4 py-3">Not yet (roadmap v0.3 / v0.4)</td>
+          <td class="px-4 py-3">Partial</td>
+          <td class="px-4 py-3">Yes (full vendor surface)</td>
+          <td class="px-4 py-3">Hand-rolled</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="per-vendor-sdks">vs. per-vendor SDKs (<code>openai-go</code>, <code>anthropic-sdk-go</code>, <code>google.golang.org/genai</code>)</h2>
+  <p>
+    Each major vendor publishes an official Go SDK. They are good
+    libraries — stable, idiomatic, fully covering that vendor&rsquo;s
+    feature surface (tool calls, vision, audio, embeddings, assistants,
+    batch APIs, etc.) the day each feature ships. If you only ever call
+    one vendor, you should almost certainly use that vendor&rsquo;s
+    SDK.
+  </p>
+  <p><strong>Pros of per-vendor SDKs.</strong></p>
+  <ul>
+    <li>Stable, post-1.0, officially supported.</li>
+    <li>Complete coverage of that vendor&rsquo;s API surface, including features that have not landed in any cross-vendor abstraction yet.</li>
+    <li>Vendor-specific niceties — e.g. <code>openai-go</code>&rsquo;s strongly typed tool-call helpers, <code>anthropic-sdk-go</code>&rsquo;s helpers for the prompt-caching beta header.</li>
+    <li>Vendor support channels actually know the SDK.</li>
+  </ul>
+  <p><strong>Cons.</strong></p>
+  <ul>
+    <li>One SDK per provider. Your application code branches on which provider you&rsquo;re calling — different types, different request shape, different stream events, different error wrappers.</li>
+    <li>Hard to abstract away if you want to A/B test models across vendors or fail over from one to another.</li>
+    <li>No native concept of &ldquo;same API for OpenAI-compatible third parties.&rdquo;</li>
+    <li>No byte-level passthrough — these SDKs deserialize the wire format into their own types; if you want to proxy bytes you have to use the HTTP transport directly.</li>
+  </ul>
+  <p><strong>Pick the vendor SDK when:</strong></p>
+  <ul>
+    <li>Your code only ever calls one provider, and you have no plan to add another.</li>
+    <li>You need a feature that <code>llmrouter</code> does not model yet (embeddings, audio, vision, assistants, batch).</li>
+    <li>You want the most stable possible API surface.</li>
+  </ul>
+  <p><strong>Pick <code>llmrouter</code> when:</strong></p>
+  <ul>
+    <li>You call more than one vendor, and you don&rsquo;t want to write provider-specific request building and stream parsing twice.</li>
+    <li>You want to support &ldquo;bring your own OpenAI-compatible endpoint&rdquo; (OpenRouter, Together, Groq, vLLM, Ollama) without adding a new SDK per vendor.</li>
+    <li>You want byte-identical pass-through for proxy/gateway use cases.</li>
+  </ul>
+
+  <h2 id="any-llm-go"><code>mozilla-ai/any-llm-go</code></h2>
+  <p>
+    <a href="https://github.com/mozilla-ai/any-llm-go" target="_blank" rel="noopener noreferrer"><code>mozilla-ai/any-llm-go</code></a>
+    is the closest neighbour to <code>llmrouter</code> in the Go
+    ecosystem: a single API surface across multiple LLM providers,
+    streaming-first, channel-based. It supports around ten providers
+    out of the box including OpenAI, Anthropic, Gemini, Mistral, and
+    several others.
+  </p>
+  <p>
+    If you want a Go equivalent of Python&rsquo;s <code>LiteLLM</code>
+    that wraps the most providers and gives you typed access to tool
+    use and (in some cases) embeddings,
+    <code>mozilla-ai/any-llm-go</code> ships more provider coverage
+    today than <code>llmrouter</code> does.
+  </p>
+  <p><strong>Pros of <code>any-llm-go</code>.</strong></p>
+  <ul>
+    <li>Broader provider catalogue out of the box.</li>
+    <li>Typed wrappers around features beyond chat (where available).</li>
+    <li>Backed by Mozilla AI, which gives it some institutional momentum.</li>
+  </ul>
+  <p><strong>Cons / gaps.</strong></p>
+  <ul>
+    <li>No first-class Azure OpenAI Service, AWS Bedrock, or Google Vertex AI provider — the three managed cloud endpoints that most enterprise deployments end up using.</li>
+    <li>No byte passthrough: requests and responses are deserialized into the library&rsquo;s own typed shapes. You cannot run an <code>any-llm-go</code>-fronted proxy that is byte-identical to the upstream OpenAI wire format.</li>
+    <li>Also pre-1.0; expect API changes.</li>
+    <li>OpenAI is just one of many providers, not the canonical reference shape — so the request and response types are <code>any-llm-go</code>&rsquo;s own design, not OpenAI&rsquo;s.</li>
+  </ul>
+  <p><strong>Pick <code>any-llm-go</code> when:</strong></p>
+  <ul>
+    <li>You need a provider <code>llmrouter</code> does not ship yet (e.g. Gemini direct, Mistral, Cohere) and waiting for v0.2 / v0.3 is not viable.</li>
+    <li>You don&rsquo;t care about byte-level passthrough and are happy consuming a library-specific typed surface.</li>
+    <li>You want a closer Go analogue to Python&rsquo;s LiteLLM in shape.</li>
+  </ul>
+  <p><strong>Pick <code>llmrouter</code> when:</strong></p>
+  <ul>
+    <li>You specifically want the <em>OpenAI</em> request and response shape, not a third-library shape. Your existing OpenAI SDK code drops in.</li>
+    <li>You are building a proxy, gateway, or telemetry layer that needs to forward bytes unchanged.</li>
+    <li>You need Azure / Bedrock / Vertex on the roadmap with a single API surface, not three separate vendor SDKs.</li>
+  </ul>
+
+  <h2 id="litellm-openllm">LiteLLM and OpenLLM (Python, for reference)</h2>
+  <p>
+    <a href="https://github.com/BerriAI/litellm" target="_blank" rel="noopener noreferrer">LiteLLM</a>
+    and
+    <a href="https://github.com/bentoml/OpenLLM" target="_blank" rel="noopener noreferrer">OpenLLM</a>
+    are the canonical Python answers to &ldquo;one client, many
+    LLMs.&rdquo; They are excellent — LiteLLM in particular is the de
+    facto standard if you are building in Python and want the OpenAI
+    request shape against any provider, plus features like routing,
+    budget caps, caching, and key rotation.
+  </p>
+  <p>
+    They are listed here only so you do not waste time evaluating
+    them as Go options. If your codebase is Python, use LiteLLM. If
+    it is Go, your choice is between <code>llmrouter</code>, per-vendor
+    SDKs, <code>any-llm-go</code>, or direct HTTP.
+  </p>
+  <p>
+    Note that LiteLLM bundles a lot of <em>gateway</em> features
+    (rate limiting, budget caps, caching, vector store integration)
+    that <code>llmrouter</code> deliberately does not — see
+    <a href="/llmrouter/docs/project/roadmap#out-of-scope">Out of
+    scope</a> on the roadmap page. Those belong in the gateway layer
+    you build <em>on top of</em> a library like <code>llmrouter</code>,
+    not in the library itself.
+  </p>
+
+  <h2 id="direct-http">Direct HTTP (<code>net/http</code> + <code>bufio.Scanner</code>)</h2>
+  <p>
+    Every option above is a wrapper on top of <code>net/http</code>.
+    You can skip them all and write your own client against each
+    vendor&rsquo;s REST endpoint. People do this — sometimes for good
+    reasons.
+  </p>
+  <p><strong>Pros of direct HTTP.</strong></p>
+  <ul>
+    <li>Zero dependencies beyond the standard library.</li>
+    <li>Full control over retry, backoff, connection pooling, observability hooks, header injection, request mutation.</li>
+    <li>No version churn imposed by a third-party library.</li>
+    <li>If you only ever build the one client for the one path you care about, the total code can be smaller than any wrapper&rsquo;s API surface.</li>
+  </ul>
+  <p><strong>Cons.</strong></p>
+  <ul>
+    <li>You re-implement Server-Sent Events parsing per vendor. OpenAI uses standard SSE with <code>data:</code> lines and a sentinel <code>[DONE]</code>. Anthropic uses SSE with named <code>event:</code> types (<code>message_start</code>, <code>content_block_delta</code>, <code>message_delta</code>, <code>message_stop</code>). Each one is correct, none of them are the same.</li>
+    <li>You re-implement the error envelope per vendor. OpenAI uses <code>{`{ "error": { "type": "...", "message": "..." } }`}</code>. Anthropic uses <code>{`{ "type": "error", "error": { "type": "...", "message": "..." } }`}</code>. Vertex returns Google-Cloud-shaped errors. Bedrock returns SigV4-style errors.</li>
+    <li>You re-implement the request body per vendor — including, for Anthropic, the lifted <code>system</code> field and the <code>content</code> block shape.</li>
+    <li>You write context-to-HTTP cancellation wiring, single-consumer channel discipline, and the producer-goroutine lifecycle every time.</li>
+    <li>You re-do all of it for every new provider you add.</li>
+  </ul>
+  <p><strong>Pick direct HTTP when:</strong></p>
+  <ul>
+    <li>You only ever call one endpoint, and the wrapper&rsquo;s convenience does not pay for the dependency.</li>
+    <li>You have a hard constraint against third-party dependencies.</li>
+    <li>You want full control over the wire format because you&rsquo;re doing something unusual (e.g. testing, fuzzing, debugging upstream behaviour).</li>
+  </ul>
+  <p><strong>Pick <code>llmrouter</code> when:</strong></p>
+  <ul>
+    <li>You would otherwise write the same SSE parser, error wrapper, and producer goroutine twice — once per provider — and you&rsquo;d like that code to be the same one library&rsquo;s problem instead.</li>
+  </ul>
+
+  <h2 id="when-llmrouter-fits">When <code>llmrouter</code> is the right choice</h2>
+  <p>The library was built around four motivating use cases. If your project looks like one of these, <code>llmrouter</code> is probably the best fit:</p>
+  <ol>
+    <li>
+      <strong>OpenAI-shaped gateway for multiple upstreams.</strong>
+      You expose an OpenAI-shaped HTTP API to your callers, but
+      internally you route to OpenAI, Anthropic, OpenRouter, or a
+      self-hosted vLLM. With <code>llmrouter</code> your handler does
+      not branch on provider: it builds a single
+      <code>ChatRequest</code>, picks a provider, and streams the
+      result back. Forwarding <code>Chunk.Raw</code> downstream keeps
+      the response byte-identical to upstream OpenAI for callers
+      that have strict expectations of the SSE format.
+    </li>
+    <li>
+      <strong>Bring your own OpenAI-compatible endpoint.</strong>
+      Your users want to point your product at OpenRouter, Together,
+      Groq, vLLM, Ollama, LM Studio, or a private model behind their
+      firewall. With <code>llmrouter</code> this is one
+      <code>WithBaseURL</code> away — no new SDK per endpoint.
+    </li>
+    <li>
+      <strong>Multi-vendor application code.</strong> Your application
+      calls both OpenAI and Anthropic from the same code path (model
+      A/B tests, failover, &ldquo;cheap fast model then expensive
+      smart model&rdquo; cascades). You don&rsquo;t want
+      provider-specific branches inside your business logic; you want
+      the provider abstracted behind one interface.
+    </li>
+    <li>
+      <strong>Production streaming with proper cancellation.</strong>
+      You run a long-lived server that opens streams to upstream
+      LLMs. You need <code>context.Context</code> cancellation that
+      reaches the in-flight HTTP request (so a client hang-up actually
+      kills the upstream connection, freeing budget). The stream
+      semantics in <code>llmrouter</code> are designed for this.
+    </li>
+  </ol>
+
+  <h2 id="when-it-does-not-fit">When <code>llmrouter</code> is the wrong choice (honest weaknesses)</h2>
+  <p>
+    The library is pre-1.0 and intentionally narrow. We&rsquo;d rather
+    you know about the gaps than discover them after a migration.
+  </p>
+  <ul>
+    <li>
+      <strong>Pre-1.0 API churn.</strong> We expect minor breakages
+      between minor versions (v0.1 → v0.2 → v0.3) before we freeze the
+      API at v1.0. If you need a library you can bump without reading
+      changelogs, wait until v1.0 — or pin a minor and absorb a
+      migration each time you upgrade.
+    </li>
+    <li>
+      <strong>Missing providers.</strong> v0.1 ships OpenAI and
+      Anthropic. Azure OpenAI Service, AWS Bedrock, and Google Vertex
+      AI are planned for v0.2 but not shipped yet. Direct Gemini,
+      Mistral, Cohere are not on the near-term roadmap — for those,
+      <code>mozilla-ai/any-llm-go</code> ships today.
+    </li>
+    <li>
+      <strong>No embeddings API.</strong> The library is focused on
+      streaming chat completions. <code>Embed()</code> is on the v0.3
+      roadmap. If you need embeddings <em>now</em>, use the vendor
+      SDK.
+    </li>
+    <li>
+      <strong>No audio / TTS / STT API.</strong> Whisper, GPT-4o
+      audio, and Vertex audio are v0.4 material. Today you would call
+      them with the vendor SDK directly.
+    </li>
+    <li>
+      <strong>No vision provider abstraction yet.</strong> You
+      <em>can</em> send vision content today via
+      <code>ChatRequest.Raw</code> byte passthrough, but there is no
+      typed helper for <code>image_url</code> / <code>image bytes</code>
+      content blocks. That lands in v0.3.
+    </li>
+    <li>
+      <strong>No tool-call typed surface yet.</strong> Same as
+      vision: you can pass tool definitions and consume tool calls
+      via byte passthrough, but the typed
+      <code>ChatRequest.Tools</code> / <code>Choice.Message.ToolCalls</code>
+      shape lands in v0.3.
+    </li>
+    <li>
+      <strong>No gateway features.</strong> Rate limiting, budget
+      caps, response caching, key rotation, vector store integration,
+      persistent conversation state — these are all
+      <em>intentionally</em> out of scope. They belong in a gateway
+      layer you build on top of the library. If you want them
+      bundled, LiteLLM (Python) is closer to that shape.
+    </li>
+  </ul>
+
+  <h2 id="decision-tree">Decision tree</h2>
+  <p>A short, honest version of the above:</p>
+  <ul>
+    <li>
+      <strong>Only ever calling one vendor, want the full vendor
+      surface?</strong> → that vendor&rsquo;s official Go SDK.
+    </li>
+    <li>
+      <strong>Need embeddings, audio, or assistants APIs today?</strong>
+      → the vendor SDK (or <code>any-llm-go</code> for embeddings
+      coverage).
+    </li>
+    <li>
+      <strong>Need Gemini / Mistral / Cohere / a long tail of
+      providers <em>now</em>?</strong> → <code>any-llm-go</code>.
+    </li>
+    <li>
+      <strong>Calling OpenAI + Anthropic + OpenAI-compatible
+      endpoints from one codebase, want OpenAI shape, want byte
+      passthrough, can live with v0.x churn?</strong> →
+      <code>llmrouter</code>.
+    </li>
+    <li>
+      <strong>Building a proxy / gateway that forwards SSE
+      byte-identical to upstream?</strong> → <code>llmrouter</code>
+      (this is the headline use case).
+    </li>
+    <li>
+      <strong>Allergic to dependencies and only need one
+      provider?</strong> → direct <code>net/http</code>.
+    </li>
+  </ul>
+
+  <h2 id="we-were-wrong">If we got something wrong</h2>
+  <p>
+    Comparisons go stale. If something on this page is out of date,
+    or you think we&rsquo;ve mis-characterised an alternative, please
+    open an issue at
+    <a href="https://github.com/elloloop/llmrouter/issues" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/issues</a>
+    with the corrected facts. We&rsquo;d rather have an accurate
+    comparison page than a flattering one.
+  </p>
+</DocsLayout>

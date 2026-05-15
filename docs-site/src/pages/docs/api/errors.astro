@@ -1,0 +1,188 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Errors">
+  <h1>Package llmrouter — Errors</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/errors.go"><code>errors.go</code></a>.
+    Two top-level kinds: a typed wrapper for non-2xx HTTP responses
+    (<a href="#errupstream"><code>ErrUpstream</code></a>) and a sentinel
+    used for configuration validation
+    (<a href="#errinvalidconfig"><code>ErrInvalidConfig</code></a>).
+    Other errors (network, context, scanner) flow through unwrapped from
+    the standard library.
+  </p>
+
+  <h2 id="errupstream">ErrUpstream</h2>
+  <p>
+    Wraps a non-2xx response from the upstream provider. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/errors.go#L9">errors.go#L9</a>.
+  </p>
+
+  <Code lang="go" code={`type ErrUpstream struct {
+    Provider   string
+    StatusCode int
+    Body       string
+}`} />
+
+  <dl>
+    <dt><code>Provider</code></dt>
+    <dd>Stable provider id — <code>"openai"</code>, <code>"anthropic"</code>, &hellip;</dd>
+    <dt><code>StatusCode</code></dt>
+    <dd>The HTTP status code that triggered the wrap. Always <code>&ge; 400</code>.</dd>
+    <dt><code>Body</code></dt>
+    <dd>A snippet of the response body. OpenAI captures up to 1 KiB (whitespace trimmed); Anthropic captures up to 8 KiB (verbatim).</dd>
+  </dl>
+
+  <h3 id="errupstream-error">ErrUpstream.Error</h3>
+  <Code lang="go" code={`func (e *ErrUpstream) Error() string`} />
+  <p>
+    Formatted as: <code>{`fmt.Sprintf("%s upstream %d: %s", e.Provider, e.StatusCode, e.Body)`}</code>.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/errors.go#L15">errors.go#L15</a>.
+  </p>
+  <p>Sample formatted output:</p>
+  <Code lang="text" code={`openai upstream 401: {"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}`} />
+  <Code lang="text" code={`anthropic upstream 429: {"type":"error","error":{"type":"rate_limit_error","message":"..."}}`} />
+
+  <h4>Example: <code>errors.As</code> to inspect</h4>
+  <Code lang="go" code={`stream, err := provider.CompletionStream(ctx, req)
+if err != nil {
+    var upErr *llmrouter.ErrUpstream
+    if errors.As(err, &upErr) {
+        switch upErr.StatusCode {
+        case 401:
+            log.Printf("auth failed for %s: %s", upErr.Provider, upErr.Body)
+        case 429:
+            log.Printf("%s rate-limited, body=%s", upErr.Provider, upErr.Body)
+        case 500, 502, 503, 504:
+            log.Printf("%s upstream %d, retry later", upErr.Provider, upErr.StatusCode)
+        default:
+            log.Printf("%s upstream %d: %s", upErr.Provider, upErr.StatusCode, upErr.Body)
+        }
+        return
+    }
+    log.Fatal(err) // not an upstream error — network, context, etc.
+}`} />
+
+  <h2 id="errinvalidconfig">ErrInvalidConfig</h2>
+  <p>
+    Sentinel returned (wrapped) by every provider's <code>New</code>
+    when required config is missing or malformed. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/errors.go#L20">errors.go#L20</a>.
+  </p>
+
+  <Code lang="go" code={`var ErrInvalidConfig = errors.New("invalid provider config")`} />
+
+  <p>
+    Used as the target of <code>errors.Is</code>. Providers wrap it with
+    additional context, for example:
+  </p>
+  <Code lang="go" code={`// providers/openai/openai.go
+return nil, fmt.Errorf("%w: api key required", llmrouter.ErrInvalidConfig)
+
+// providers/anthropic/anthropic.go
+return nil, fmt.Errorf("%w: anthropic requires an api key", llmrouter.ErrInvalidConfig)`} />
+
+  <h4>Example: <code>errors.Is</code> at construction</h4>
+  <Code lang="go" code={`p, err := openai.New() // missing WithAPIKey
+if errors.Is(err, llmrouter.ErrInvalidConfig) {
+    fmt.Fprintln(os.Stderr, "set OPENAI_API_KEY and try again")
+    os.Exit(2)
+}
+if err != nil {
+    log.Fatal(err)
+}
+_ = p`} />
+
+  <h2 id="categories">Error categories</h2>
+  <p>
+    Every error you can encounter, where it comes from, and how to
+    detect it. <strong>Stream</strong> errors are returned from
+    <code>Stream.Err()</code>; everything else is returned synchronously
+    from <code>New</code> or <code>CompletionStream</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Category</th>
+        <th>Returned by</th>
+        <th>How to detect</th>
+        <th>Examples</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Configuration</strong></td>
+        <td><code>provider.New</code>, <code>llmrouter.NewConfig</code>, individual <code>With*</code> options</td>
+        <td><code>errors.Is(err, llmrouter.ErrInvalidConfig)</code></td>
+        <td>Missing API key, empty base URL, invalid URL syntax, nil HTTP client, non-positive timeout, empty extra key.</td>
+      </tr>
+      <tr>
+        <td><strong>Network</strong></td>
+        <td><code>provider.CompletionStream</code> (synchronous)</td>
+        <td>Plain <code>err != nil</code>; type-assert against <code>*net.OpError</code>, <code>net.Error</code>, <code>*url.Error</code> as needed</td>
+        <td>DNS failure, connection refused, TLS handshake, request-construction errors.</td>
+      </tr>
+      <tr>
+        <td><strong>Upstream</strong></td>
+        <td><code>provider.CompletionStream</code> (synchronous, on HTTP <code>&ge; 400</code>)</td>
+        <td><code>errors.As(err, &amp;upErr)</code> where <code>upErr</code> is <code>*llmrouter.ErrUpstream</code></td>
+        <td>401 auth, 429 rate limit, 400 invalid request body, 500/502/503/504 upstream outage.</td>
+      </tr>
+      <tr>
+        <td><strong>Stream</strong></td>
+        <td><code>Stream.Err()</code> (after channel closes)</td>
+        <td><code>errors.Is(err, context.Canceled)</code>, <code>errors.Is(err, context.DeadlineExceeded)</code>, or generic check on the wrapped scanner error</td>
+        <td>Context cancelled mid-stream, deadline exceeded, SSE scanner buffer overflow, network reset mid-read.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="combined-example">Example: handling every category</h2>
+  <Code lang="go" code={`func runOnce(ctx context.Context) error {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        if errors.Is(err, llmrouter.ErrInvalidConfig) {
+            return fmt.Errorf("configuration: %w", err)
+        }
+        return fmt.Errorf("init: %w", err)
+    }
+
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model:    "gpt-4o-mini",
+        Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+    })
+    if err != nil {
+        var upErr *llmrouter.ErrUpstream
+        switch {
+        case errors.As(err, &upErr):
+            return fmt.Errorf("upstream %d (%s): %s", upErr.StatusCode, upErr.Provider, upErr.Body)
+        default:
+            return fmt.Errorf("network: %w", err)
+        }
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+
+    if err := stream.Err(); err != nil {
+        switch {
+        case errors.Is(err, context.Canceled):
+            return nil // consumer cancelled, treat as success
+        case errors.Is(err, context.DeadlineExceeded):
+            return fmt.Errorf("stream: timeout")
+        default:
+            return fmt.Errorf("stream: %w", err)
+        }
+    }
+    return nil
+}`} />
+</DocsLayout>

@@ -1,0 +1,345 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Byte Passthrough">
+  <h1>Byte Passthrough</h1>
+  <p>
+    If you're building an OpenAI-compatible gateway — a proxy in front
+    of OpenAI, a multi-tenant key vault, an audit layer, a routing
+    layer — there's a specific failure mode that bites you the moment
+    you put real client SDKs in front of it: the bytes you emit have to
+    be exactly the bytes the upstream emitted. Not equivalent JSON, not
+    the same fields in a different order, not a re-marshaled struct.
+    The same bytes.
+  </p>
+  <p>
+    <code>llmrouter</code> is built to make that easy. Every
+    <code>Chunk</code> carries the original wire-format JSON in a
+    <code>Raw</code> field, and every <code>ChatRequest</code> carries
+    an original-bytes <code>Raw</code> field for the request side. The
+    rest of this page covers when that matters, when it doesn't, and how
+    to use it.
+  </p>
+
+  <h2>The problem</h2>
+  <p>
+    Suppose you write the obvious proxy: decode the OpenAI SSE chunk
+    into a struct, look at it, re-encode it, write it back to the
+    client. Functionally identical, right?
+  </p>
+  <p>Three things break:</p>
+  <ul>
+    <li>
+      <strong>Field order.</strong> Go's <code>encoding/json</code>
+      emits fields in the order they appear in the struct. OpenAI emits
+      them in a different order. Client SDKs that diff against captured
+      fixtures will see every chunk as "changed."
+    </li>
+    <li>
+      <strong>Unknown fields.</strong> OpenAI ships new fields all the
+      time: <code>logprobs</code>, <code>system_fingerprint</code>,
+      <code>service_tier</code>, model-specific extras. If your struct
+      doesn't model them, your re-encoded chunk drops them. Some client
+      SDKs use strict-mode JSON parsing that <em>requires</em> these
+      fields, and break with a confusing schema error.
+    </li>
+    <li>
+      <strong>Whitespace and number formatting.</strong> A re-encoded
+      <code>3.14</code> might become <code>3.140000</code>. A
+      pretty-printed input becomes minified output. Hash-based caches
+      downstream invalidate on every chunk.
+    </li>
+  </ul>
+  <p>
+    None of these are bugs in your code. They're bugs in the design.
+    The fix is to never re-encode at all.
+  </p>
+
+  <h2>The solution</h2>
+  <p>
+    Every chunk on the response side carries its original bytes:
+  </p>
+  <Code lang="go" code={`type Chunk struct {
+    ID      string    \`json:"id"\`
+    Object  string    \`json:"object"\`
+    // ... typed fields ...
+
+    // Raw is the original wire-format JSON for this chunk. Passthrough
+    // providers populate this; consumers that want to forward bytes
+    // unmodified should prefer Raw over re-marshaling the typed fields.
+    Raw json.RawMessage \`json:"-"\`
+}`} />
+
+  <p>
+    The OpenAI provider populates <code>Raw</code> with the literal
+    payload of the SSE <code>data:</code> line. The Anthropic provider
+    populates it with the JSON it just synthesized in OpenAI shape (the
+    Anthropic upstream emits a different wire format — see the caveat
+    below).
+  </p>
+  <p>
+    The typed fields are also populated, so your gateway can <em>inspect</em>
+    the chunk (read <code>FinishReason</code>, log <code>Usage</code>)
+    without losing the original bytes you'll forward downstream.
+  </p>
+
+  <h2>When this matters</h2>
+  <ul>
+    <li>
+      <strong>OpenAI-compatible proxies.</strong> Anything that fronts
+      <code>/v1/chat/completions</code> and accepts the official OpenAI
+      SDKs, LangChain, Cline, Continue, Cursor, etc. Those clients
+      expect OpenAI's exact byte stream. Re-marshaling breaks them in
+      subtle, hard-to-diagnose ways.
+    </li>
+    <li>
+      <strong>Audit / observability layers.</strong> If you're storing
+      streams to S3 for replay later, you want the original bytes so
+      the replay is byte-identical to what the client saw.
+    </li>
+    <li>
+      <strong>Cost-attribution gateways.</strong> Where you parse usage
+      from the final chunk for billing, but the rest of the stream
+      should flow through verbatim.
+    </li>
+    <li>
+      <strong>Schema-strict consumers.</strong> Any downstream that
+      uses Pydantic, Zod, or another strict schema validator on
+      OpenAI's response shape.
+    </li>
+  </ul>
+
+  <h2>When it doesn't matter</h2>
+  <ul>
+    <li>
+      <strong>CLI chatbots</strong> — you're concatenating
+      <code>Delta.Content</code> into a string. Use the typed fields.
+    </li>
+    <li>
+      <strong>Multi-provider apps</strong> — you want the normalized
+      shape, not the raw OpenAI/Anthropic bytes. Use the typed fields.
+    </li>
+    <li>
+      <strong>Server-side LLM workflows</strong> — you're parsing a
+      single JSON object out of the response and using it. Use the
+      typed fields.
+    </li>
+  </ul>
+  <p>
+    The general rule: if you're <em>displaying</em> the response or
+    <em>using</em> the response, use the typed fields. If you're
+    <em>forwarding</em> the response, use <code>Raw</code>.
+  </p>
+
+  <h2>The request side: <code>ChatRequest.Raw</code></h2>
+  <p>The same idea on the way in:</p>
+  <Code lang="go" code={`type ChatRequest struct {
+    Model    string    // ...
+    Messages []Message // ...
+    // ... other typed fields ...
+
+    // Raw is the original request bytes for passthrough mode.
+    Raw json.RawMessage \`json:"-"\`
+}`} />
+
+  <p>
+    When the OpenAI provider receives a <code>ChatRequest</code> with
+    a non-empty <code>Raw</code>, it ignores the typed fields almost
+    entirely. It does three minimal rewrites:
+  </p>
+  <Code lang="go" code={`// buildRequestBody assembles the outgoing JSON. If req.Raw is supplied
+// (passthrough mode), it is reused with the model field rewritten;
+// otherwise the typed ChatRequest is marshaled. In both cases we force
+// streaming on with include_usage so the upstream emits a final usage block.
+func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
+    var m map[string]json.RawMessage
+    if len(req.Raw) > 0 {
+        if err := json.Unmarshal(req.Raw, &m); err != nil {
+            return nil, fmt.Errorf("openai: invalid raw request: %w", err)
+        }
+    } else {
+        // ... marshal typed request ...
+    }
+
+    if req.Model != "" {
+        mb, _ := json.Marshal(req.Model)
+        m["model"] = mb
+    }
+    m["stream"] = json.RawMessage(\`true\`)
+    if _, ok := m["stream_options"]; !ok {
+        m["stream_options"] = json.RawMessage(\`{"include_usage":true}\`)
+    }
+    return json.Marshal(m)
+}`} />
+
+  <ul>
+    <li>
+      <strong>Model is rewritten</strong> from <code>req.Model</code>,
+      so your gateway can route <code>gpt-5</code> requests to
+      <code>gpt-4o</code> internally without the client knowing.
+    </li>
+    <li>
+      <strong><code>stream</code> is forced true.</strong> Even if the
+      client sent <code>stream: false</code>, the upstream call streams
+      — and the proxy can decide to buffer-and-respond non-streaming if
+      needed.
+    </li>
+    <li>
+      <strong><code>stream_options.include_usage</code> is forced
+      true</strong> if the client didn't set it, so the final chunk
+      carries token counts.
+    </li>
+  </ul>
+  <p>
+    Every other field — <code>tools</code>, <code>tool_choice</code>,
+    <code>response_format</code>, <code>logprobs</code>,
+    <code>seed</code>, <code>parallel_tool_calls</code>, anything OpenAI
+    adds next year — flows through untouched.
+  </p>
+
+  <h2>The Anthropic caveat</h2>
+  <p>
+    Byte-passthrough cannot be byte-identical against the Anthropic
+    upstream, because the wire format is different. Anthropic uses
+    <code>/v1/messages</code> with named SSE event types
+    (<code>message_start</code>, <code>content_block_delta</code>,
+    <code>message_delta</code>, <code>message_stop</code>); OpenAI uses
+    <code>/v1/chat/completions</code> with anonymous SSE
+    <code>data:</code> frames containing OpenAI's chunk shape.
+  </p>
+  <p>
+    The Anthropic provider translates events into OpenAI-shape chunks
+    and populates <code>Chunk.Raw</code> with that synthesized JSON.
+    So downstream consumers of <code>Raw</code> still see consistent
+    OpenAI-shape bytes — the abstraction holds — but those bytes are
+    constructed by the library, not forwarded from Anthropic.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>What this means in practice.</strong> A gateway built on
+    <code>llmrouter</code> can transparently fail over from OpenAI to
+    Anthropic and back; downstream OpenAI-SDK clients will see a
+    consistent shape either way. They won't see bit-for-bit identical
+    bytes per chunk across providers — there's no honest way to
+    promise that — but they will see valid, parseable OpenAI chunks
+    every time.
+  </aside>
+
+  <h2>Full example: a 30-line OpenAI passthrough proxy</h2>
+  <p>
+    This is a complete <code>http.Handler</code> that accepts an OpenAI
+    chat-completion request on any path, forwards it through
+    <code>llmrouter</code> to OpenAI, and streams the raw response
+    bytes back to the client as SSE. It's deliberately small — a real
+    deployment would add auth, rate limiting, logging, and per-tenant
+    routing.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "io"
+    "log"
+    "net/http"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+    http.HandleFunc("/v1/chat/completions", proxyHandler(p))
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+// proxyHandler returns an SSE handler that forwards the original
+// request body through llmrouter as a passthrough request and streams
+// Chunk.Raw back to the client unmodified.
+func proxyHandler(p llmrouter.Provider) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        body, err := io.ReadAll(r.Body)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
+        // Peek at the model so we can rewrite it if we wanted (we
+        // don't, in this example — we just need it set on the
+        // ChatRequest so the OpenAI provider knows what to forward).
+        var head struct {
+            Model string \`json:"model"\`
+        }
+        _ = json.Unmarshal(body, &head)
+
+        stream, err := p.CompletionStream(r.Context(), llmrouter.ChatRequest{
+            Model: head.Model,
+            Raw:   body,
+        })
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusBadGateway)
+            return
+        }
+
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.Header().Set("Cache-Control", "no-cache")
+        flusher, _ := w.(http.Flusher)
+        for chunk := range stream.Chunks() {
+            fmt.Fprintf(w, "data: %s\\n\\n", chunk.Raw)
+            if flusher != nil {
+                flusher.Flush()
+            }
+        }
+        // OpenAI clients expect a terminal [DONE] frame.
+        fmt.Fprint(w, "data: [DONE]\\n\\n")
+        if flusher != nil {
+            flusher.Flush()
+        }
+
+        if err := stream.Err(); err != nil {
+            log.Printf("stream ended with error: %v", err)
+        }
+    }
+}`} />
+
+  <p>
+    What the client sees: byte-identical OpenAI SSE chunks. What you
+    get on the server: the ability to inspect every chunk (read the
+    typed <code>Choices[0].FinishReason</code>, log the final
+    <code>Usage</code>) without re-encoding any of the bytes you
+    forward.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Tip.</strong> Wire <code>r.Context()</code> into
+    <code>CompletionStream</code> as shown. When the client disconnects
+    (e.g. closes the browser tab), the request context cancels, which
+    cancels the upstream OpenAI HTTP call, which means you stop paying
+    for tokens you're not going to deliver. See
+    <a href="/llmrouter/docs/concepts/context/">Context &amp;
+    Cancellation</a>.
+  </aside>
+
+  <h2>Next steps</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/streaming/">The Streaming
+      Model</a> — full coverage of <code>Stream</code>, chunks, and
+      cancellation.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> —
+      <code>WithBaseURL</code> for OpenRouter, Groq, Together, vLLM,
+      and other OpenAI-compatible endpoints.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/errors/">Error Handling</a> —
+      how upstream 4xx/5xx errors surface and how to retry safely.
+    </li>
+  </ul>
+</DocsLayout>

@@ -1,0 +1,427 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Quick Start">
+  <h1>Quick Start</h1>
+  <p>
+    From an empty directory to a streaming completion in about two
+    minutes. We'll go through the OpenAI example first, then run the same
+    program against Anthropic, then walk through the anatomy of the call
+    and how to cancel a stream cleanly.
+  </p>
+  <p>
+    This page assumes you have already run
+    <a href="/llmrouter/docs/installation"><code>go get github.com/elloloop/llmrouter</code></a>.
+    If not, do that first.
+  </p>
+
+  <h2 id="setup">1. Set up environment variables</h2>
+  <p>
+    Neither the OpenAI nor the Anthropic provider reads environment
+    variables on its own — you pass the key in via
+    <code>llmrouter.WithAPIKey</code>. We use the standard env vars
+    below for symmetry with the official SDKs.
+  </p>
+  <Code lang="bash" code={`export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."`} />
+  <p>
+    Pick whichever provider you have a key for. The OpenAI example is
+    the canonical entry point; the Anthropic example is the same program
+    with one import and one model id changed.
+  </p>
+
+  <h2 id="openai">2. Hello, OpenAI</h2>
+  <p>
+    Save the following as <code>main.go</code> in a fresh directory.
+    It opens a streaming chat completion, prints each delta to
+    <code>stdout</code> as it arrives, and exits when the upstream
+    closes the stream.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		log.Fatal("OPENAI_API_KEY is not set")
+	}
+
+	provider, err := openai.New(llmrouter.WithAPIKey(apiKey))
+	if err != nil {
+		log.Fatalf("provider init: %v", err)
+	}
+
+	ctx := context.Background()
+	stream, err := provider.CompletionStream(ctx, llmrouter.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("system", "You are concise."),
+			llmrouter.TextMessage("user", "Say hi in five words."),
+		},
+	})
+	if err != nil {
+		log.Fatalf("completion: %v", err)
+	}
+
+	for chunk := range stream.Chunks() {
+		for _, choice := range chunk.Choices {
+			fmt.Print(choice.Delta.Content)
+		}
+	}
+	fmt.Println()
+
+	if err := stream.Err(); err != nil {
+		log.Fatalf("stream finished with error: %v", err)
+	}
+}
+`} />
+  <p>Run it:</p>
+  <Code lang="bash" code={`go run .`} />
+  <p>You should see five words print, one delta at a time, then a newline. For example:</p>
+  <Code lang="text" code={`Hi there, friend, hello world.`} />
+  <p>
+    No buffering, no full-response wait — each token reaches your
+    terminal as soon as OpenAI emits it. The
+    <code>for chunk := range stream.Chunks()</code> loop terminates when
+    the upstream closes the SSE connection or when the context is
+    cancelled.
+  </p>
+
+  <h2 id="anthropic">3. Hello, Anthropic</h2>
+  <p>
+    The exact same program, with three changes: the import, the
+    constructor, and the model id. Note the explicit
+    <code>MaxTokens</code> — the Anthropic API requires
+    <code>max_tokens</code> on every request, so set it on
+    <code>ChatRequest</code> whenever you talk to Anthropic.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/providers/anthropic"
+)
+
+func main() {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		log.Fatal("ANTHROPIC_API_KEY is not set")
+	}
+
+	provider, err := anthropic.New(llmrouter.WithAPIKey(apiKey))
+	if err != nil {
+		log.Fatalf("provider init: %v", err)
+	}
+
+	ctx := context.Background()
+	stream, err := provider.CompletionStream(ctx, llmrouter.ChatRequest{
+		Model: "claude-3-5-sonnet-latest",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("system", "You are concise."),
+			llmrouter.TextMessage("user", "Say hi in five words."),
+		},
+		MaxTokens: 256,
+	})
+	if err != nil {
+		log.Fatalf("completion: %v", err)
+	}
+
+	for chunk := range stream.Chunks() {
+		for _, choice := range chunk.Choices {
+			fmt.Print(choice.Delta.Content)
+		}
+	}
+	fmt.Println()
+
+	if err := stream.Err(); err != nil {
+		log.Fatalf("stream finished with error: %v", err)
+	}
+}
+`} />
+  <p>
+    Notice what didn't change: the loop, the
+    <code>ChatRequest</code> shape, the <code>Stream</code> consumer,
+    the error handling. Anthropic's request body and SSE event format
+    are completely different from OpenAI's, but the
+    <a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a>
+    translates both directions inside <code>CompletionStream</code> so
+    your call site never sees the difference.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Tip.</strong> The <code>system</code> role in
+    <code>Messages</code> is special-cased by the Anthropic provider —
+    it gets lifted out of the messages array and into Anthropic's
+    top-level <code>system</code> field on the wire. You don't need to
+    do anything; just write <code>system</code> as if you were calling
+    OpenAI.
+  </aside>
+
+  <h2 id="anatomy">4. Anatomy of the call</h2>
+  <p>
+    Three types do the work:
+    <a href="/llmrouter/docs/api/llmrouter/#chatrequest"><code>ChatRequest</code></a>,
+    <a href="/llmrouter/docs/api/llmrouter/#stream"><code>Stream</code></a>,
+    and <a href="/llmrouter/docs/api/llmrouter/#chunk"><code>Chunk</code></a>.
+    Understanding them is most of the library.
+  </p>
+
+  <h3 id="anatomy-chatrequest">ChatRequest</h3>
+  <p>
+    <code>ChatRequest</code> mirrors OpenAI's
+    <code>/v1/chat/completions</code> request body. The fields most
+    callers set are:
+  </p>
+  <Code lang="go" code={`type ChatRequest struct {
+	Model       string          // e.g. "gpt-4o-mini", "claude-3-5-sonnet-latest"
+	Messages    []Message       // role + content for each turn
+	MaxTokens   int             // required by Anthropic; optional for OpenAI
+	Temperature *float64        // *float64 so 0 is distinguishable from "unset"
+	TopP        *float64
+	Stop        []string
+	User        string
+	Stream      bool            // ignored — streaming is implicit in CompletionStream
+	Raw         json.RawMessage // see below
+}`} />
+  <p>
+    <code>Raw</code> is the byte-passthrough escape hatch. When you set
+    <code>Raw</code> on a request handed to a passthrough provider
+    (OpenAI), the provider forwards those bytes verbatim instead of
+    serializing the typed fields. Anything the typed surface doesn't
+    model — tool calls, vision, <code>response_format</code>,
+    structured outputs, vendor-specific extensions — reaches the
+    upstream unchanged. For translating providers (Anthropic),
+    <code>Raw</code> is ignored; the provider always serializes its own
+    body shape from the typed fields.
+  </p>
+
+  <h3 id="anatomy-stream">Stream</h3>
+  <p>The <code>Stream</code> handle has three operations:</p>
+  <Code lang="go" code={`type Stream struct { /* ... */ }
+
+// Chunks returns a receive-only channel. Range over it until it closes.
+func (s *Stream) Chunks() <-chan Chunk
+
+// Err returns the terminal error. Blocks until the producer finishes;
+// returns nil on a clean stream.
+func (s *Stream) Err() error
+
+// Cancel asks the producer goroutine to stop. The chunks channel will
+// close once the cancellation is observed. Safe to call multiple times.
+func (s *Stream) Cancel()`} />
+  <p>The canonical consumer loop is exactly:</p>
+  <Code lang="go" code={`for chunk := range stream.Chunks() {
+	for _, choice := range chunk.Choices {
+		fmt.Print(choice.Delta.Content)
+	}
+}
+if err := stream.Err(); err != nil {
+	// handle: network failure, ErrUpstream non-2xx, context cancelled, parse error
+}`} />
+  <p>
+    The order matters. <code>stream.Err()</code> blocks until the
+    producer goroutine has finished, so calling it before the
+    <code>Chunks()</code> channel closes would deadlock. The library
+    enforces single-consumer semantics: only one goroutine should read
+    from <code>Chunks()</code>; if you need to fan out, do it on your
+    side of the channel.
+  </p>
+
+  <h3 id="anatomy-chunk">Chunk</h3>
+  <p>Each <code>Chunk</code> is one streaming delta, normalized to OpenAI shape:</p>
+  <Code lang="go" code={`type Chunk struct {
+	ID      string
+	Object  string
+	Created int64
+	Model   string
+	Choices []Choice
+	Usage   *Usage          // populated only on the final chunk when upstream reports it
+	Raw     json.RawMessage // original wire-format JSON for this chunk
+}
+
+type Choice struct {
+	Index        int
+	Delta        Delta
+	FinishReason string
+}
+
+type Delta struct {
+	Role    string
+	Content string
+}`} />
+  <p>
+    Most chunks have one <code>Choice</code> with a non-empty
+    <code>Delta.Content</code>. The first chunk in a stream usually
+    carries <code>Delta.Role = "assistant"</code> and empty content;
+    the last chunk carries a <code>FinishReason</code>
+    (<code>"stop"</code>, <code>"length"</code>, <code>"content_filter"</code>,
+    etc.). Don't assume one-content-per-chunk if you're building a
+    gateway — always <code>range</code> over <code>Choices</code>.
+  </p>
+  <p>
+    <code>Chunk.Raw</code> is the original wire-format JSON for this
+    event. If you are building a proxy and want to forward bytes
+    unchanged to a downstream caller, forward <code>Raw</code> instead
+    of re-marshaling the typed fields. See
+    <a href="/llmrouter/docs/concepts/byte-passthrough">Byte
+    passthrough</a> for the details.
+  </p>
+
+  <h2 id="cancellation">5. Cancellation</h2>
+  <p>
+    Cancelling the <code>context.Context</code> you pass to
+    <code>CompletionStream</code> propagates all the way to the
+    in-flight HTTP request. The producer goroutine notices, closes the
+    upstream connection, closes the <code>Chunks()</code> channel, and
+    sets <code>stream.Err()</code> to the context error.
+  </p>
+  <p>
+    The most common pattern is <code>context.WithTimeout</code> for a
+    wall-clock bound on the whole call:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+	provider, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Bound the entire call to 10 seconds.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := provider.CompletionStream(ctx, llmrouter.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("user", "Write a short haiku about Go."),
+		},
+	})
+	if err != nil {
+		log.Fatalf("completion: %v", err)
+	}
+
+	for chunk := range stream.Chunks() {
+		for _, choice := range chunk.Choices {
+			fmt.Print(choice.Delta.Content)
+		}
+	}
+	fmt.Println()
+
+	switch err := stream.Err(); {
+	case err == nil:
+		// success
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Println("upstream took too long; partial output above")
+	case errors.Is(err, context.Canceled):
+		log.Println("call cancelled; partial output above")
+	default:
+		log.Fatalf("stream error: %v", err)
+	}
+}
+`} />
+  <p>
+    <code>stream.Cancel()</code> is equivalent to calling the
+    <code>cancel</code> returned by <code>context.WithCancel</code> —
+    it's a convenience for cases where you didn't keep a reference to
+    the cancel func. Cancelling part-way through is safe: any chunks
+    already buffered in the channel are still delivered, but no new
+    ones are read from the upstream.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Always bound the context.</strong> If you call
+    <code>CompletionStream</code> with <code>context.Background()</code>
+    and the upstream stalls, the goroutine pinned to that request will
+    sit forever. Use <code>context.WithTimeout</code> or
+    <code>context.WithDeadline</code> in any code path that runs in
+    a long-lived server.
+  </aside>
+
+  <h2 id="pitfalls">6. Common pitfalls</h2>
+  <ul>
+    <li>
+      <strong>You must drain Chunks() or call Cancel().</strong> The
+      producer goroutine writes into a 16-deep buffered channel. If you
+      stop reading mid-stream without cancelling, the producer blocks on
+      the next send and the goroutine leaks. Either consume to the end
+      of the channel or call <code>stream.Cancel()</code> when you bail.
+    </li>
+    <li>
+      <strong>Stream is single-consumer.</strong> Don't read from
+      <code>Chunks()</code> from two goroutines. The channel is
+      unsynchronized — concurrent reads will interleave deltas
+      unpredictably. If you need fan-out, build it on your side: one
+      goroutine drains <code>Chunks()</code> and rebroadcasts to N
+      subscribers.
+    </li>
+    <li>
+      <strong>Err() blocks until the producer finishes.</strong>
+      Calling <code>stream.Err()</code> before the
+      <code>Chunks()</code> channel closes is not a bug per se — it
+      just deadlocks until something drains the channel. Always range
+      over <code>Chunks()</code> first, then call <code>Err()</code>.
+    </li>
+    <li>
+      <strong>Anthropic requires MaxTokens.</strong> Anthropic's API
+      rejects requests without <code>max_tokens</code>. Set
+      <code>MaxTokens</code> on every <code>ChatRequest</code> you
+      hand to the Anthropic provider. OpenAI accepts the request
+      without it.
+    </li>
+    <li>
+      <strong>Don't set Stream = true.</strong>
+      <code>ChatRequest.Stream</code> exists for serialization
+      symmetry; the providers always stream regardless. Setting it
+      has no effect and is not surfaced in any non-streaming call
+      (there is no non-streaming call).
+    </li>
+    <li>
+      <strong>Non-2xx responses surface as ErrUpstream.</strong> A 401,
+      a 429, or a 500 reaches you as
+      <code>llmrouter.ErrUpstream</code> through
+      <code>CompletionStream</code> (immediate failure) or
+      <code>stream.Err()</code> (failure after the connection opened).
+      Use <code>errors.As</code> to read <code>StatusCode</code> and
+      <code>Body</code>; see <a href="/llmrouter/docs/concepts/errors">error handling</a>.
+    </li>
+  </ul>
+
+  <h2 id="next">Next steps</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/architecture">Architecture overview</a> — how the provider interface and the streaming producer fit together.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming">Streaming model</a> — producer goroutine, channel buffer, context cancellation in detail.</li>
+    <li><a href="/llmrouter/docs/concepts/byte-passthrough">Byte passthrough</a> — <code>Chunk.Raw</code> and <code>ChatRequest.Raw</code> for proxy/gateway use cases.</li>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> — base-URL override patterns for OpenRouter, Together, Groq, vLLM, Ollama.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a> — request and SSE translation in detail.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type and option, every method, every error.</li>
+  </ul>
+</DocsLayout>

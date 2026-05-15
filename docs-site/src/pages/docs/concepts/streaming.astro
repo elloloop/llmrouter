@@ -1,0 +1,410 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="The Streaming Model">
+  <h1>The Streaming Model</h1>
+  <p>
+    Every call into <code>llmrouter</code> returns a <code>*Stream</code>.
+    A <code>Stream</code> is a small handle around a buffered channel of
+    chunks plus a context cancellation function. It deliberately looks
+    and behaves like an idiomatic Go channel pipeline — read until
+    closed, then check the terminal error.
+  </p>
+
+  <h2>Lifecycle</h2>
+  <p>
+    When you call <code>CompletionStream</code>, the provider does three
+    things synchronously before returning to you:
+  </p>
+  <ol>
+    <li>Build the upstream HTTP request body.</li>
+    <li>Send the HTTP request and read response headers.</li>
+    <li>If the status is &gt;= 400, read up to 1KB (OpenAI) or 8KB
+      (Anthropic) of the body and return an <code>*ErrUpstream</code>.
+      Otherwise, allocate the <code>Stream</code>, spawn a producer
+      goroutine, and return.</li>
+  </ol>
+  <p>
+    After that point the producer goroutine owns the HTTP response body.
+    It reads SSE frames, decodes each one into a
+    <code>llmrouter.Chunk</code>, and pushes it into a buffered channel
+    of size 16. Your code reads from that channel via
+    <code>Chunks()</code>. When the producer finishes — whether on
+    success, upstream error, network error, or context cancellation — it
+    closes the channel and stores the terminal error.
+  </p>
+  <p>The consumer side is a one-liner pattern:</p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, req)
+if err != nil {
+    return err // could not even open the stream
+}
+for chunk := range stream.Chunks() {
+    // ... use chunk ...
+}
+if err := stream.Err(); err != nil {
+    return err // stream opened but terminated abnormally
+}`} />
+
+  <p>The <code>Stream</code> type itself is small:</p>
+  <Code lang="go" code={`type Stream struct {
+    chunks chan Chunk
+    cancel context.CancelFunc
+    errMu  chan struct{} // closed when err is final
+    err    error
+}
+
+func (s *Stream) Chunks() <-chan Chunk { return s.chunks }
+func (s *Stream) Err() error           { <-s.errMu; return s.err }
+func (s *Stream) Cancel()              { /* ... */ }`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Note.</strong> <code>Err()</code> blocks until the producer
+    finishes. That's intentional — it lets you write the idiomatic
+    "range, then check error" pattern without races. Don't call
+    <code>Err()</code> before <code>Chunks()</code> drains; you'll
+    deadlock waiting for a goroutine you're starving.
+  </aside>
+
+  <h2>The single-consumer invariant</h2>
+  <p>
+    <strong>Only one goroutine should read from
+    <code>Chunks()</code>.</strong> The library does not synchronize
+    multiple readers. If you fan out to N consumers and they all read
+    from the same channel, you'll get one chunk per reader, scrambled in
+    arrival order, and you'll think the library is broken.
+  </p>
+  <p>If you need fan-out, do it on top:</p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "sync"
+
+    "github.com/elloloop/llmrouter"
+)
+
+// fanOut copies chunks from one stream to N output channels. Closes all
+// outputs when the input is drained. Each output channel is single-
+// consumer; the fan-out goroutine is the single consumer of the source.
+func fanOut(ctx context.Context, in *llmrouter.Stream, n int) []<-chan llmrouter.Chunk {
+    outs := make([]chan llmrouter.Chunk, n)
+    readOnly := make([]<-chan llmrouter.Chunk, n)
+    for i := range outs {
+        outs[i] = make(chan llmrouter.Chunk, 16)
+        readOnly[i] = outs[i]
+    }
+    go func() {
+        defer func() {
+            for _, c := range outs {
+                close(c)
+            }
+        }()
+        for chunk := range in.Chunks() {
+            var wg sync.WaitGroup
+            for _, c := range outs {
+                wg.Add(1)
+                go func(ch chan llmrouter.Chunk) {
+                    defer wg.Done()
+                    select {
+                    case ch <- chunk:
+                    case <-ctx.Done():
+                    }
+                }(c)
+            }
+            wg.Wait()
+        }
+    }()
+    return readOnly
+}`} />
+
+  <h2>Backpressure</h2>
+  <p>
+    The internal chunk channel is buffered at <strong>16</strong>. While
+    the buffer has space, the producer pushes chunks as fast as it can
+    decode them off the wire. When the buffer is full, the producer
+    blocks inside <code>sendChunk</code>:
+  </p>
+  <Code lang="go" code={`// sendChunk delivers one chunk to the consumer; respects ctx so a
+// disconnected consumer doesn't pin the producer.
+func (s *Stream) sendChunk(ctx context.Context, c Chunk) bool {
+    select {
+    case s.chunks <- c:
+        return true
+    case <-ctx.Done():
+        return false
+    }
+}`} />
+
+  <p>
+    Two things to notice. First, this is real backpressure all the way
+    up the pipe — if your consumer falls behind, the producer stops
+    reading from the HTTP connection, which (at typical SSE buffer
+    sizes) eventually stops the upstream from sending. Second, the
+    producer races the send against <code>ctx.Done()</code>, so a
+    consumer that disconnects mid-stream can't pin a goroutine on a
+    full buffer waiting for someone who'll never read.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Practical impact.</strong> If you do expensive
+    per-chunk work (rendering markdown, hitting a token counter,
+    posting to a websocket), the buffer of 16 gives you ~16 chunks of
+    slack before the upstream HTTP read stalls. For most use cases
+    that's plenty. If your per-chunk work is genuinely slow, add your
+    own buffered channel downstream.
+  </aside>
+
+  <h2>Cancellation</h2>
+  <p>There are two ways to terminate a stream early:</p>
+  <ul>
+    <li>
+      <strong>Cancel the parent context.</strong> Call the
+      <code>cancel</code> function returned by
+      <code>context.WithCancel</code> or <code>context.WithTimeout</code>
+      around the request context.
+    </li>
+    <li>
+      <strong>Call <code>stream.Cancel()</code>.</strong> Internally this
+      cancels a child context derived from the request context.
+      Equivalent to cancelling the parent for this one stream; it does
+      not affect siblings.
+    </li>
+  </ul>
+  <p>What happens after cancellation:</p>
+  <ol>
+    <li>The producer goroutine's next <code>sendChunk</code> picks
+      <code>ctx.Done()</code> instead of the channel send. It returns
+      <code>false</code>.</li>
+    <li>The producer calls <code>hooks.Finish(ctx.Err())</code>, which
+      stores the error and closes the chunks channel.</li>
+    <li>The consumer's <code>range</code> loop exits.
+      <code>stream.Err()</code> returns <code>context.Canceled</code>
+      (or <code>context.DeadlineExceeded</code> if a deadline fired).</li>
+    <li>The underlying HTTP connection's <code>Read</code> returns
+      because <code>http.NewRequestWithContext</code> wired the same
+      context into the transport — no orphan TCP socket, no orphan
+      tokens billed.</li>
+  </ol>
+  <p>
+    See <a href="/llmrouter/docs/concepts/context/">Context &amp;
+    Cancellation</a> for a fuller treatment.
+  </p>
+
+  <h2>The <code>Chunk</code> type</h2>
+  <Code lang="go" code={`type Chunk struct {
+    ID      string    \`json:"id"\`
+    Object  string    \`json:"object"\`
+    Created int64     \`json:"created"\`
+    Model   string    \`json:"model"\`
+    Choices []Choice  \`json:"choices"\`
+    Usage   *Usage    \`json:"usage,omitempty"\`
+
+    // Raw is the original wire-format JSON for this chunk.
+    Raw json.RawMessage \`json:"-"\`
+}`} />
+
+  <ul>
+    <li>
+      <strong><code>ID</code>, <code>Object</code>, <code>Created</code>,
+      <code>Model</code></strong> — OpenAI Chat Completion chunk
+      fields. Same on every chunk in a stream. Anthropic provides
+      these as a synthesized chat completion id
+      (<code>chatcmpl-&lt;uuid&gt;</code>) plus the model echoed from
+      <code>message_start</code>.
+    </li>
+    <li>
+      <strong><code>Choices</code></strong> — typically a single-element
+      slice in streaming. The interesting field is
+      <code>Choices[0].Delta</code>.
+    </li>
+    <li>
+      <strong><code>Usage</code></strong> — token counts. Populated
+      <em>only on the final chunk</em>. On OpenAI this requires
+      <code>stream_options.include_usage</code> (the OpenAI provider
+      forces this for you). On Anthropic the provider accumulates
+      tokens from <code>message_start</code> and
+      <code>message_delta</code> and emits them on the final chunk.
+    </li>
+    <li>
+      <strong><code>Raw</code></strong> — original JSON bytes. See
+      <a href="/llmrouter/docs/concepts/byte-passthrough/">Byte
+      Passthrough</a>.
+    </li>
+  </ul>
+
+  <h2>The <code>Delta</code> type</h2>
+  <Code lang="go" code={`type Delta struct {
+    Role    string \`json:"role,omitempty"\`
+    Content string \`json:"content,omitempty"\`
+}`} />
+
+  <ul>
+    <li>
+      <strong><code>Role</code></strong> — set <em>once</em>, on the
+      first chunk of a response (always <code>"assistant"</code> for
+      chat completions). Subsequent chunks leave it empty. Don't
+      concatenate <code>Role</code> across chunks; concatenate
+      <code>Content</code>.
+    </li>
+    <li>
+      <strong><code>Content</code></strong> — the incremental token(s)
+      emitted by the model. Concatenating all <code>Content</code>
+      strings across all chunks gives you the full response text.
+    </li>
+  </ul>
+
+  <h2>Finish reason normalization</h2>
+  <p>
+    OpenAI uses one vocabulary for <code>finish_reason</code>; Anthropic
+    uses another (<code>stop_reason</code>). The Anthropic provider
+    normalizes to the OpenAI set on the way out:
+  </p>
+  <Code lang="go" code={`func mapStopReason(r string) string {
+    switch r {
+    case "end_turn", "stop_sequence":
+        return "stop"
+    case "max_tokens":
+        return "length"
+    case "tool_use":
+        return "tool_calls"
+    default:
+        return "stop"
+    }
+}`} />
+
+  <p>So your consumer code can rely on a single set of values:</p>
+  <ul>
+    <li><code>"stop"</code> — natural end of response.</li>
+    <li><code>"length"</code> — hit the <code>max_tokens</code> ceiling.</li>
+    <li><code>"tool_calls"</code> — model emitted a tool/function call.</li>
+    <li><code>"content_filter"</code> — moderation filter tripped (OpenAI only).</li>
+  </ul>
+  <p>
+    <code>FinishReason</code> is only set on the final chunk that
+    contains it. Most chunks have it as the empty string.
+  </p>
+
+  <h2>Full example: token budget with early termination</h2>
+  <p>
+    The pattern below is how you'd implement a per-request budget cap.
+    It counts emitted characters as a coarse stand-in for tokens, calls
+    <code>stream.Cancel()</code> when the cap is hit, and returns a
+    structured error to the caller:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log"
+    "os"
+    "strings"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// ErrBudgetExceeded is returned when a stream is cut short by the
+// caller because it would have used more than budgetChars characters.
+var ErrBudgetExceeded = errors.New("budget exceeded")
+
+// budgetedChat streams a completion and cancels early if the response
+// would exceed budgetChars characters. Returns whatever text was
+// produced before the cut-off, plus ErrBudgetExceeded if we cut early.
+func budgetedChat(
+    ctx context.Context,
+    p llmrouter.Provider,
+    req llmrouter.ChatRequest,
+    budgetChars int,
+) (string, error) {
+    stream, err := p.CompletionStream(ctx, req)
+    if err != nil {
+        return "", err
+    }
+
+    var (
+        out      strings.Builder
+        consumed int
+        capped   bool
+    )
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            out.WriteString(c.Delta.Content)
+            consumed += len(c.Delta.Content)
+        }
+        if consumed >= budgetChars && !capped {
+            capped = true
+            stream.Cancel()
+            // Don't break — keep draining so the goroutine exits
+            // cleanly and stream.Err() unblocks promptly.
+        }
+    }
+
+    if streamErr := stream.Err(); streamErr != nil {
+        if capped && errors.Is(streamErr, context.Canceled) {
+            return out.String(), ErrBudgetExceeded
+        }
+        return out.String(), streamErr
+    }
+    return out.String(), nil
+}
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    req := llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "write a 500-word essay on goroutines"),
+        },
+    }
+
+    text, err := budgetedChat(ctx, p, req, 200)
+    fmt.Printf("---\\n%s\\n---\\n", text)
+    switch {
+    case errors.Is(err, ErrBudgetExceeded):
+        fmt.Println("(stopped at budget)")
+    case err != nil:
+        fmt.Println("error:", err)
+    default:
+        fmt.Println("(completed naturally)")
+    }
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Why drain after Cancel?</strong> If you <code>break</code>
+    out of the range loop on cancel, the producer goroutine may still
+    be blocked on a send into the buffered channel. Letting the loop
+    keep draining until the channel is naturally closed guarantees the
+    goroutine exits promptly and <code>stream.Err()</code> doesn't
+    block waiting for it.
+  </aside>
+
+  <h2>Next steps</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/byte-passthrough/">Byte
+      Passthrough</a> — how <code>Chunk.Raw</code> lets gateways forward
+      original SSE bytes verbatim.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/context/">Context &amp;
+      Cancellation</a> — deeper coverage of cancellation, deadlines,
+      and HTTP-handler patterns.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/errors/">Error Handling</a> —
+      distinguishing config, upstream, network, and stream errors.
+    </li>
+  </ul>
+</DocsLayout>

@@ -1,0 +1,205 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Streams">
+  <h1>Package llmrouter — Streams</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go"><code>stream.go</code></a>.
+    A <code>Stream</code> is the handle a consumer uses to read chunks;
+    <code>NewStream</code> and <code>ProducerHooks</code> are the
+    plumbing a provider implementation uses to push them.
+  </p>
+
+  <h2 id="stream">Stream</h2>
+  <p>
+    The streaming-completion handle. Single-consumer: only one goroutine
+    should read <a href="#stream-chunks"><code>Chunks()</code></a> for a
+    given <code>Stream</code>. All fields are unexported; interact
+    through the methods below. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go#L10">stream.go#L10</a>.
+  </p>
+
+  <Code lang="go" code={`type Stream struct {
+    // unexported fields: chunks chan, cancel func, errMu chan, err error
+}`} />
+
+  <h3 id="stream-chunks">Stream.Chunks</h3>
+  <Code lang="go" code={`func (s *Stream) Chunks() <-chan Chunk`} />
+  <p>
+    Returns the receive-only chunk channel. The channel is buffered with
+    capacity <strong>16</strong> and closes exactly once, after the
+    producer calls <code>Finish</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go#L29">stream.go#L29</a>.
+  </p>
+  <p>
+    Once the channel is closed, any subsequent receive returns the zero
+    <code>Chunk</code> immediately — the canonical
+    <code>for chunk := range stream.Chunks()</code> loop terminates
+    naturally.
+  </p>
+
+  <h3 id="stream-err">Stream.Err</h3>
+  <Code lang="go" code={`func (s *Stream) Err() error`} />
+  <p>
+    Returns the terminal error, if any. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go#L33">stream.go#L33</a>.
+  </p>
+  <p>Semantics:</p>
+  <ul>
+    <li><strong>Blocks</strong> until the producer finishes — internally it waits on a sentinel channel (<code>errMu</code>) that the producer closes inside <code>Finish</code>.</li>
+    <li>After unblocking, returns the same error value on every subsequent call.</li>
+    <li><strong>Safe to call multiple times.</strong> Reading from a closed channel never blocks, so every reader gets the same answer.</li>
+    <li>Returns <code>nil</code> on clean stream completion. Returns <code>context.Canceled</code> / <code>context.DeadlineExceeded</code> if the context cancelled mid-stream. Returns the wrapped scanner error if reading the SSE body failed.</li>
+  </ul>
+
+  <h3 id="stream-cancel">Stream.Cancel</h3>
+  <Code lang="go" code={`func (s *Stream) Cancel()`} />
+  <p>
+    Asks the producer to stop. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go#L40">stream.go#L40</a>.
+  </p>
+  <p>
+    Cancels the internal context derived from the parent that was passed
+    to <a href="#newstream"><code>NewStream</code></a>. The producer
+    notices the cancellation on its next loop iteration, calls
+    <code>Finish(ctx.Err())</code>, and closes <code>Chunks()</code>.
+    <strong>Idempotent</strong> — calling
+    <code>cancel()</code> multiple times is a no-op after the first.
+  </p>
+
+  <h4>Example: consumer-side stream lifecycle</h4>
+  <Code lang="go" code={`ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+stream, err := provider.CompletionStream(ctx, req)
+if err != nil {
+    return err
+}
+
+// Optional: bail out after the first 200 characters.
+var seen int
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        seen += len(c.Delta.Content)
+        fmt.Print(c.Delta.Content)
+    }
+    if seen >= 200 {
+        stream.Cancel() // tell the producer to stop; loop drains until close
+    }
+}
+
+if err := stream.Err(); err != nil && !errors.Is(err, context.Canceled) {
+    return err
+}`} />
+
+  <h2 id="lifecycle">Stream lifecycle</h2>
+  <p>The complete state machine for a single <code>Stream</code>:</p>
+  <ol>
+    <li>Provider calls <code>NewStream(parent)</code> — derived ctx, empty buffered channel (cap 16), unclosed <code>errMu</code> sentinel.</li>
+    <li>Provider spawns a goroutine that calls <code>hooks.Send(chunk)</code> for each event from the upstream.</li>
+    <li>Consumer ranges over <code>stream.Chunks()</code>, processing each chunk.</li>
+    <li>Producer reaches end-of-stream (<code>[DONE]</code>, <code>message_stop</code>) or hits a fatal error or notices ctx cancellation.</li>
+    <li>Producer calls <code>hooks.Finish(err)</code>. This closes the chunks channel and the <code>errMu</code> sentinel atomically.</li>
+    <li>Consumer's <code>range</code> loop exits.</li>
+    <li>Consumer calls <code>stream.Err()</code> — returns the value the producer passed to <code>Finish</code>.</li>
+  </ol>
+  <p>
+    <code>hooks.Send</code> returns <code>false</code> as soon as the
+    internal context cancels (either because the parent context cancelled
+    or because <code>Stream.Cancel()</code> was called). The producer is
+    expected to react to <code>false</code> by calling
+    <code>Finish(ctx.Err())</code> and exiting.
+  </p>
+
+  <h2 id="newstream">NewStream</h2>
+  <p>
+    Exported for provider implementations in subpackages. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go#L66">stream.go#L66</a>.
+  </p>
+
+  <Code lang="go" code={`func NewStream(parent context.Context) (*Stream, context.Context, ProducerHooks)`} />
+
+  <p>Returns three things:</p>
+  <ol>
+    <li>The <code>*Stream</code> handed to the consumer (returned by the provider's <code>CompletionStream</code>).</li>
+    <li>A derived <code>context.Context</code> the producer should respect for cancellation and request scoping.</li>
+    <li>A <a href="#producerhooks"><code>ProducerHooks</code></a> struct exposing <code>Send</code> and <code>Finish</code>.</li>
+  </ol>
+  <p>
+    Internally derives the context with <code>context.WithCancel(parent)</code>
+    and stores the cancel function on the <code>Stream</code> so that
+    <a href="#stream-cancel"><code>Stream.Cancel</code></a> can trip it.
+  </p>
+
+  <h2 id="producerhooks">ProducerHooks</h2>
+  <p>
+    The callbacks a provider uses to feed a <code>Stream</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/stream.go#L78">stream.go#L78</a>.
+  </p>
+
+  <Code lang="go" code={`type ProducerHooks struct {
+    Send   func(Chunk) bool
+    Finish func(error)
+}`} />
+
+  <dl>
+    <dt><code>Send(c Chunk) bool</code></dt>
+    <dd>Forwards one chunk to the consumer. Blocks if the buffered channel (cap 16) is full and the consumer is slow. Returns <code>false</code> as soon as the internal context cancels — the producer must then stop reading and call <code>Finish(ctx.Err())</code>.</dd>
+    <dt><code>Finish(err error)</code></dt>
+    <dd>Terminates the stream. Stores <code>err</code> as the terminal error, closes the chunks channel, and closes the internal <code>errMu</code> sentinel so any pending <code>Stream.Err()</code> calls unblock. <strong>Must be called exactly once</strong> per stream.</dd>
+  </dl>
+
+  <h2 id="implementing-a-provider">Example: implementing a provider</h2>
+  <p>
+    The full pattern used by both built-in providers. <code>Send</code>
+    returns <code>false</code> on consumer cancellation; the producer
+    bails out cleanly. <code>Finish</code> is called once in every exit
+    path — including the error and cancel paths — so the consumer's
+    <code>Err()</code> call never deadlocks.
+  </p>
+
+  <Code lang="go" code={`func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error) {
+    resp, err := p.openUpstream(ctx, req) // returns *http.Response, error
+    if err != nil {
+        return nil, err
+    }
+    if resp.StatusCode >= 400 {
+        defer resp.Body.Close()
+        body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+        return nil, &llmrouter.ErrUpstream{
+            Provider:   p.Name(),
+            StatusCode: resp.StatusCode,
+            Body:       string(body),
+        }
+    }
+
+    stream, sctx, hooks := llmrouter.NewStream(ctx)
+    go func() {
+        defer resp.Body.Close()
+        scanner := bufio.NewScanner(resp.Body)
+        for scanner.Scan() {
+            if sctx.Err() != nil {
+                hooks.Finish(sctx.Err())
+                return
+            }
+            chunk, ok := parseLine(scanner.Text())
+            if !ok {
+                continue // skip malformed events
+            }
+            if !hooks.Send(chunk) {
+                hooks.Finish(sctx.Err())
+                return
+            }
+        }
+        if err := scanner.Err(); err != nil {
+            hooks.Finish(fmt.Errorf("read stream: %w", err))
+            return
+        }
+        hooks.Finish(nil) // clean end-of-stream
+    }()
+    return stream, nil
+}`} />
+</DocsLayout>

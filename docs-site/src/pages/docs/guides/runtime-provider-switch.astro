@@ -1,0 +1,419 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Switching Providers at Runtime">
+  <h1>Switching Providers at Runtime</h1>
+  <p>
+    Most apps need more than a hardcoded provider. Maybe you're running
+    an A/B test, maybe your enterprise customers each bring their own
+    API keys, maybe a feature flag controls whether a given user goes
+    through OpenAI or Anthropic this week. This guide covers the
+    patterns for picking a provider per-request, per-tenant, or
+    per-feature-flag.
+  </p>
+
+  <h2>The building block: a provider factory</h2>
+  <p>
+    Start with a function that returns the right
+    <a href="/llmrouter/docs/concepts/provider-interface/"><code>llmrouter.Provider</code></a>
+    for a given name. This is the seam every other pattern in this
+    guide builds on.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "fmt"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// GetProvider returns a freshly constructed provider for the given id.
+// Returns an error if the id is unknown or the underlying config is
+// invalid (e.g. missing API key).
+func GetProvider(name string) (llmrouter.Provider, error) {
+    switch name {
+    case "openai":
+        return openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    case "anthropic":
+        return anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    case "openrouter":
+        // OpenAI-compatible endpoint via base URL override.
+        return openai.New(
+            llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+            llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+        )
+    case "groq":
+        return openai.New(
+            llmrouter.WithAPIKey(os.Getenv("GROQ_API_KEY")),
+            llmrouter.WithBaseURL("https://api.groq.com/openai/v1"),
+        )
+    default:
+        return nil, fmt.Errorf("unknown provider %q", name)
+    }
+}`} />
+
+  <h2>Cache the providers</h2>
+  <p>
+    Calling <code>GetProvider</code> on every request works, but it
+    wastes the per-construction work (parsing the base URL, building the
+    default HTTP client). Providers are concurrency-safe — one instance
+    can serve thousands of goroutines simultaneously — so the obvious
+    optimisation is to memoise.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "sync"
+
+    "github.com/elloloop/llmrouter"
+)
+
+// ProviderCache memoises providers by id. The zero value is ready to
+// use. Safe for concurrent access — backed by sync.Map.
+type ProviderCache struct {
+    providers sync.Map // map[string]llmrouter.Provider
+    build     func(name string) (llmrouter.Provider, error)
+}
+
+func NewProviderCache(build func(string) (llmrouter.Provider, error)) *ProviderCache {
+    return &ProviderCache{build: build}
+}
+
+// Get returns the cached provider for name, constructing it on first
+// access. Subsequent calls return the cached instance.
+func (c *ProviderCache) Get(name string) (llmrouter.Provider, error) {
+    if v, ok := c.providers.Load(name); ok {
+        return v.(llmrouter.Provider), nil
+    }
+    p, err := c.build(name)
+    if err != nil {
+        return nil, err
+    }
+    // LoadOrStore: if a concurrent caller raced us to the build, prefer
+    // their instance so we don't end up with two providers wired to the
+    // same upstream.
+    actual, _ := c.providers.LoadOrStore(name, p)
+    return actual.(llmrouter.Provider), nil
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Note on races.</strong> Two simultaneous first-time
+    <code>Get("openai")</code> calls might both build a provider; one
+    of those instances will be discarded by <code>LoadOrStore</code>.
+    That's fine — providers are cheap to construct and the throwaway is
+    garbage-collected. If your <code>build</code> function has side
+    effects (e.g. registering metrics), wrap it with a
+    <code>sync.Once</code> per id.
+  </aside>
+
+  <h2>Pattern 1: per-request via header</h2>
+  <p>
+    Let the client tell you which provider to use through a header. This
+    is the simplest pattern and is great for development environments
+    and A/B test rigs.
+  </p>
+
+  <Code lang="go" code={`// providerFromHeader looks up "X-Provider: openai" or
+// "X-Provider: anthropic" and resolves it through the cache.
+func providerFromHeader(cache *ProviderCache, r *http.Request) (llmrouter.Provider, error) {
+    name := r.Header.Get("X-Provider")
+    if name == "" {
+        name = "openai" // sensible default
+    }
+    return cache.Get(name)
+}`} />
+
+  <p>
+    Wire it as middleware so handlers don't have to know about the
+    cache:
+  </p>
+
+  <Code lang="go" code={`type ctxKey string
+
+const ctxKeyProvider ctxKey = "provider"
+
+// WithProvider is an HTTP middleware that resolves a provider from the
+// request and injects it into the context. Handlers downstream call
+// ProviderFrom(ctx) to retrieve it.
+func WithProvider(cache *ProviderCache) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            p, err := providerFromHeader(cache, r)
+            if err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+            }
+            ctx := context.WithValue(r.Context(), ctxKeyProvider, p)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+
+// ProviderFrom retrieves the provider injected by WithProvider. Panics
+// if the middleware did not run — that's deliberate, it's a
+// programming error not a runtime one.
+func ProviderFrom(ctx context.Context) llmrouter.Provider {
+    return ctx.Value(ctxKeyProvider).(llmrouter.Provider)
+}`} />
+
+  <h2>Pattern 2: per-tenant from config</h2>
+  <p>
+    Each tenant has a row in a database; that row says which provider
+    they use and which API key to use for it. The middleware reads the
+    tenant from the request (a JWT claim, a subdomain, a header), looks
+    up the config, and constructs a provider for it.
+  </p>
+
+  <Code lang="go" code={`// TenantConfig is the per-tenant LLM config. In a real app you'd
+// store this in postgres, fetch it through a cached repository, etc.
+type TenantConfig struct {
+    ProviderName string
+    APIKey       string
+    BaseURL      string // optional — for self-hosted or OpenAI-compatible endpoints
+}
+
+// TenantProviders maps tenant ids to lazily-constructed providers.
+// One Provider instance per tenant, kept for the lifetime of the
+// process.
+type TenantProviders struct {
+    repo  TenantRepo
+    cache sync.Map // map[string]llmrouter.Provider keyed by tenantID
+}
+
+type TenantRepo interface {
+    Lookup(ctx context.Context, tenantID string) (TenantConfig, error)
+}
+
+func (t *TenantProviders) For(ctx context.Context, tenantID string) (llmrouter.Provider, error) {
+    if v, ok := t.cache.Load(tenantID); ok {
+        return v.(llmrouter.Provider), nil
+    }
+    cfg, err := t.repo.Lookup(ctx, tenantID)
+    if err != nil {
+        return nil, fmt.Errorf("lookup tenant %s: %w", tenantID, err)
+    }
+    p, err := buildFromConfig(cfg)
+    if err != nil {
+        return nil, err
+    }
+    actual, _ := t.cache.LoadOrStore(tenantID, p)
+    return actual.(llmrouter.Provider), nil
+}
+
+func buildFromConfig(cfg TenantConfig) (llmrouter.Provider, error) {
+    opts := []llmrouter.Option{llmrouter.WithAPIKey(cfg.APIKey)}
+    if cfg.BaseURL != "" {
+        opts = append(opts, llmrouter.WithBaseURL(cfg.BaseURL))
+    }
+    switch cfg.ProviderName {
+    case "openai":
+        return openai.New(opts...)
+    case "anthropic":
+        return anthropic.New(opts...)
+    default:
+        return nil, fmt.Errorf("unsupported provider %q", cfg.ProviderName)
+    }
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Invalidation.</strong> Once a provider is in the cache, it
+    stays. If a tenant rotates their API key you need to evict the
+    entry. A simple approach: expose <code>tenantProviders.Evict(id)</code>
+    and call it from your admin webhook. A more sophisticated approach
+    is to keep a per-tenant "config version" and rebuild on version
+    bump.
+  </aside>
+
+  <h2>Pattern 3: feature flag</h2>
+  <p>
+    A common rollout pattern: 10% of traffic goes to the new provider,
+    rest stays on the old one. Plug in your feature-flag service.
+  </p>
+
+  <Code lang="go" code={`// pickByFlag asks the feature-flag service which provider to use for
+// the user identified by userID. Falls back to "openai" if the flag
+// service is unavailable — never block the request on a flag-store
+// outage.
+func (g *Gateway) pickByFlag(ctx context.Context, userID string) (llmrouter.Provider, error) {
+    name, err := g.flags.GetString(ctx, "llm.provider", userID)
+    if err != nil {
+        log.Printf("flag lookup failed for %s: %v — using default", userID, err)
+        name = "openai"
+    }
+    return g.providers.Get(name)
+}`} />
+
+  <h2>Putting it all together</h2>
+  <p>
+    A small HTTP server that picks a provider per request from a
+    header, with a sync-map cache and the
+    <a href="/llmrouter/docs/concepts/provider-interface/">provider interface</a>
+    keeping the handler agnostic:
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "io"
+    "log"
+    "net/http"
+    "os"
+    "sync"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+type ctxKey string
+
+const ctxKeyProvider ctxKey = "provider"
+
+type ProviderCache struct {
+    providers sync.Map
+    build     func(string) (llmrouter.Provider, error)
+}
+
+func NewProviderCache(build func(string) (llmrouter.Provider, error)) *ProviderCache {
+    return &ProviderCache{build: build}
+}
+
+func (c *ProviderCache) Get(name string) (llmrouter.Provider, error) {
+    if v, ok := c.providers.Load(name); ok {
+        return v.(llmrouter.Provider), nil
+    }
+    p, err := c.build(name)
+    if err != nil {
+        return nil, err
+    }
+    actual, _ := c.providers.LoadOrStore(name, p)
+    return actual.(llmrouter.Provider), nil
+}
+
+func buildProvider(name string) (llmrouter.Provider, error) {
+    switch name {
+    case "openai":
+        return openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    case "anthropic":
+        return anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    default:
+        return nil, fmt.Errorf("unknown provider %q", name)
+    }
+}
+
+func WithProvider(cache *ProviderCache) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            name := r.Header.Get("X-Provider")
+            if name == "" {
+                name = "openai"
+            }
+            p, err := cache.Get(name)
+            if err != nil {
+                http.Error(w, err.Error(), http.StatusBadRequest)
+                return
+            }
+            ctx := context.WithValue(r.Context(), ctxKeyProvider, p)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+
+func ProviderFrom(ctx context.Context) llmrouter.Provider {
+    return ctx.Value(ctxKeyProvider).(llmrouter.Provider)
+}
+
+// handleChat is provider-agnostic. It reads the provider from the
+// context and asks it for a stream — that's the entire dispatch logic.
+func handleChat(w http.ResponseWriter, r *http.Request) {
+    p := ProviderFrom(r.Context())
+
+    body, _ := io.ReadAll(r.Body)
+    var req llmrouter.ChatRequest
+    req.Raw = body
+    // Decode just the model field for logging.
+    req.Model = r.URL.Query().Get("model")
+    if req.Model == "" {
+        req.Model = "gpt-4o-mini"
+    }
+
+    log.Printf("dispatching %s -> %s", req.Model, p.Name())
+
+    stream, err := p.CompletionStream(r.Context(), req)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadGateway)
+        return
+    }
+    w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+    w.Header().Set("Cache-Control", "no-cache")
+    flusher, _ := w.(http.Flusher)
+    for chunk := range stream.Chunks() {
+        _, _ = w.Write([]byte("data: "))
+        _, _ = w.Write(chunk.Raw)
+        _, _ = w.Write([]byte("\\n\\n"))
+        if flusher != nil {
+            flusher.Flush()
+        }
+    }
+    _, _ = w.Write([]byte("data: [DONE]\\n\\n"))
+}
+
+func main() {
+    cache := NewProviderCache(buildProvider)
+
+    mux := http.NewServeMux()
+    mux.HandleFunc("/v1/chat/completions", handleChat)
+
+    handler := WithProvider(cache)(mux)
+
+    log.Println("listening on :8080")
+    log.Fatal(http.ListenAndServe(":8080", handler))
+}`} />
+
+  <h2>Concurrency notes</h2>
+  <ul>
+    <li>
+      <strong>Providers are safe for concurrent use.</strong> A single
+      <code>*openai.Provider</code> or <code>*anthropic.Provider</code>
+      instance can serve any number of goroutines simultaneously. There
+      is no internal mutable state on the hot path.
+    </li>
+    <li>
+      <strong>Streams are single-consumer.</strong> The <code>*Stream</code>
+      returned by <code>CompletionStream</code> is owned by the calling
+      goroutine; don't share it across goroutines.
+    </li>
+    <li>
+      <strong>The HTTP client is shared.</strong> The provider's
+      <code>*http.Client</code> is reused across calls — which means
+      connection pooling works correctly. Don't construct a new provider
+      per request; you'll lose the pool benefits.
+    </li>
+  </ul>
+
+  <h2>Related</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/guides/build-a-chat-gateway/">Build a chat gateway</a>
+      — combine runtime selection with model-prefix routing.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/multi-provider-failover/">Multi-provider failover</a>
+      — use the cache to back a failover wrapper.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/custom-http-client/">Custom HTTP client &amp; retries</a>
+      — share one HTTP client across providers for unified retries and
+      tracing.
+    </li>
+  </ul>
+</DocsLayout>

@@ -1,0 +1,417 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Cancellation & Timeouts">
+  <h1>Cancellation &amp; Timeouts</h1>
+  <p>
+    Streaming LLM calls have an unusual property: the response can take
+    anywhere from 200ms to several minutes, and the caller may want to
+    abort it at any point — because the user navigated away, because the
+    budget ran out, or because a higher-level deadline expired. There
+    are three different knobs in <code>llmrouter</code> for controlling
+    when a call ends, and which you use matters.
+  </p>
+
+  <h2>The three knobs</h2>
+  <p>
+    Stack them from the outside in:
+  </p>
+
+  <Code lang="text" code={`┌──────────────────────────────────────────────────────────┐
+│ http.Client.Timeout — total wall-clock for the exchange  │
+│  (configured via WithTimeout, or via your custom client) │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ context.WithTimeout — deadline for THIS call       │  │
+│  │  (passed as ctx to CompletionStream)               │  │
+│  │                                                    │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │ stream.Cancel() — abort mid-stream by hand   │  │  │
+│  │  │  (called from the consumer goroutine)        │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘`} />
+
+  <h3>1. <code>http.Client.Timeout</code> — defense in depth</h3>
+  <p>
+    The Go HTTP client has its own total-time-for-the-exchange timeout.
+    When you provide an explicit <code>*http.Client</code> via
+    <a href="/llmrouter/docs/concepts/configuration/"><code>WithHTTPClient</code></a>,
+    its <code>Timeout</code> field governs the entire request including
+    the streaming body. If your stream takes 30 seconds and
+    <code>Timeout = 20 * time.Second</code>, you'll see the client kill
+    the response mid-stream.
+  </p>
+
+  <p>
+    The library default (<code>WithTimeout(120 * time.Second)</code>) is
+    a sensible upper bound for most short chats, but it will cut off
+    long-form completions. For streaming you typically want
+    <code>{`http.Client{Timeout: 0}`}</code> and rely on the per-call
+    context deadline instead.
+  </p>
+
+  <h3>2. <code>context.WithTimeout</code> — per-call deadline</h3>
+  <p>
+    This is the workhorse. Build a <code>context.Context</code> with a
+    deadline and pass it as the first argument to
+    <code>CompletionStream</code>. The provider attaches it to the
+    underlying HTTP request, and the same context is used internally to
+    govern the SSE pump goroutine — so when the deadline expires,
+    everything tears down cleanly.
+  </p>
+
+  <Code lang="go" code={`ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+defer cancel()
+
+stream, err := p.CompletionStream(ctx, req)
+if err != nil {
+    return err
+}
+for chunk := range stream.Chunks() {
+    // ...
+}
+// stream.Err() will be context.DeadlineExceeded if we ran out of time.`} />
+
+  <h3>3. <code>stream.Cancel()</code> — abort by hand</h3>
+  <p>
+    Sometimes you don't know in advance how long you want to wait. The
+    most common case: a token budget. You count tokens as they come in,
+    and when you cross a threshold you call <code>stream.Cancel()</code>
+    to stop the upstream. The library propagates that to the underlying
+    HTTP request and the connection closes.
+  </p>
+
+  <Code lang="go" code={`for chunk := range stream.Chunks() {
+    if budgetExceeded(chunk) {
+        stream.Cancel()
+        break
+    }
+    forwardToClient(chunk)
+}`} />
+
+  <p>
+    <code>Cancel()</code> is safe to call multiple times. It's also
+    safe to call concurrently from a different goroutine — for example,
+    one goroutine drains chunks, another watches a "stop" channel.
+  </p>
+
+  <h2>Why the layering matters</h2>
+  <p>
+    Each knob protects against a different failure mode. You typically
+    want all three:
+  </p>
+  <ul>
+    <li>
+      <strong>HTTP client timeout</strong> catches the case where the
+      upstream stops sending data without closing the connection. It's
+      the ceiling you trust as a last resort.
+    </li>
+    <li>
+      <strong>Per-call deadline</strong> catches "the user only wants to
+      wait a minute." Without it, a long upstream completion ties up the
+      caller until the HTTP timeout kicks in — too long for an
+      interactive UX.
+    </li>
+    <li>
+      <strong><code>stream.Cancel()</code></strong> catches dynamic
+      conditions you can only detect mid-stream: budgets, user
+      navigation, abuse signals.
+    </li>
+  </ul>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>The streaming pitfall.</strong> If you supply
+    <code>WithTimeout(20 * time.Second)</code> hoping it bounds the
+    initial connect time, you'll be surprised when a 90-second
+    completion gets killed at second 20. The Go HTTP client doesn't
+    distinguish "time to receive headers" from "total time including
+    body" — it's a single ceiling. For streaming, use
+    <code>{`WithHTTPClient(&http.Client{Timeout: 0})`}</code> and put
+    the deadline on the context.
+  </aside>
+
+  <h2>Recipe: handler with a budget and a disconnect</h2>
+  <p>
+    The canonical chat handler combines all three timeouts: a 60-second
+    deadline from <code>r.Context()</code>, a 4096-token budget
+    enforced via <code>stream.Cancel()</code>, and a zero-timeout HTTP
+    client because <em>this</em> request might be the long one.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "io"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+const (
+    perRequestDeadline = 60 * time.Second
+    maxOutputTokens    = 4096
+)
+
+type onlyModel struct {
+    Model string \`json:"model"\`
+}
+
+type handler struct {
+    provider llmrouter.Provider
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    // Layer 1: per-call deadline. We chain off r.Context() so client
+    // disconnect ALSO aborts the stream — see the closer goroutine below.
+    ctx, cancel := context.WithTimeout(r.Context(), perRequestDeadline)
+    defer cancel()
+
+    body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    var peek onlyModel
+    if err := json.Unmarshal(body, &peek); err != nil {
+        http.Error(w, "invalid json", http.StatusBadRequest)
+        return
+    }
+
+    stream, err := h.provider.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model: peek.Model,
+        Raw:   body,
+    })
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadGateway)
+        return
+    }
+
+    // Layer 2: client disconnect. r.Context() is the request context.
+    // It cancels when the client TCP disconnects. We already wired it
+    // into the call above, so this watcher is belt-and-suspenders.
+    go func() {
+        <-r.Context().Done()
+        stream.Cancel()
+    }()
+
+    w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+    flusher, _ := w.(http.Flusher)
+
+    // Layer 3: token budget. Count completion tokens as they arrive;
+    // abort the stream once we cross the budget.
+    var completionTokens int
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            // Roughly: every chunk's delta content adds one or more
+            // tokens. For real budgeting use a proper tokenizer; this
+            // string-length heuristic is just illustrative.
+            completionTokens += approxTokens(c.Delta.Content)
+        }
+        if completionTokens > maxOutputTokens {
+            log.Printf("budget exceeded after %d tokens — cancelling", completionTokens)
+            stream.Cancel()
+            break
+        }
+        _, _ = w.Write([]byte("data: "))
+        _, _ = w.Write(chunk.Raw)
+        _, _ = w.Write([]byte("\\n\\n"))
+        if flusher != nil {
+            flusher.Flush()
+        }
+    }
+
+    if err := stream.Err(); err != nil {
+        if ctx.Err() != nil {
+            log.Printf("call ended via context: %v", ctx.Err())
+        } else {
+            log.Printf("stream error: %v", err)
+        }
+    }
+    _, _ = w.Write([]byte("data: [DONE]\\n\\n"))
+}
+
+// approxTokens is a rough placeholder. Replace with a real tokenizer
+// (tiktoken-go, etc.) in production.
+func approxTokens(s string) int {
+    // Roughly four characters per token in English text.
+    if s == "" {
+        return 0
+    }
+    n := len(s) / 4
+    if n == 0 {
+        return 1
+    }
+    return n
+}
+
+func main() {
+    p, err := openai.New(
+        llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+        // Disable the HTTP client timeout — we rely on the per-call
+        // context deadline instead.
+        llmrouter.WithHTTPClient(&http.Client{Timeout: 0}),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    srv := &http.Server{
+        Addr:              ":8080",
+        Handler:           &handler{provider: p},
+        ReadHeaderTimeout: 10 * time.Second,
+        // Critically: no WriteTimeout — it would kill long streams.
+    }
+    fmt.Println("listening on :8080")
+    log.Fatal(srv.ListenAndServe())
+}`} />
+
+  <h2>Recipe: client disconnect from a CLI</h2>
+  <p>
+    The same context plumbing works in CLI tools. Catch SIGINT, cancel
+    the context, and the upstream tears down within a few milliseconds.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Ctrl-C cancels the context, which cancels the stream, which
+    // closes the upstream HTTP connection. No goroutines left behind.
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "tell me a long story"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    fmt.Println()
+    if err := stream.Err(); err != nil {
+        log.Printf("stream ended: %v", err)
+    }
+}`} />
+
+  <h2>When the consumer is slow</h2>
+  <p>
+    The Stream has a small buffered channel (size 16). If your consumer
+    is slower than the upstream produces chunks, the producer
+    backpressures naturally — it blocks on send until you drain.
+  </p>
+
+  <p>
+    If you can't keep up at all (e.g. you're writing to a TCP socket
+    that's stuck), the producer eventually blocks indefinitely. That's
+    why you always pair a streaming call with a context deadline —
+    without one, a slow client can pin the upstream connection forever.
+  </p>
+
+  <h2>What happens on cancellation</h2>
+  <p>
+    When you cancel (any of the three ways):
+  </p>
+  <ol>
+    <li>The Go HTTP layer closes the underlying TCP connection (or the HTTP/2 stream).</li>
+    <li>The SSE pump goroutine inside the provider notices the context is done, stops reading, closes the response body.</li>
+    <li>The chunks channel is closed; your <code>for chunk := range stream.Chunks()</code> loop exits.</li>
+    <li><code>stream.Err()</code> returns <code>context.Canceled</code> or <code>context.DeadlineExceeded</code>.</li>
+  </ol>
+
+  <p>
+    The upstream provider <em>may</em> have already counted the tokens
+    it generated up to that point against your account — Anthropic and
+    OpenAI both bill for the prefix they produced, even if you cancel.
+    That's a billing fact about the providers, not something the
+    library can shield you from.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Tip.</strong> If you're cancelling because of a budget cap,
+    set the upstream's <code>max_tokens</code> to slightly above your
+    budget. The upstream stops first, billing you only for what was
+    actually produced, and you never have to fire
+    <code>stream.Cancel()</code> at all.
+  </aside>
+
+  <h2>Common mistakes</h2>
+  <ul>
+    <li>
+      <strong>Setting <code>WithTimeout(30*time.Second)</code> for streaming.</strong>
+      You'll get mysterious mid-stream cutoffs at the 30-second mark for
+      every long completion. Use <code>{`http.Client{Timeout: 0}`}</code>
+      plus a context deadline.
+    </li>
+    <li>
+      <strong>Forgetting to pass <code>r.Context()</code> from an HTTP handler.</strong>
+      Without it, client disconnects don't reach the upstream, and the
+      provider keeps generating tokens (and billing you) until the
+      response completes.
+    </li>
+    <li>
+      <strong>Setting an aggressive <code>http.Server.WriteTimeout</code>.</strong>
+      The standard library's <code>http.Server</code> kills the response
+      after <code>WriteTimeout</code> elapses; for streaming endpoints
+      this manifests as the SSE connection closing at exactly N seconds
+      every time. Leave it zero for streaming routes.
+    </li>
+    <li>
+      <strong>Not draining <code>stream.Chunks()</code> after cancellation.</strong>
+      The channel always closes when the producer finishes, but if you
+      <code>break</code> out of the loop and then <code>return</code>,
+      the producer goroutine may still be holding the response body.
+      The cleanest pattern: call <code>stream.Cancel()</code> and let
+      the loop drain to completion (which happens within milliseconds).
+    </li>
+  </ul>
+
+  <h2>Related</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/streaming/">The streaming model</a>
+      — how the producer and consumer cooperate, and what
+      <code>stream.Err()</code> tells you.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/custom-http-client/">Custom HTTP client &amp; retries</a>
+      — controlling timeouts at the transport level.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/build-a-chat-gateway/">Build a chat gateway</a>
+      — context plumbing wired into a real HTTP handler.
+    </li>
+  </ul>
+</DocsLayout>

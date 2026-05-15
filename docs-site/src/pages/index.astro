@@ -1,0 +1,1239 @@
+---
+import "../styles/global.css";
+import { ThemeScript, ThemeToggle } from "@refraction-ui/astro";
+import { Code } from "astro-expressive-code/components";
+
+const quickstartCode = `package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+	p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("user", "Say hi in 5 words."),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for chunk := range stream.Chunks() {
+		for _, c := range chunk.Choices {
+			fmt.Print(c.Delta.Content)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		log.Fatal(err)
+	}
+}`;
+
+const anthropicCode = `// Same program, with one import and one model id changed.
+import "github.com/elloloop/llmrouter/providers/anthropic"
+
+p, _ := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+
+stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
+	Model: "claude-3-5-sonnet-latest",
+	Messages: []llmrouter.Message{
+		llmrouter.TextMessage("system", "You are concise."),
+		llmrouter.TextMessage("user", "Why is the sky blue?"),
+	},
+	MaxTokens: 256,
+})`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>llmrouter — One Go client. Every LLM provider.</title>
+    <meta
+      name="description"
+      content="llmrouter is a streaming-first Go library that gives you an OpenAI-shaped API for OpenAI, Anthropic, and any OpenAI-compatible endpoint — with byte-passthrough for gateways and proxies."
+    />
+    <script is:inline>
+      (() => {
+        try {
+          if (!localStorage.getItem("rfr-theme")) {
+            localStorage.setItem("rfr-theme", "dark");
+          }
+        } catch (_) {}
+      })();
+    </script>
+    <ThemeScript />
+  </head>
+  <body class="landing-page">
+    <nav class="top-nav" aria-label="Primary">
+      <div class="container nav-inner">
+        <a href="/llmrouter/" class="logo"><span>&gt;</span> llmrouter</a>
+        <ul class="nav-links">
+          <li><a href="#why">Why</a></li>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#quickstart">Quick start</a></li>
+          <li><a href="#providers">Providers</a></li>
+          <li><a href="/llmrouter/docs/">Docs</a></li>
+          <li>
+            <a href="https://github.com/elloloop/llmrouter" target="_blank" rel="noopener">
+              GitHub
+            </a>
+          </li>
+        </ul>
+        <div class="nav-actions">
+          <ThemeToggle variant="segmented" />
+          <a href="#install" class="nav-cta">Get Started</a>
+        </div>
+      </div>
+    </nav>
+
+    <main data-pagefind-body>
+      <section class="hero">
+        <div class="container">
+          <div class="badge">
+            <span class="dot"></span>
+            v0.1.1 &middot; OpenAI &middot; Anthropic &middot; any OpenAI-compatible endpoint
+          </div>
+          <h1>
+            One Go client.<br />
+            <span class="gradient">Every LLM provider.</span>
+          </h1>
+          <p class="subtitle">
+            <strong>llmrouter</strong> is a streaming-first Go library
+            that gives you an OpenAI-shaped API for OpenAI, Anthropic,
+            and any OpenAI-compatible endpoint &mdash; with
+            byte-passthrough for building gateways and proxies.
+          </p>
+          <div class="install-highlight">
+            <div class="install-box">
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.1.1</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.1.1">
+                Copy
+              </button>
+            </div>
+            <span class="install-platforms-hero">
+              Go 1.23+ &middot; Apache-2.0 &middot; stdlib + <code>google/uuid</code> only
+            </span>
+          </div>
+          <div class="hero-buttons">
+            <a href="/llmrouter/docs/" class="btn btn-primary">
+              Read the Docs
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+              </svg>
+            </a>
+            <a
+              href="https://github.com/elloloop/llmrouter"
+              target="_blank"
+              rel="noopener"
+              class="btn btn-secondary"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 20.85c-3.43.75-4.15-1.65-4.15-1.65-.55-1.41-1.35-1.78-1.35-1.78-1.1-.76.09-.74.09-.74 1.22.09 1.87 1.25 1.87 1.25 1.08 1.86 2.84 1.32 3.53 1.01.11-.78.42-1.32.77-1.62-2.74-.31-5.62-1.37-5.62-6.1 0-1.35.48-2.45 1.27-3.31-.13-.31-.55-1.57.12-3.26 0 0 1.03-.33 3.38 1.26a11.74 11.74 0 0 1 6.16 0c2.34-1.6 3.37-1.26 3.37-1.26.67 1.69.25 2.95.12 3.26.8.86 1.27 1.96 1.27 3.31 0 4.74-2.89 5.79-5.64 6.09.44.38.84 1.13.84 2.28l-.01 3.38c0 .31.22.69.84.57A12 12 0 0 0 12 .3" />
+              </svg>
+              GitHub
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="why-section" id="why">
+        <div class="container">
+          <p class="section-label reveal">Why llmrouter</p>
+          <h2 class="section-heading reveal">
+            Three properties. That&rsquo;s the whole pitch.
+          </h2>
+          <p class="section-sub reveal">
+            Most multi-LLM libraries reach for breadth. llmrouter is
+            narrower and more opinionated &mdash; designed around the
+            shape of code that has to ship to production.
+          </p>
+          <div class="pillars reveal">
+            <article class="pillar">
+              <div class="pillar-icon">S</div>
+              <h3>Streaming-first</h3>
+              <p>
+                Channel-based deltas with a producer goroutine and
+                proper <code>context.Context</code> cancellation that
+                propagates all the way to the in-flight HTTP request.
+                Cancel the context and the upstream connection closes
+                &mdash; no leaked goroutines, no orphaned token spend.
+              </p>
+            </article>
+            <article class="pillar">
+              <div class="pillar-icon">B</div>
+              <h3>Byte passthrough</h3>
+              <p>
+                Every chunk preserves its original wire bytes via
+                <code>Chunk.Raw</code>. Build proxies and gateways
+                that are byte-identical to upstream OpenAI without
+                re-marshalling typed structs &mdash; the bytes you
+                forward downstream are the bytes you received.
+              </p>
+            </article>
+            <article class="pillar">
+              <div class="pillar-icon">D</div>
+              <h3>Boring dependencies</h3>
+              <p>
+                The only dependencies are the Go standard library
+                and <code>google/uuid</code>. No surprise transitive
+                trees. New providers will only ever pull in their
+                official vendor SDK &mdash; published by Google, AWS,
+                Anthropic, or OpenAI.
+              </p>
+            </article>
+          </div>
+          <div class="why-cta reveal">
+            <strong>llmrouter</strong> is the library a gateway is
+            built on top of &mdash; not the gateway itself.
+          </div>
+        </div>
+      </section>
+
+      <section class="features" id="features">
+        <div class="container">
+          <p class="section-label reveal">What you get today</p>
+          <h2 class="section-heading reveal">Two providers, one shape, zero surprises.</h2>
+          <p class="section-sub reveal">
+            v0.1 ships OpenAI and Anthropic with full request and SSE
+            translation. v0.2 brings Azure OpenAI Service, AWS
+            Bedrock, and Google Vertex AI.
+          </p>
+          <div class="features-grid reveal">
+            <article class="feature-card">
+              <div class="feature-icon">OA</div>
+              <h3>OpenAI, passthrough</h3>
+              <p>
+                Default provider. Streaming chat completions against
+                <code>/v1/chat/completions</code>. Request bytes and
+                chunk bytes pass through unchanged when you set
+                <code>Raw</code> &mdash; ideal for proxies.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">URL</div>
+              <h3>Any OpenAI-compatible endpoint</h3>
+              <p>
+                One <code>WithBaseURL</code> call points the OpenAI
+                provider at OpenRouter, Together, Groq, vLLM, Ollama,
+                LM Studio, or your private model behind a firewall.
+                No new SDK per vendor.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">AN</div>
+              <h3>Anthropic, translated</h3>
+              <p>
+                Anthropic <code>/v1/messages</code> with full
+                bidirectional translation &mdash; OpenAI request
+                shape on the way in, Anthropic SSE events
+                (<code>message_start</code>,
+                <code>content_block_delta</code>, &hellip;) translated
+                back to OpenAI chunks on the way out.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">v02</div>
+              <h3>Cloud triple on the roadmap</h3>
+              <p>
+                v0.2 lands Azure OpenAI Service (deployment URL +
+                <code>api-key</code> header), AWS Bedrock (SigV4 +
+                per-model-family body translation), and Google
+                Vertex AI (ADC auth, project/region).
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">330</div>
+              <h3>Tested to the wire</h3>
+              <p>
+                330-subtest table-driven test suite. 100% statement
+                coverage on the core; 90.4% on each provider. All
+                tests run race-clean
+                (<code>go test -race</code>).
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">A2</div>
+              <h3>Apache-2.0, pre-1.0</h3>
+              <p>
+                Apache-2.0 licensed. Currently v0.1.x &mdash; expect
+                minor API churn between minor versions until v1.0
+                freezes the surface. Patch versions never break the
+                API.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="quickstart-section" id="quickstart">
+        <div class="container">
+          <p class="section-label reveal">Quick start</p>
+          <h2 class="section-heading reveal">
+            From <code>go get</code> to streaming tokens in 40 lines.
+          </h2>
+          <p class="section-sub reveal">
+            Open a streaming chat completion, print each delta as it
+            arrives, exit on a clean close. The same code runs
+            against any OpenAI-compatible endpoint.
+          </p>
+          <div class="code-wrap reveal">
+            <Code lang="go" code={quickstartCode} />
+          </div>
+          <p class="section-sub reveal sub-spaced">
+            Want Anthropic instead? Swap the import and the model id
+            &mdash; the loop, the request shape, and the consumer
+            don&rsquo;t change.
+          </p>
+          <div class="code-wrap reveal">
+            <Code lang="go" code={anthropicCode} />
+          </div>
+          <div class="quickstart-cta reveal">
+            <a href="/llmrouter/docs/quickstart" class="btn btn-primary">
+              Full quick-start guide
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+              </svg>
+            </a>
+            <a href="/llmrouter/docs/concepts/byte-passthrough" class="btn btn-secondary">
+              Byte passthrough
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="providers-section" id="providers">
+        <div class="container">
+          <p class="section-label reveal">Providers</p>
+          <h2 class="section-heading reveal">One <code>Provider</code> interface. Many backends.</h2>
+          <p class="section-sub reveal">
+            Each provider implements the same one-method interface.
+            Your application code never branches on which one is
+            upstream.
+          </p>
+          <div class="providers-grid reveal">
+            <article class="provider-card shipped">
+              <div class="provider-tag">Shipped</div>
+              <h3>OpenAI</h3>
+              <p>
+                <code>providers/openai</code>. Default, passthrough,
+                works with any OpenAI-compatible endpoint via
+                <code>WithBaseURL</code>.
+              </p>
+              <a href="/llmrouter/docs/providers/openai" class="provider-link">
+                Read the docs &rarr;
+              </a>
+            </article>
+            <article class="provider-card shipped">
+              <div class="provider-tag">Shipped</div>
+              <h3>Anthropic</h3>
+              <p>
+                <code>providers/anthropic</code>. Full
+                <code>/v1/messages</code> request and SSE translation.
+                <code>MaxTokens</code> required on the request.
+              </p>
+              <a href="/llmrouter/docs/providers/anthropic" class="provider-link">
+                Read the docs &rarr;
+              </a>
+            </article>
+            <article class="provider-card shipped">
+              <div class="provider-tag">Shipped</div>
+              <h3>Any OpenAI-compatible</h3>
+              <p>
+                OpenRouter, Together, Groq, vLLM, Ollama, LM Studio,
+                anything else that speaks OpenAI SSE. One
+                <code>WithBaseURL</code> call.
+              </p>
+              <a href="/llmrouter/docs/providers/openai-compatible" class="provider-link">
+                See examples &rarr;
+              </a>
+            </article>
+            <article class="provider-card planned">
+              <div class="provider-tag planned-tag">v0.2</div>
+              <h3>Azure OpenAI Service</h3>
+              <p>
+                Deployment URL + <code>api-key</code> header +
+                <code>api-version</code> query param. Same OpenAI
+                request and response shape underneath.
+              </p>
+              <span class="provider-link muted">Coming in v0.2</span>
+            </article>
+            <article class="provider-card planned">
+              <div class="provider-tag planned-tag">v0.2</div>
+              <h3>AWS Bedrock</h3>
+              <p>
+                SigV4 request signing, per-model-family body
+                translation: Claude / Llama / Titan.
+              </p>
+              <span class="provider-link muted">Coming in v0.2</span>
+            </article>
+            <article class="provider-card planned">
+              <div class="provider-tag planned-tag">v0.2</div>
+              <h3>Google Vertex AI</h3>
+              <p>
+                ADC auth, project + region in the endpoint URL.
+                Vertex&rsquo; streaming surface translated to
+                OpenAI chunks.
+              </p>
+              <span class="provider-link muted">Coming in v0.2</span>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="stats">
+        <div class="container">
+          <div class="stats-grid reveal">
+            <div>
+              <div class="stat-value">v0.1.1</div>
+              <div class="stat-label">Latest release</div>
+            </div>
+            <div>
+              <div class="stat-value">330</div>
+              <div class="stat-label">Table-driven subtests</div>
+            </div>
+            <div>
+              <div class="stat-value">100%</div>
+              <div class="stat-label">Core coverage</div>
+            </div>
+            <div>
+              <div class="stat-value">2 + N</div>
+              <div class="stat-label">Providers (OpenAI, Anthropic, + any OpenAI-compatible)</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="install-section" id="install">
+        <div class="container">
+          <div class="install-block reveal">
+            <h2>Install in one line.</h2>
+            <p class="install-sub">Go 1.23+. Apache-2.0. No surprises in your <code>go.sum</code>.</p>
+            <div class="install-cmd">
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.1.1</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.1.1">Copy</button>
+            </div>
+            <p class="install-platforms">
+              Then head to the
+              <a href="/llmrouter/docs/quickstart">quick-start guide</a>
+              for the canonical OpenAI &amp; Anthropic walkthroughs,
+              or read the
+              <a href="/llmrouter/docs/project/comparison">comparison
+              vs alternatives</a> if you&rsquo;re still evaluating.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="container footer-inner">
+        <div class="footer-left">
+          <a href="/llmrouter/" class="footer-logo"><span>&gt;</span> llmrouter</a>
+          <span class="footer-text">Open source &middot; Apache-2.0</span>
+        </div>
+        <div class="footer-links">
+          <a href="/llmrouter/docs/">Docs</a>
+          <a href="https://github.com/elloloop/llmrouter" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/elloloop/llmrouter/releases" target="_blank" rel="noopener">Releases</a>
+          <a href="https://pkg.go.dev/github.com/elloloop/llmrouter" target="_blank" rel="noopener">pkg.go.dev</a>
+          <a href="https://github.com/elloloop/llmrouter/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/elloloop/llmrouter/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll(".copy-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const text = btn.getAttribute("data-copy") || "";
+          navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = "Copied";
+            window.setTimeout(() => {
+              btn.textContent = "Copy";
+            }, 2000);
+          });
+        });
+      });
+
+      const reveals = document.querySelectorAll(".reveal");
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            entry.target.classList.add("visible");
+            observer.unobserve(entry.target);
+          });
+        },
+        { threshold: 0.1 },
+      );
+      reveals.forEach((el) => observer.observe(el));
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  :root,
+  .dark {
+    --dp-bg: #0a0a0a;
+    --dp-bg-secondary: #111111;
+    --dp-bg-tertiary: #171717;
+    --dp-bg-hover: #1c1c1c;
+    --dp-bg-active: #222222;
+    --dp-border: #262626;
+    --dp-border-subtle: #1a1a1a;
+    --dp-text: #e5e5e5;
+    --dp-text-secondary: #a3a3a3;
+    --dp-text-tertiary: #525252;
+    --dp-accent: #ffffff;
+    --dp-accent-hover: #e5e5e5;
+    --dp-accent-contrast: #0a0a0a;
+    --dp-success: #22c55e;
+    --dp-error: #ef4444;
+    --dp-warning: #f59e0b;
+    --dp-info: #a3a3a3;
+  }
+
+  .light {
+    --dp-bg: #ffffff;
+    --dp-bg-secondary: #fafafa;
+    --dp-bg-tertiary: #f5f5f5;
+    --dp-bg-hover: #eeeeee;
+    --dp-bg-active: #e5e5e5;
+    --dp-border: #d4d4d4;
+    --dp-border-subtle: #e5e5e5;
+    --dp-text: #0a0a0a;
+    --dp-text-secondary: #525252;
+    --dp-text-tertiary: #a3a3a3;
+    --dp-accent: #0a0a0a;
+    --dp-accent-hover: #171717;
+    --dp-accent-contrast: #ffffff;
+    --dp-success: #16a34a;
+    --dp-error: #dc2626;
+    --dp-warning: #d97706;
+    --dp-info: #525252;
+  }
+
+  .landing-page *,
+  .landing-page *::before,
+  .landing-page *::after {
+    box-sizing: border-box;
+  }
+
+  .landing-page {
+    margin: 0;
+    background: var(--dp-bg);
+    color: var(--dp-text);
+    font-family: var(--font-sans);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  .landing-page code,
+  .landing-page .mono {
+    font-family: var(--font-mono);
+  }
+
+  .landing-page a {
+    color: inherit;
+  }
+
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 28px;
+  }
+
+  .top-nav {
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 100;
+    background: color-mix(in srgb, var(--dp-bg) 82%, transparent);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--dp-border-subtle);
+  }
+
+  .nav-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+  }
+
+  .logo,
+  .footer-logo {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+  }
+
+  .logo span,
+  .footer-logo span {
+    color: var(--dp-accent);
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 32px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .nav-links a,
+  .footer-links a {
+    color: var(--dp-text-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  .nav-links a:hover,
+  .footer-links a:hover {
+    color: var(--dp-text);
+  }
+
+  .nav-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .nav-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--dp-accent);
+    color: var(--dp-accent-contrast);
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 8px 18px;
+    border-radius: 8px;
+    text-decoration: none;
+    transition: background 0.2s;
+  }
+
+  .nav-cta:hover {
+    background: var(--dp-accent-hover);
+  }
+
+  .hero {
+    padding: 180px 0 100px;
+    text-align: center;
+    position: relative;
+  }
+
+  .hero::before {
+    content: "";
+    position: absolute;
+    top: -40px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(1000px, 100vw);
+    height: 700px;
+    background: radial-gradient(
+      ellipse at center,
+      color-mix(in srgb, var(--dp-accent) 7%, transparent) 0%,
+      color-mix(in srgb, var(--dp-accent-hover) 3%, transparent) 40%,
+      transparent 70%
+    );
+    pointer-events: none;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--dp-bg-tertiary);
+    border: 1px solid var(--dp-border);
+    border-radius: 100px;
+    padding: 6px 16px;
+    color: var(--dp-text-secondary);
+    font-size: 0.8125rem;
+    margin-bottom: 40px;
+    position: relative;
+  }
+
+  .badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--dp-success);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.75rem, 7vw, 4rem);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    line-height: 1.08;
+    margin: 0 auto 28px;
+    max-width: 880px;
+    position: relative;
+  }
+
+  .gradient {
+    background: linear-gradient(135deg, var(--dp-accent) 0%, var(--dp-accent-hover) 50%, var(--dp-info) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    color: var(--dp-text-secondary);
+    font-size: clamp(1.05rem, 2.5vw, 1.2rem);
+    line-height: 1.7;
+    max-width: 720px;
+    margin: 0 auto 52px;
+    position: relative;
+  }
+
+  .install-highlight {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 48px;
+    position: relative;
+  }
+
+  .install-box,
+  .install-cmd {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    max-width: 100%;
+    overflow-x: auto;
+    background: var(--dp-bg-tertiary);
+    border: 1px solid color-mix(in srgb, var(--dp-accent) 20%, transparent);
+    border-radius: 14px;
+    padding: 5px 5px 5px 24px;
+    box-shadow:
+      0 0 40px color-mix(in srgb, var(--dp-accent) 8%, transparent),
+      0 0 80px color-mix(in srgb, var(--dp-accent) 4%, transparent);
+  }
+
+  .install-box code,
+  .install-cmd code {
+    color: var(--dp-text-secondary);
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+
+  .prompt {
+    color: var(--dp-accent);
+  }
+
+  .copy-btn {
+    background: var(--dp-accent);
+    border: none;
+    color: var(--dp-accent-contrast);
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 12px 20px;
+    transition: background 0.2s;
+    white-space: nowrap;
+  }
+
+  .copy-btn:hover {
+    background: var(--dp-accent-hover);
+  }
+
+  .install-platforms-hero,
+  .install-platforms {
+    color: var(--dp-text-tertiary);
+    font-size: 0.8125rem;
+  }
+
+  .install-platforms-hero code {
+    color: var(--dp-text-secondary);
+  }
+
+  .hero-buttons {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-radius: 10px;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    padding: 12px 24px;
+    text-decoration: none;
+    transition: transform 0.2s, background 0.2s, border-color 0.2s;
+  }
+
+  .btn:hover {
+    transform: translateY(-1px);
+  }
+
+  .btn svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .btn-primary {
+    background: var(--dp-accent);
+    color: var(--dp-accent-contrast) !important;
+  }
+
+  .btn-primary svg {
+    color: var(--dp-accent-contrast);
+  }
+
+  .btn-secondary {
+    background: var(--dp-bg-tertiary);
+    border: 1px solid var(--dp-border);
+    color: var(--dp-text);
+  }
+
+  .section-label {
+    color: var(--dp-accent);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    margin: 0 0 16px;
+    text-align: center;
+    text-transform: uppercase;
+  }
+
+  .section-heading {
+    font-size: clamp(1.75rem, 4vw, 2.75rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+    margin: 0 0 20px;
+    text-align: center;
+  }
+
+  .section-sub {
+    color: var(--dp-text-secondary);
+    font-size: 1.05rem;
+    line-height: 1.7;
+    margin: 0 auto 64px;
+    max-width: 680px;
+    text-align: center;
+  }
+
+  .section-sub.sub-spaced {
+    margin-top: 56px;
+  }
+
+  .why-section,
+  .features,
+  .quickstart-section,
+  .providers-section,
+  .stats,
+  .install-section {
+    border-top: 1px solid var(--dp-border);
+    padding: 120px 0;
+  }
+
+  .pillars,
+  .providers-grid {
+    display: grid;
+    gap: 28px;
+    margin: 0 auto;
+    max-width: 1100px;
+  }
+
+  .pillars {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .pillar,
+  .feature-card,
+  .provider-card,
+  .install-block {
+    background: var(--dp-bg-tertiary);
+    border: 1px solid var(--dp-border);
+    border-radius: 16px;
+  }
+
+  .pillar {
+    padding: 36px 32px;
+  }
+
+  .pillar-icon,
+  .feature-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 42px;
+    height: 42px;
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--dp-accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--dp-accent) 20%, transparent);
+    color: var(--dp-accent);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    margin-bottom: 22px;
+    padding: 0 10px;
+  }
+
+  .pillar h3,
+  .feature-card h3,
+  .provider-card h3 {
+    font-size: 1.0625rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 0 10px;
+  }
+
+  .pillar p,
+  .feature-card p,
+  .provider-card p {
+    color: var(--dp-text-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.7;
+    margin: 0;
+  }
+
+  .pillar code,
+  .feature-card code,
+  .provider-card code {
+    color: var(--dp-text);
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+  }
+
+  .why-cta {
+    color: var(--dp-text);
+    font-size: 1.125rem;
+    line-height: 1.7;
+    margin: 56px auto 0;
+    max-width: 680px;
+    text-align: center;
+  }
+
+  .why-cta strong {
+    color: var(--dp-accent);
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--dp-border);
+    border: 1px solid var(--dp-border);
+    border-radius: 16px;
+    overflow: hidden;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  .feature-card {
+    background: var(--dp-bg);
+    border: none;
+    border-radius: 0;
+    padding: 40px 32px;
+    transition: background 0.3s;
+  }
+
+  .feature-card:hover {
+    background: var(--dp-bg-secondary);
+  }
+
+  .quickstart-section .code-wrap {
+    max-width: 880px;
+    margin: 0 auto;
+  }
+
+  .quickstart-cta {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 48px;
+  }
+
+  .providers-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .provider-card {
+    padding: 32px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .provider-card.planned {
+    opacity: 0.82;
+  }
+
+  .provider-tag {
+    display: inline-block;
+    align-self: flex-start;
+    background: color-mix(in srgb, var(--dp-success) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--dp-success) 35%, transparent);
+    color: var(--dp-success);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 3px 10px;
+    border-radius: 6px;
+    text-transform: uppercase;
+  }
+
+  .provider-tag.planned-tag {
+    background: color-mix(in srgb, var(--dp-warning) 18%, transparent);
+    border-color: color-mix(in srgb, var(--dp-warning) 35%, transparent);
+    color: var(--dp-warning);
+  }
+
+  .provider-link {
+    color: var(--dp-accent);
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+    margin-top: auto;
+  }
+
+  .provider-link.muted {
+    color: var(--dp-text-tertiary);
+    font-weight: 500;
+  }
+
+  .provider-link:hover {
+    text-decoration: underline;
+  }
+
+  .stats {
+    padding: 100px 0;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+    text-align: center;
+  }
+
+  .stat-value {
+    background: linear-gradient(135deg, var(--dp-text), var(--dp-text-secondary));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+  }
+
+  .stat-label {
+    color: var(--dp-text-secondary);
+    font-size: 0.875rem;
+    margin-top: 4px;
+  }
+
+  .install-section {
+    text-align: center;
+  }
+
+  .install-block {
+    margin: 0 auto;
+    max-width: 680px;
+    overflow: hidden;
+    padding: 64px 48px;
+    position: relative;
+  }
+
+  .install-block::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    right: -1px;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--dp-accent), var(--dp-accent-hover), transparent);
+  }
+
+  .install-section h2 {
+    font-size: clamp(1.5rem, 3.5vw, 2.25rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    margin: 0 0 10px;
+  }
+
+  .install-sub {
+    color: var(--dp-text-secondary);
+    margin: 0 0 36px;
+  }
+
+  .install-sub code {
+    color: var(--dp-text);
+  }
+
+  .install-cmd {
+    display: flex;
+    margin-bottom: 20px;
+    padding-left: 20px;
+  }
+
+  .install-cmd code {
+    flex: 1;
+    text-align: left;
+  }
+
+  .install-platforms a {
+    color: var(--dp-text);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--dp-text) 30%, transparent);
+  }
+
+  footer {
+    border-top: 1px solid var(--dp-border);
+    padding: 48px 0;
+  }
+
+  .footer-inner,
+  .footer-left,
+  .footer-links {
+    display: flex;
+    align-items: center;
+  }
+
+  .footer-inner {
+    justify-content: space-between;
+  }
+
+  .footer-left {
+    gap: 16px;
+  }
+
+  .footer-logo {
+    font-size: 0.9375rem;
+  }
+
+  .footer-text {
+    color: var(--dp-text-tertiary);
+    font-size: 0.8125rem;
+  }
+
+  .footer-links {
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+
+  .reveal {
+    opacity: 0;
+    transform: translateY(24px);
+    transition:
+      opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+      transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  @keyframes pulse {
+    0%,
+    100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  @media (max-width: 1100px) {
+    .features-grid,
+    .pillars,
+    .providers-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .stats-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 900px) {
+    .nav-links {
+      display: none;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .container {
+      padding: 0 16px;
+    }
+
+    .hero {
+      padding: 120px 0 56px;
+    }
+
+    .nav-cta {
+      display: none;
+    }
+
+    .hero h1 {
+      font-size: 2rem;
+    }
+
+    .features-grid,
+    .pillars,
+    .providers-grid,
+    .stats-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .why-section,
+    .features,
+    .quickstart-section,
+    .providers-section,
+    .install-section {
+      padding: 72px 0;
+    }
+
+    .install-block {
+      padding: 36px 18px;
+    }
+
+    .install-box,
+    .install-cmd {
+      width: 100%;
+      padding-left: 14px;
+    }
+
+    .copy-btn {
+      padding: 10px 14px;
+    }
+
+    .footer-inner,
+    .footer-left,
+    .footer-links {
+      flex-direction: column;
+    }
+
+    .footer-inner,
+    .footer-left {
+      gap: 16px;
+      text-align: center;
+    }
+  }
+</style>

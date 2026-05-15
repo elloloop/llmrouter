@@ -1,0 +1,417 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Contributing">
+  <h1>Contributing</h1>
+  <p>
+    Thanks for considering a contribution. <code>llmrouter</code> is a
+    small, deliberately narrow library with a high bar on stability,
+    test coverage, and dependency footprint. The rules below exist so
+    contributions land cleanly and stay landed.
+  </p>
+  <p>
+    Before you start work on anything beyond a typo or a one-file
+    fix, please open an issue first so we can agree on the shape.
+    Most PR rework happens because the design conversation
+    didn&rsquo;t happen up front.
+  </p>
+
+  <h2 id="license">License</h2>
+  <p>
+    <code>llmrouter</code> is licensed under the
+    <a href="https://github.com/elloloop/llmrouter/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>.
+    All contributions are accepted under the same licence; submitting
+    a pull request constitutes agreement to license your contribution
+    under Apache-2.0.
+  </p>
+  <p>
+    The library does not currently require a separate CLA. The
+    Apache-2.0 license includes an implicit patent grant from
+    contributors, which covers the project&rsquo;s needs.
+  </p>
+
+  <h2 id="code-of-conduct">Code of conduct</h2>
+  <p>
+    We follow a simple, standard rule: be respectful, assume good
+    faith, and keep discussion focused on the technical question at
+    hand. Inclusive language is required in code, comments, commit
+    messages, issues, and PR reviews.
+  </p>
+  <p>
+    If a <code>CODE_OF_CONDUCT.md</code> file exists at the repo
+    root, it is the authoritative version and supersedes this
+    paragraph. If not, the
+    <a href="https://www.contributor-covenant.org/version/2/1/code_of_conduct/" target="_blank" rel="noopener noreferrer">Contributor Covenant v2.1</a>
+    is the de facto policy. Report concerns privately to
+    <code>security@elloloop.com</code> (same address as security
+    reports; we triage them separately).
+  </p>
+
+  <h2 id="dev-setup">Development setup</h2>
+  <p>Clone the repository and run the test suite — that&rsquo;s the whole bootstrap:</p>
+  <Code lang="bash" code={`git clone https://github.com/elloloop/llmrouter
+cd llmrouter
+go test ./...`} />
+  <p>Requirements:</p>
+  <ul>
+    <li><strong>Go 1.23+</strong> — pinned in <code>go.mod</code>. We use generics and a few newer stdlib APIs.</li>
+    <li><strong><code>gofmt</code></strong> — bundled with the Go toolchain. Run it before every commit (most editors do it on save).</li>
+    <li>
+      <strong>Nothing else.</strong> No <code>make</code>, no
+      <code>just</code>, no docker, no protobuf compiler, no
+      pre-commit hooks. <code>go test</code>, <code>go vet</code>,
+      <code>gofmt</code>, and your editor are the whole tool chain.
+    </li>
+  </ul>
+  <p>Optional but recommended:</p>
+  <ul>
+    <li>
+      <code>go test -race ./...</code> to catch concurrency issues
+      in the streaming producer. CI runs with <code>-race</code> on
+      every PR.
+    </li>
+    <li>
+      <code>go test -count=1 ./...</code> to bypass the test cache
+      when you want to be sure a flaky test is actually fixed.
+    </li>
+    <li>
+      <code>go vet ./...</code> for the standard set of lints.
+    </li>
+  </ul>
+
+  <h2 id="project-layout">Project layout</h2>
+  <p>The repository is intentionally flat:</p>
+  <Code lang="text" code={`llmrouter/
+├── llmrouter.go            // core types: Provider, ChatRequest, Message, Chunk
+├── options.go              // option pattern (WithAPIKey, WithBaseURL, ...)
+├── stream.go               // Stream type, channel + goroutine lifecycle
+├── errors.go               // ErrUpstream + helpers
+├── *_test.go               // table-driven tests, mirroring each source file
+├── providers/
+│   ├── openai/             // OpenAI provider (passthrough)
+│   │   ├── openai.go
+│   │   └── openai_test.go
+│   └── anthropic/          // Anthropic provider (translating)
+│       ├── anthropic.go
+│       └── anthropic_test.go
+├── docs-site/              // Astro source for the docs site (this site)
+├── docs/                   // GENERATED output of docs-site — do not edit by hand
+├── README.md
+├── LICENSE
+└── go.mod`} />
+  <p>Two layout rules that matter:</p>
+  <ul>
+    <li>
+      Anything user-facing lives in the root package or under
+      <code>providers/&lt;name&gt;/</code>. There is no
+      <code>internal/</code> directory yet; if private helpers grow
+      enough to need one, we&rsquo;ll add it.
+    </li>
+    <li>
+      <strong>The <code>docs/</code> directory is generated output.</strong>
+      It is the built static site that GitHub Pages serves. Edits
+      to files under <code>docs/</code> will be wiped by the next
+      build. Edit the Astro source under <code>docs-site/</code>
+      instead.
+    </li>
+  </ul>
+
+  <h2 id="code-style">Code style</h2>
+  <p>
+    Standard Go. We follow
+    <a href="https://google.github.io/styleguide/go/" target="_blank" rel="noopener noreferrer">Google&rsquo;s Go Style Guide</a>
+    where it overlaps with the toolchain&rsquo;s defaults, and the
+    toolchain&rsquo;s defaults everywhere else. Specifically:
+  </p>
+  <ul>
+    <li><code>gofmt</code> for formatting. No exceptions.</li>
+    <li>
+      Doc comments on every exported identifier, in the standard
+      Godoc style (<em>&ldquo;Provider names ...&rdquo;</em>, not
+      <em>&ldquo;This function returns the name of the
+      provider.&rdquo;</em>).
+    </li>
+    <li>Error strings start lowercase, do not end with punctuation, do not capitalise the first word.</li>
+    <li>Wrap errors with <code>fmt.Errorf("context: %w", err)</code> to keep the chain intact.</li>
+    <li>
+      Channels are typed and bounded. Document the buffer size and
+      the producer/consumer contract in a comment above the
+      <code>make</code> call.
+    </li>
+    <li>
+      Use <code>context.Context</code> as the first parameter of
+      any function that does I/O. Never store a context in a
+      struct.
+    </li>
+  </ul>
+
+  <h3 id="dependency-bar">The dependency bar</h3>
+  <p>
+    <code>llmrouter</code> has a strict and unusual dependency
+    policy. The bar is:
+  </p>
+  <ol>
+    <li>The Go standard library, or</li>
+    <li>
+      An official vendor SDK for a provider we ship — i.e. published
+      by Google, AWS, Anthropic, or OpenAI directly.
+    </li>
+  </ol>
+  <p>
+    That&rsquo;s it. We do not depend on community helper libraries,
+    structured-logging frameworks, error packages, or any
+    third-party utility. The current dependency tree is the
+    standard library plus
+    <a href="https://github.com/google/uuid" target="_blank" rel="noopener noreferrer"><code>google/uuid</code></a>
+    (because reimplementing RFC 4122 in the library would be silly,
+    and Google&rsquo;s package is the de facto standard).
+  </p>
+  <p>
+    PRs that add a new third-party dependency outside this bar will
+    be asked to remove it. If the functionality is small,
+    re-implement it inside the library. If it is large enough that
+    re-implementation is unreasonable, file an issue first — most
+    such PRs are better handled by <em>not</em> implementing the
+    feature in the library at all and pushing the dependency up into
+    the calling code.
+  </p>
+
+  <h2 id="tests">Tests</h2>
+  <p>
+    Every exported function gets a table-driven test. This is not a
+    style preference — it is enforced by code review and by
+    coverage gates in CI.
+  </p>
+  <ul>
+    <li>
+      Use the standard library&rsquo;s <code>testing</code> package.
+      No <code>testify</code>, no <code>gomock</code>, no BDD
+      frameworks.
+    </li>
+    <li>
+      Table-driven tests with named sub-tests:
+      <code>t.Run(tc.name, func(t *testing.T) {"{"} ... {"}"})</code>.
+      Sub-test names should describe the scenario in English
+      (<em>&ldquo;rejects empty api key&rdquo;</em>, not
+      <em>&ldquo;tc1&rdquo;</em>).
+    </li>
+    <li>
+      Mock external HTTP via
+      <code>httptest.NewServer</code> — never reach out to real
+      endpoints in unit tests. Real-endpoint smoke tests live in a
+      separate, opt-in <code>integration</code> build tag.
+    </li>
+    <li>
+      Edge cases are required: empty inputs, nil pointers, context
+      cancellation mid-stream, non-2xx upstreams, malformed SSE,
+      premature EOF.
+    </li>
+    <li>
+      Race-clean: <code>go test -race -count=1 ./...</code> must
+      pass on every PR. CI runs this on every push.
+    </li>
+  </ul>
+  <p>Coverage targets:</p>
+  <ul>
+    <li>Root package: <strong>100% statement coverage</strong>.</li>
+    <li>Each provider: <strong>≥90% statement coverage</strong>.</li>
+  </ul>
+  <p>
+    New code that drops coverage below these thresholds will be
+    asked for more tests before it lands.
+  </p>
+
+  <h2 id="adding-a-provider">Adding a provider</h2>
+  <p>
+    Adding a new provider is the most common substantial
+    contribution. The mechanics are documented in detail in
+    <a href="/llmrouter/docs/providers/adding-a-provider">Adding a
+    new provider</a>. The short version:
+  </p>
+  <ol>
+    <li>
+      File an issue first describing the provider, its auth model,
+      its request body shape, and its streaming format. We&rsquo;ll
+      check it against the existing surface and agree on whether it
+      lives under <code>providers/&lt;name&gt;/</code> or is better
+      served by a <code>WithBaseURL</code> override on an existing
+      provider.
+    </li>
+    <li>
+      Create <code>providers/&lt;name&gt;/&lt;name&gt;.go</code> and
+      <code>providers/&lt;name&gt;/&lt;name&gt;_test.go</code>.
+      Mirror the package layout of the existing providers exactly.
+    </li>
+    <li>
+      Implement the <code>llmrouter.Provider</code> interface. Use
+      the OpenAI provider as a reference for passthrough providers,
+      the Anthropic provider as a reference for translating
+      providers.
+    </li>
+    <li>
+      Use <code>httptest.NewServer</code> to mock the upstream in
+      the provider test. Cover at minimum: success path, non-2xx
+      upstream, malformed SSE, mid-stream context cancellation, and
+      empty deltas.
+    </li>
+    <li>
+      Add a docs page under
+      <code>docs-site/src/pages/docs/providers/&lt;name&gt;.astro</code>
+      and wire it into
+      <code>docs-site/src/data/nav.ts</code>.
+    </li>
+  </ol>
+
+  <h2 id="pr-process">Pull request process</h2>
+  <ol>
+    <li>
+      <strong>Open an issue first</strong> for anything beyond a
+      typo or a one-file bug fix. The issue is where the design
+      conversation happens; the PR is where the code review happens.
+      Sending a 400-line PR with no issue attached usually means
+      one of us asks you to reshape it from scratch.
+    </li>
+    <li>
+      <strong>One logical change per PR.</strong> &ldquo;Add Azure
+      provider&rdquo; is one PR. &ldquo;Add Azure provider, refactor
+      stream.go, and rename ErrUpstream&rdquo; is three PRs. Small
+      PRs land fast; big PRs sit.
+    </li>
+    <li>
+      <strong>Conventional commits are encouraged.</strong>
+      Prefixes:
+      <code>feat:</code> (new functionality),
+      <code>fix:</code> (bug fix),
+      <code>refactor:</code> (no behaviour change),
+      <code>docs:</code> (docs only),
+      <code>test:</code> (tests only),
+      <code>chore:</code> (deps, tooling, CI). The first line of the
+      PR description is what ends up in the squash-merge commit, so
+      treat it like the commit message.
+    </li>
+    <li>
+      <strong>Tests are required</strong> for any source change.
+      Doc-only and test-only PRs are exempt.
+    </li>
+    <li>
+      <strong>CI must be green.</strong> CI runs
+      <code>go vet ./...</code>, <code>gofmt</code> check,
+      <code>go test -race -count=1 ./...</code>, and a coverage
+      gate. Red CI = no merge.
+    </li>
+    <li>
+      <strong>Squash-merge.</strong> All PRs land as a single
+      commit on <code>main</code>. The PR title becomes the commit
+      title; the PR description becomes the commit body.
+    </li>
+  </ol>
+
+  <h2 id="release-process">Release process</h2>
+  <p>
+    Releases are cut by maintainers. Contributors don&rsquo;t need
+    to bump versions or touch the changelog file — that&rsquo;s
+    handled in the release commit. Here is the process for
+    transparency:
+  </p>
+  <ol>
+    <li>
+      The
+      <a href="/llmrouter/docs/project/changelog">changelog page</a>
+      summarises the user-visible delta for the upcoming release;
+      we keep it accurate as PRs land.
+    </li>
+    <li>
+      A maintainer cuts a tag <code>vX.Y.Z</code> on
+      <code>main</code>. The tag is what GitHub Releases keys off.
+    </li>
+    <li>
+      CI builds the docs site and publishes a GitHub Release with
+      auto-generated notes plus the curated changelog entry.
+    </li>
+    <li>
+      <code>pkg.go.dev</code> picks up the new tag within a few
+      minutes.
+    </li>
+  </ol>
+  <p>Version bumps follow the rules on the <a href="/llmrouter/docs/project/roadmap#v1-0">roadmap page</a>:</p>
+  <ul>
+    <li><strong>Patch</strong> (<code>v0.1.0 → v0.1.1</code>): bug fixes, tests, docs — no API changes.</li>
+    <li><strong>Minor</strong> (<code>v0.1.x → v0.2.0</code>): new providers, new features. May break the API while pre-1.0.</li>
+    <li><strong>Major</strong> (<code>v0.x → v1.0</code>): reserved for the v1.0 API freeze. After v1.0, only breaking changes bump major.</li>
+  </ul>
+  <p>
+    The release pattern is loosely modelled on
+    <a href="https://github.com/googleapis/release-please" target="_blank" rel="noopener noreferrer">release-please</a>
+    — conventional-commit messages on <code>main</code> determine
+    the next bump.
+  </p>
+
+  <h2 id="filing-issues">Filing issues</h2>
+  <p>
+    Good bug reports save everyone time. Include all of the
+    following — if any are missing, the first reply is usually
+    going to ask for them:
+  </p>
+  <ul>
+    <li>Go version: <code>go version</code>.</li>
+    <li>OS and architecture: <code>go env GOOS GOARCH</code>.</li>
+    <li><code>llmrouter</code> version: the tag in your <code>go.mod</code>.</li>
+    <li>Which provider you were calling, and its base URL if non-default.</li>
+    <li>
+      A <strong>minimal reproduction</strong>: the smallest piece of
+      Go that triggers the bug. If the bug only reproduces against
+      a live provider, include the upstream response or the SSE
+      transcript (redact API keys).
+    </li>
+    <li>Expected behaviour and actual behaviour.</li>
+    <li>The full error message and stack trace, if there is one.</li>
+  </ul>
+  <p>
+    Feature requests should include a use case — see
+    <a href="/llmrouter/docs/project/roadmap#influence">How to
+    influence the roadmap</a>.
+  </p>
+
+  <h2 id="security">Security</h2>
+  <p>
+    Please <strong>do not</strong> file security vulnerabilities as
+    public GitHub issues. We take the boring approach of private
+    disclosure: send a report to
+    <code>security@elloloop.com</code> with as much detail as you
+    can give us, and we&rsquo;ll acknowledge within a couple of
+    business days.
+  </p>
+  <p>What counts as a security issue:</p>
+  <ul>
+    <li>API keys, secrets, or auth tokens leaking into logs, error messages, or panics.</li>
+    <li>Memory-safety or goroutine-leak bugs reachable from untrusted input.</li>
+    <li>
+      SSRF or path-traversal reachable through a configuration
+      option (e.g. an unsanitised <code>WithBaseURL</code>).
+    </li>
+    <li>
+      Any way the library can be coerced into making an outbound
+      HTTP request to an endpoint the caller did not configure.
+    </li>
+  </ul>
+  <p>
+    What does <em>not</em> count: feature requests phrased as
+    security concerns (&ldquo;the library should have rate
+    limiting&rdquo;), upstream-provider issues, or general
+    hardening suggestions. Those should be regular issues with the
+    <code>type:feature</code> or <code>type:hardening</code> label.
+  </p>
+
+  <h2 id="thanks">Thanks</h2>
+  <p>
+    The library exists because the
+    <a href="https://github.com/tinykite-co" target="_blank" rel="noopener noreferrer">Kite AI Router</a>
+    project needed it and the resulting code was clean enough to
+    extract. Thanks to the contributors and reviewers on that
+    project for proving the design in production, and to anyone
+    sending a PR or filing an issue here for keeping the library
+    honest.
+  </p>
+</DocsLayout>

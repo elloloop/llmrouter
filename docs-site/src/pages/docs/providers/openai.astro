@@ -1,0 +1,497 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="OpenAI Provider">
+  <h1>OpenAI Provider</h1>
+  <p>
+    The <code>openai</code> provider speaks the OpenAI Chat Completions
+    wire format natively. It is the simplest provider in the library and
+    also the most permissive: incoming requests are forwarded as native
+    OpenAI shape, and the upstream SSE event stream is decoded into
+    <a href="/llmrouter/docs/api/llmrouter/#chunk"><code>llmrouter.Chunk</code></a>
+    values while the original wire bytes are preserved in
+    <code>Chunk.Raw</code>. This is what makes it the right backend for
+    proxy and gateway use cases.
+  </p>
+  <p>
+    The same provider implementation backs every
+    <a href="/llmrouter/docs/providers/openai-compatible/">OpenAI-compatible
+    endpoint</a>: OpenRouter, Together, Groq, DeepSeek, Fireworks,
+    Perplexity, vLLM, Ollama, LM Studio, LocalAI. Use
+    <code>llmrouter.WithBaseURL</code> to point at the host you want.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)`} />
+
+  <h2 id="defaults">Default endpoint</h2>
+  <p>
+    With no <code>WithBaseURL</code> override, the provider targets
+    <code>https://api.openai.com/v1</code>. The request URL is
+    <code>{`{BaseURL}/chat/completions`}</code>.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <p>
+    <code>openai.New</code> takes a variadic list of shared
+    <a href="/llmrouter/docs/api/llmrouter/#option"><code>llmrouter.Option</code></a>
+    values and returns <code>(*openai.Provider, error)</code>. The
+    constructor validates that an API key is present and falls back to
+    the default base URL if none was supplied.
+  </p>
+  <Code lang="go" code={`provider, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    <code>WithAPIKey</code> rejects an empty string. If you need to talk
+    to a local endpoint that doesn't require auth (Ollama, LM Studio,
+    LocalAI), pass a non-empty placeholder — the upstream will ignore it.
+  </p>
+
+  <h2 id="wire-level">What's wire-level</h2>
+  <p>
+    Unlike the <a href="/llmrouter/docs/providers/anthropic/">Anthropic
+    provider</a>, this provider does <strong>not</strong> translate the
+    request body or the response stream. The outgoing JSON is the
+    OpenAI Chat Completions request, and the incoming SSE events are
+    OpenAI <code>chat.completion.chunk</code> events. Three concrete
+    consequences follow:
+  </p>
+  <ul>
+    <li>
+      <strong>Request passthrough.</strong> If <code>ChatRequest.Raw</code>
+      is set, that JSON object is the request body (with
+      <code>model</code>, <code>stream</code>, and
+      <code>stream_options</code> overlaid). Any field that the typed
+      <code>ChatRequest</code> doesn't model — <code>tools</code>,
+      <code>response_format</code>, <code>logprobs</code>,
+      <code>seed</code>, multimodal content arrays — survives because
+      the bytes are forwarded directly.
+    </li>
+    <li>
+      <strong>Response passthrough.</strong> Every chunk's
+      <code>Raw</code> field is the original SSE data payload. A
+      gateway can forward those bytes back to its caller as SSE without
+      re-marshaling. The typed fields (<code>ID</code>,
+      <code>Choices</code>, <code>Usage</code>) are populated for
+      application code that doesn't care about wire format.
+    </li>
+    <li>
+      <strong>Forced streaming.</strong> The provider rewrites the
+      request to set <code>{`"stream": true`}</code> and (if the caller
+      didn't supply one) <code>{`"stream_options": {"include_usage": true}`}</code>
+      so the upstream emits a final usage block. Non-streaming calls
+      are not supported in v0.1.
+    </li>
+  </ul>
+
+  <h2 id="auth">Authentication</h2>
+  <p>
+    OpenAI uses bearer-token auth. The provider sets the
+    <code>Authorization: Bearer {`<key>`}</code> header on every
+    request. There are no other headers required for the public OpenAI
+    API.
+  </p>
+  <p>
+    For organisation / project scoping, see
+    <a href="#org-project-headers">Custom organization / project
+    headers</a> below.
+  </p>
+
+  <h2 id="example-basic">Full example</h2>
+  <p>A complete program that prints the streamed completion to stdout:</p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(
+        llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx := context.Background()
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("system", "You are a concise assistant."),
+            llmrouter.TextMessage("user", "Explain the speed of light in one sentence."),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, choice := range chunk.Choices {
+            fmt.Print(choice.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="multiple-choices">Multiple choices (<code>n &gt; 1</code>)</h2>
+  <p>
+    When the upstream returns multiple choices for a single request, each
+    chunk's <code>Choices</code> slice has one entry per choice with a
+    distinct <code>Index</code>. The provider passes the upstream's
+    indices through unchanged; consumers should bucket by
+    <code>Choice.Index</code>:
+  </p>
+  <Code lang="go" code={`bodies := map[int]*strings.Builder{}
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:    "gpt-4o-mini",
+    Messages: []llmrouter.Message{llmrouter.TextMessage("user", "Give me three taglines.")},
+    Raw:      json.RawMessage(` + "`{\"n\":3}`" + `),
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        b, ok := bodies[c.Index]
+        if !ok {
+            b = &strings.Builder{}
+            bodies[c.Index] = b
+        }
+        b.WriteString(c.Delta.Content)
+    }
+}
+
+for idx, b := range bodies {
+    fmt.Printf("choice %d: %s\\n", idx, b.String())
+}`} />
+  <p>
+    Note that <code>n &gt; 1</code> is not a typed field on
+    <code>ChatRequest</code> in v0.1 — pass it via <code>Raw</code>.
+  </p>
+
+  <h2 id="tool-use">Tool use / function calling</h2>
+  <p>
+    The typed <code>ChatRequest</code> does not yet model OpenAI's
+    <code>tools</code>, <code>tool_choice</code>, or assistant-side
+    <code>tool_calls</code> messages. To use function calling, build
+    the request body yourself and pass it via
+    <code>ChatRequest.Raw</code>. The byte-passthrough behavior ensures
+    every field reaches OpenAI unchanged:
+  </p>
+  <Code lang="go" code={`reqBody := []byte(` + "`" + `{
+  "model": "gpt-4o-mini",
+  "messages": [
+    {"role": "user", "content": "What is the weather in Paris?"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string"}
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}` + "`" + `)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "gpt-4o-mini",
+    Raw:   reqBody,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for chunk := range stream.Chunks() {
+    // chunk.Raw contains the full SSE payload, including any
+    // tool_calls field that the typed Choice/Delta does not model.
+    fmt.Println(string(chunk.Raw))
+}`} />
+  <p>
+    Tool-call deltas live under <code>choices[].delta.tool_calls</code>
+    in the wire JSON; read them off <code>Chunk.Raw</code> until v0.3
+    surfaces tool calls as a typed concept.
+  </p>
+
+  <h2 id="vision">Vision / multimodal</h2>
+  <p>
+    <code>Message.Content</code> is a <code>json.RawMessage</code>, so a
+    multimodal content array passes through unchanged.
+    <code>llmrouter.TextMessage</code> is only useful for plain text;
+    for image inputs, build the <code>Content</code> bytes yourself:
+  </p>
+  <Code lang="go" code={`content, _ := json.Marshal([]map[string]any{
+    {"type": "text", "text": "What's in this image?"},
+    {
+        "type": "image_url",
+        "image_url": map[string]string{
+            "url": "https://example.com/cat.jpg",
+        },
+    },
+})
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "gpt-4o",
+    Messages: []llmrouter.Message{{
+        Role:    "user",
+        Content: content,
+    }},
+})`} />
+  <p>
+    Base64-encoded data URLs work the same way — the bytes are not
+    inspected by the library.
+  </p>
+
+  <h2 id="response-format">Response format (JSON mode)</h2>
+  <p>
+    <code>response_format</code> is another field that isn't on the
+    typed request. Pass it via <code>Raw</code>:
+  </p>
+  <Code lang="go" code={`reqBody := []byte(` + "`" + `{
+  "model": "gpt-4o-mini",
+  "messages": [
+    {"role": "system", "content": "Return JSON only."},
+    {"role": "user", "content": "List three primary colors."}
+  ],
+  "response_format": {"type": "json_object"}
+}` + "`" + `)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "gpt-4o-mini",
+    Raw:   reqBody,
+})`} />
+  <p>
+    Structured outputs (<code>{`{"type": "json_schema", "json_schema": ...}`}</code>)
+    use the same pattern.
+  </p>
+
+  <h2 id="org-project-headers">Custom organization / project headers</h2>
+  <p>
+    OpenAI's <code>OpenAI-Organization</code> and
+    <code>OpenAI-Project</code> headers are not yet exposed via
+    options. Use <code>WithHTTPClient</code> with a wrapping
+    <code>http.RoundTripper</code> that adds them:
+  </p>
+  <Code lang="go" code={`type orgTransport struct {
+    base    http.RoundTripper
+    org     string
+    project string
+}
+
+func (t *orgTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    if t.org != "" {
+        req.Header.Set("OpenAI-Organization", t.org)
+    }
+    if t.project != "" {
+        req.Header.Set("OpenAI-Project", t.project)
+    }
+    return t.base.RoundTrip(req)
+}
+
+httpClient := &http.Client{
+    Timeout: 120 * time.Second,
+    Transport: &orgTransport{
+        base:    http.DefaultTransport,
+        org:     os.Getenv("OPENAI_ORG"),
+        project: os.Getenv("OPENAI_PROJECT"),
+    },
+}
+
+p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    llmrouter.WithHTTPClient(httpClient),
+)`} />
+  <p>
+    The same pattern works for any custom request-scoped header
+    (tracing, tenant id, audit context).
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Why a RoundTripper, not a Header option.</strong> Header
+    options would balloon the public surface and force the library to
+    own a vocabulary of vendor headers. A <code>RoundTripper</code>
+    composes cleanly with retries, metrics, and tracing middleware, and
+    every Go programmer already knows the pattern.
+  </aside>
+
+  <h2 id="token-counting">Token counting</h2>
+  <p>
+    The provider forces
+    <code>{`stream_options.include_usage: true`}</code> so the upstream
+    sends a final chunk with a <code>usage</code> object. That chunk
+    surfaces as <code>Chunk.Usage</code>:
+  </p>
+  <Code lang="go" code={`var usage *llmrouter.Usage
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+    if chunk.Usage != nil {
+        usage = chunk.Usage
+    }
+}
+if usage != nil {
+    fmt.Printf("\\nprompt=%d completion=%d total=%d\\n",
+        usage.PromptTokens,
+        usage.CompletionTokens,
+        usage.TotalTokens,
+    )
+}`} />
+  <p>
+    The final usage chunk has an empty <code>Choices</code> slice, so
+    the loop above is safe — the <code>for _, c := range chunk.Choices</code>
+    inner loop simply doesn't execute on that chunk.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    A 4xx or 5xx response from the upstream surfaces as a typed
+    <a href="/llmrouter/docs/api/llmrouter/#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with the provider name, the HTTP status code, and up to 1 KiB of
+    the response body:
+  </p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, req)
+if err != nil {
+    var upstream *llmrouter.ErrUpstream
+    if errors.As(err, &upstream) {
+        log.Printf("openai error: status=%d body=%s",
+            upstream.StatusCode, upstream.Body)
+        if upstream.StatusCode == 429 {
+            // back off and retry
+        }
+        return
+    }
+    log.Fatal(err)
+}`} />
+  <p>
+    Errors that surface <em>during</em> streaming (a malformed SSE
+    payload, an IO error mid-stream) come out of
+    <code>Stream.Err()</code> after the chunks channel closes — not
+    from <code>CompletionStream</code> itself.
+  </p>
+
+  <h3 id="rate-limit-retry">Rate-limit retry example</h3>
+  <p>
+    OpenAI rate limits use HTTP 429. The simplest retry strategy wraps
+    the HTTP client with a transport that retries on 429 with
+    exponential backoff:
+  </p>
+  <Code lang="go" code={`type retryTransport struct {
+    base     http.RoundTripper
+    attempts int
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    var body []byte
+    if req.Body != nil {
+        body, _ = io.ReadAll(req.Body)
+        req.Body = io.NopCloser(bytes.NewReader(body))
+    }
+
+    backoff := 500 * time.Millisecond
+    for attempt := 0; attempt < t.attempts; attempt++ {
+        if attempt > 0 && body != nil {
+            req.Body = io.NopCloser(bytes.NewReader(body))
+        }
+        resp, err := t.base.RoundTrip(req)
+        if err != nil {
+            return nil, err
+        }
+        if resp.StatusCode != http.StatusTooManyRequests || attempt == t.attempts-1 {
+            return resp, nil
+        }
+        resp.Body.Close()
+        select {
+        case <-time.After(backoff):
+        case <-req.Context().Done():
+            return nil, req.Context().Err()
+        }
+        backoff *= 2
+    }
+    return nil, errors.New("unreachable")
+}
+
+httpClient := &http.Client{
+    Timeout: 120 * time.Second,
+    Transport: &retryTransport{
+        base:     http.DefaultTransport,
+        attempts: 4,
+    },
+}
+
+p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    llmrouter.WithHTTPClient(httpClient),
+)`} />
+  <p>
+    Production code should honour the <code>Retry-After</code> header
+    rather than fixed backoff, and should bail out early on non-429
+    errors. This snippet is the minimal shape.
+  </p>
+
+  <h2 id="when-to-use">When to use this provider vs Anthropic</h2>
+  <p>The two providers serve different shapes of project:</p>
+  <ul>
+    <li>
+      <strong>OpenAI provider — byte passthrough.</strong> Choose this
+      when you need every field of every request and every chunk to
+      reach the upstream and return to your caller unchanged. Gateways,
+      proxies, audit shims, and "I just want to use a newer OpenAI
+      feature the typed surface doesn't model yet" all want this
+      behavior. It also backs every OpenAI-compatible endpoint.
+    </li>
+    <li>
+      <strong>Anthropic provider — full translation.</strong> Choose
+      this when you want a single application code path that targets
+      both OpenAI and Anthropic without branching. The provider
+      translates the request from OpenAI shape to Anthropic's
+      <code>/v1/messages</code> shape and translates the SSE event
+      stream back. The translation is lossy by design — fields the
+      typed surface doesn't model (tool messages, vision content) need
+      to ride on <code>Raw</code>.
+    </li>
+  </ul>
+  <p>
+    Many applications use both: OpenAI provider for the default
+    request, Anthropic provider as a fallback (or vice versa). See
+    <a href="/llmrouter/docs/concepts/streaming">Streaming model</a>
+    for the cancellation semantics that make fallback safe.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a> — full translator.</li>
+    <li><a href="/llmrouter/docs/providers/openai-compatible/">OpenAI-compatible endpoints</a> — OpenRouter, Together, Groq, vLLM, Ollama.</li>
+    <li><a href="/llmrouter/docs/providers/adding-a-provider/">Adding a new provider</a> — the <code>Provider</code> contract.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming">Streaming model</a> — chunk channel, cancellation, terminal error.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type.</li>
+  </ul>
+</DocsLayout>

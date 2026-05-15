@@ -1,0 +1,582 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Custom HTTP Client & Retries">
+  <h1>Custom HTTP Client &amp; Retries</h1>
+  <p>
+    Every <code>llmrouter</code> provider accepts a custom
+    <code>*http.Client</code> through
+    <a href="/llmrouter/docs/concepts/configuration/"><code>WithHTTPClient</code></a>.
+    That single hook is the path for retries, OpenTelemetry tracing,
+    proxies, mTLS, extra headers, and anything else you'd normally
+    handle at the transport layer. This guide walks through the patterns
+    we see most often, with a focus on doing them <em>safely</em> for
+    streaming responses.
+  </p>
+
+  <h2>When to reach for <code>WithHTTPClient</code></h2>
+  <ul>
+    <li>You want automatic retries on 429 and 5xx.</li>
+    <li>You want OpenTelemetry traces spanning your service through to the upstream.</li>
+    <li>You need to route through a corporate proxy or via mTLS.</li>
+    <li>The upstream requires extra headers (e.g. OpenRouter's <code>HTTP-Referer</code> and <code>X-Title</code>).</li>
+    <li>You want to plug in a circuit-breaker or rate-limiter.</li>
+  </ul>
+
+  <p>
+    All of these compose via <code>http.RoundTripper</code> middleware —
+    a transport that wraps another transport. That keeps the upstream
+    behavior portable: any change you make at the transport layer
+    applies to every <code>CompletionStream</code> call.
+  </p>
+
+  <h2>Retries on the initial request only</h2>
+  <p>
+    This is the most important caveat in this guide. <strong>You cannot
+    retry an SSE stream mid-flight.</strong> Once the response body has
+    started streaming chunks to your code, the only thing the upstream
+    knows is that some bytes left the server; if the connection then
+    dies, a retry won't resume — it'll start a fresh completion, billed
+    again, and almost certainly producing different output.
+  </p>
+
+  <p>
+    The workable approach: examine <code>resp.StatusCode</code>
+    <em>before</em> handing the response off. If the status is
+    retriable, close the response, sleep, and reissue. If the status is
+    2xx (or non-retriable), forward the response unchanged — your
+    transport is now out of the loop and the SSE pump inside the
+    provider streams chunks as normal.
+  </p>
+
+  <Code lang="go" code={`// RetryingTransport wraps another http.RoundTripper and retries on
+// 429 + 5xx. Retries happen BEFORE any response body is read, so they
+// are safe for streaming endpoints.
+//
+// Caveat: the original request body must be re-readable. We snapshot
+// it on first read so retries can rewind.
+type RetryingTransport struct {
+    Next       http.RoundTripper
+    MaxRetries int
+    BaseDelay  time.Duration
+    MaxDelay   time.Duration
+}
+
+func (t *RetryingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    // Snapshot the body so we can replay it on retry.
+    var body []byte
+    if req.Body != nil {
+        b, err := io.ReadAll(req.Body)
+        if err != nil {
+            return nil, err
+        }
+        _ = req.Body.Close()
+        body = b
+    }
+
+    next := t.Next
+    if next == nil {
+        next = http.DefaultTransport
+    }
+
+    var resp *http.Response
+    var err error
+    for attempt := 0; attempt <= t.MaxRetries; attempt++ {
+        // Reset the body for each attempt.
+        if body != nil {
+            req.Body = io.NopCloser(bytes.NewReader(body))
+            req.GetBody = func() (io.ReadCloser, error) {
+                return io.NopCloser(bytes.NewReader(body)), nil
+            }
+        }
+
+        resp, err = next.RoundTrip(req)
+        if err != nil {
+            if attempt == t.MaxRetries || req.Context().Err() != nil {
+                return nil, err
+            }
+            sleepFor(req.Context(), t.backoff(attempt))
+            continue
+        }
+        if !shouldRetryStatus(resp.StatusCode) || attempt == t.MaxRetries {
+            return resp, nil
+        }
+
+        // Honour Retry-After if present, otherwise use exponential backoff.
+        delay := t.backoff(attempt)
+        if ra := resp.Header.Get("Retry-After"); ra != "" {
+            if d, ok := parseRetryAfter(ra); ok {
+                delay = d
+            }
+        }
+        // Drain & close the doomed response so the connection is reusable.
+        _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<14))
+        _ = resp.Body.Close()
+        sleepFor(req.Context(), delay)
+    }
+    return resp, err
+}
+
+func shouldRetryStatus(code int) bool {
+    switch code {
+    case 408, 425, 429, 500, 502, 503, 504:
+        return true
+    }
+    return false
+}
+
+// backoff returns the delay before attempt N, with full jitter.
+func (t *RetryingTransport) backoff(attempt int) time.Duration {
+    base := t.BaseDelay
+    if base <= 0 {
+        base = 200 * time.Millisecond
+    }
+    max := t.MaxDelay
+    if max <= 0 {
+        max = 30 * time.Second
+    }
+    d := base << attempt
+    if d > max {
+        d = max
+    }
+    // Full jitter — randomise between 0 and d to avoid thundering herds.
+    return time.Duration(rand.Int63n(int64(d)))
+}
+
+func sleepFor(ctx context.Context, d time.Duration) {
+    select {
+    case <-time.After(d):
+    case <-ctx.Done():
+    }
+}
+
+func parseRetryAfter(v string) (time.Duration, bool) {
+    if secs, err := strconv.Atoi(v); err == nil {
+        return time.Duration(secs) * time.Second, true
+    }
+    if t, err := http.ParseTime(v); err == nil {
+        return time.Until(t), true
+    }
+    return 0, false
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>About <code>http.ErrUseLastResponse</code>:</strong> we
+    never use it here because the standard library's redirect handling
+    isn't involved. But if you wire in <code>http.Client.CheckRedirect</code>
+    yourself, make sure it doesn't reissue the body unsafely.
+  </aside>
+
+  <h2>Plugging it into the provider</h2>
+  <Code lang="go" code={`func main() {
+    rt := &RetryingTransport{
+        Next:       http.DefaultTransport,
+        MaxRetries: 3,
+        BaseDelay:  250 * time.Millisecond,
+        MaxDelay:   8 * time.Second,
+    }
+    client := &http.Client{Transport: rt}
+
+    p, err := openai.New(
+        llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+        llmrouter.WithHTTPClient(client),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "hi"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    fmt.Println()
+}`} />
+
+  <p>
+    When you supply <code>WithHTTPClient</code>,
+    <code>WithTimeout</code> is ignored — your client's transport is
+    responsible for timeouts now. That's why this example uses
+    <code>http.DefaultTransport</code> rather than a fresh
+    <code>{`&http.Client{Timeout: 60 * time.Second}`}</code>: the
+    default transport has no global deadline, so streams can run as long
+    as they need. Use <code>context.WithTimeout</code> to bound the
+    individual call instead. See
+    <a href="/llmrouter/docs/guides/cancellation-and-timeouts/">cancellation
+    &amp; timeouts</a> for the full picture.
+  </p>
+
+  <h2>Honouring Retry-After</h2>
+  <p>
+    Both OpenAI and Anthropic emit <code>Retry-After</code> on 429
+    responses. Honouring that header is mandatory if you want to
+    cooperate with the upstream's rate limiter — back off by a random
+    fraction of the suggested delay; never less than the value the
+    upstream gives you.
+  </p>
+
+  <p>
+    The <code>parseRetryAfter</code> helper above handles both formats
+    the spec allows: an integer seconds value, and an HTTP-date.
+  </p>
+
+  <h2>OpenTelemetry tracing</h2>
+  <p>
+    The <code>otelhttp</code> package gives you spans for free. Wrap
+    your transport stack and every call to
+    <code>CompletionStream</code> shows up in your tracing backend with
+    URL, status code, response time, and your service's parent span as
+    its parent.
+  </p>
+
+  <Code lang="go" code={`import (
+    "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+)
+
+func newClient() *http.Client {
+    base := otelhttp.NewTransport(http.DefaultTransport)
+    retrying := &RetryingTransport{
+        Next:       base,
+        MaxRetries: 3,
+        BaseDelay:  250 * time.Millisecond,
+    }
+    return &http.Client{Transport: retrying}
+}`} />
+
+  <p>
+    The order matters: <code>otelhttp.NewTransport</code> wraps the
+    base, then <code>RetryingTransport</code> wraps the result. That way
+    each retry shows up as its own span in your trace, which is exactly
+    what you want when debugging "why did this take 12 seconds?".
+  </p>
+
+  <h2>Adding required headers</h2>
+  <p>
+    Some upstreams require extra headers. The canonical example is
+    OpenRouter, which wants <code>HTTP-Referer</code> (your app URL) and
+    <code>X-Title</code> (a human-readable name) so they can attribute
+    usage in their dashboard.
+  </p>
+
+  <Code lang="go" code={`// HeaderTransport sets a fixed set of headers on every outgoing request.
+// Useful for things like OpenRouter attribution headers, internal
+// service-mesh identification, or feature flags forwarded to the upstream.
+type HeaderTransport struct {
+    Next    http.RoundTripper
+    Headers http.Header
+}
+
+func (t *HeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    next := t.Next
+    if next == nil {
+        next = http.DefaultTransport
+    }
+    // Shallow-clone the request so we don't mutate caller state.
+    out := req.Clone(req.Context())
+    for k, vs := range t.Headers {
+        for _, v := range vs {
+            out.Header.Set(k, v)
+        }
+    }
+    return next.RoundTrip(out)
+}`} />
+
+  <p>
+    Wire it the same way as the retry transport:
+  </p>
+
+  <Code lang="go" code={`func openRouterClient() *http.Client {
+    return &http.Client{
+        Transport: &HeaderTransport{
+            Next: otelhttp.NewTransport(http.DefaultTransport),
+            Headers: http.Header{
+                "HTTP-Referer": []string{"https://my-app.example.com"},
+                "X-Title":      []string{"My App"},
+            },
+        },
+    }
+}
+
+p, _ := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+    llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+    llmrouter.WithHTTPClient(openRouterClient()),
+)`} />
+
+  <h2>Proxy and mTLS</h2>
+  <p>
+    The standard library handles both cases through
+    <code>http.Transport</code>. For a corporate HTTP proxy that respects
+    the standard env vars, you don't have to do anything — Go's default
+    transport already calls <code>http.ProxyFromEnvironment</code>. For
+    a hardcoded proxy, override <code>Proxy</code>:
+  </p>
+
+  <Code lang="go" code={`proxyURL, _ := url.Parse("http://proxy.example.com:3128")
+
+base := &http.Transport{
+    Proxy:           http.ProxyURL(proxyURL),
+    TLSClientConfig: &tls.Config{
+        // mTLS — present a client certificate.
+        Certificates: []tls.Certificate{loadClientCert()},
+        RootCAs:      loadCorporateCAs(),
+    },
+}
+client := &http.Client{Transport: base}
+
+p, _ := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    llmrouter.WithHTTPClient(client),
+)`} />
+
+  <h2>The complete production-grade client</h2>
+  <p>
+    Putting it all together — a single program that constructs a chain
+    of: tracing -&gt; retry-with-jitter -&gt; required headers -&gt; default
+    transport, and feeds the result into an OpenAI provider.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "bytes"
+    "context"
+    "fmt"
+    "io"
+    "log"
+    "math/rand"
+    "net/http"
+    "os"
+    "strconv"
+    "time"
+
+    "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// ---------- retrying transport ----------
+
+type RetryingTransport struct {
+    Next       http.RoundTripper
+    MaxRetries int
+    BaseDelay  time.Duration
+    MaxDelay   time.Duration
+}
+
+func (t *RetryingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    var body []byte
+    if req.Body != nil {
+        b, err := io.ReadAll(req.Body)
+        if err != nil {
+            return nil, err
+        }
+        _ = req.Body.Close()
+        body = b
+    }
+    next := t.Next
+    if next == nil {
+        next = http.DefaultTransport
+    }
+    var resp *http.Response
+    var err error
+    for attempt := 0; attempt <= t.MaxRetries; attempt++ {
+        if body != nil {
+            req.Body = io.NopCloser(bytes.NewReader(body))
+            req.GetBody = func() (io.ReadCloser, error) {
+                return io.NopCloser(bytes.NewReader(body)), nil
+            }
+        }
+        resp, err = next.RoundTrip(req)
+        if err != nil {
+            if attempt == t.MaxRetries || req.Context().Err() != nil {
+                return nil, err
+            }
+            sleepFor(req.Context(), t.backoff(attempt))
+            continue
+        }
+        if !shouldRetryStatus(resp.StatusCode) || attempt == t.MaxRetries {
+            return resp, nil
+        }
+        delay := t.backoff(attempt)
+        if ra := resp.Header.Get("Retry-After"); ra != "" {
+            if d, ok := parseRetryAfter(ra); ok {
+                delay = d
+            }
+        }
+        _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<14))
+        _ = resp.Body.Close()
+        sleepFor(req.Context(), delay)
+    }
+    return resp, err
+}
+
+func shouldRetryStatus(code int) bool {
+    switch code {
+    case 408, 425, 429, 500, 502, 503, 504:
+        return true
+    }
+    return false
+}
+
+func (t *RetryingTransport) backoff(attempt int) time.Duration {
+    base := t.BaseDelay
+    if base <= 0 {
+        base = 200 * time.Millisecond
+    }
+    max := t.MaxDelay
+    if max <= 0 {
+        max = 30 * time.Second
+    }
+    d := base << attempt
+    if d > max {
+        d = max
+    }
+    return time.Duration(rand.Int63n(int64(d)))
+}
+
+func sleepFor(ctx context.Context, d time.Duration) {
+    select {
+    case <-time.After(d):
+    case <-ctx.Done():
+    }
+}
+
+func parseRetryAfter(v string) (time.Duration, bool) {
+    if secs, err := strconv.Atoi(v); err == nil {
+        return time.Duration(secs) * time.Second, true
+    }
+    if t, err := http.ParseTime(v); err == nil {
+        return time.Until(t), true
+    }
+    return 0, false
+}
+
+// ---------- header transport ----------
+
+type HeaderTransport struct {
+    Next    http.RoundTripper
+    Headers http.Header
+}
+
+func (t *HeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    next := t.Next
+    if next == nil {
+        next = http.DefaultTransport
+    }
+    out := req.Clone(req.Context())
+    for k, vs := range t.Headers {
+        for _, v := range vs {
+            out.Header.Set(k, v)
+        }
+    }
+    return next.RoundTrip(out)
+}
+
+// ---------- main ----------
+
+func newProductionClient() *http.Client {
+    chain := http.RoundTripper(http.DefaultTransport)
+    chain = otelhttp.NewTransport(chain)
+    chain = &RetryingTransport{
+        Next:       chain,
+        MaxRetries: 3,
+        BaseDelay:  250 * time.Millisecond,
+        MaxDelay:   8 * time.Second,
+    }
+    chain = &HeaderTransport{
+        Next: chain,
+        Headers: http.Header{
+            "User-Agent": []string{"my-service/1.0"},
+        },
+    }
+    return &http.Client{Transport: chain}
+}
+
+func main() {
+    p, err := openai.New(
+        llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+        llmrouter.WithHTTPClient(newProductionClient()),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "say hi"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    fmt.Println()
+    if err := stream.Err(); err != nil {
+        log.Printf("stream error: %v", err)
+    }
+}`} />
+
+  <h2>Things to watch for</h2>
+  <ul>
+    <li>
+      <strong>Don't set <code>http.Client.Timeout</code>.</strong> It
+      times out the whole exchange including the streaming body. For
+      streams, leave it zero and use <code>context.WithTimeout</code> at
+      the call site instead.
+    </li>
+    <li>
+      <strong>Retries on POST require a re-readable body.</strong> The
+      sample <code>RetryingTransport</code> snapshots the body up
+      front. If your body is gigabyte-sized that's a problem — but for
+      LLM requests it never is.
+    </li>
+    <li>
+      <strong>Be careful about retry budgets.</strong> Three retries on
+      a 503 is fine; thirty retries during an upstream outage is a
+      denial-of-service against yourself. Combine with a circuit
+      breaker.
+    </li>
+    <li>
+      <strong>The HTTP/2 connection is reused across requests.</strong>
+      One <code>*http.Client</code> serves the whole process; don't
+      construct a new one per call.
+    </li>
+  </ul>
+
+  <h2>Related</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/guides/cancellation-and-timeouts/">Cancellation &amp; timeouts</a>
+      — the per-call deadline pattern that pairs with this transport.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/multi-provider-failover/">Multi-provider failover</a>
+      — when retries aren't enough, fall over to a different provider.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/configuration/">Configuration &amp; options</a>
+      — the full reference for <code>WithHTTPClient</code> and friends.
+    </li>
+  </ul>
+</DocsLayout>

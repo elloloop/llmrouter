@@ -1,0 +1,372 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Root Types">
+  <h1>Package llmrouter — Root Types</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go"><code>llmrouter.go</code></a>.
+    These are the shared types every provider in the ecosystem speaks: the
+    request shape, the message shape, the streaming chunk shape, and the
+    <code>Provider</code> contract itself. Providers live in subpackages
+    (<code>providers/openai</code>, <code>providers/anthropic</code>, &hellip;)
+    and translate to and from these types.
+  </p>
+
+  <p>
+    Import path:
+    <Code lang="go" code={`import "github.com/elloloop/llmrouter"`} />
+  </p>
+
+  <h2 id="provider">Provider</h2>
+  <p>
+    The upstream-LLM contract. Every provider implementation translates
+    to and from the OpenAI <code>/v1/chat/completions</code> wire format
+    internally so the rest of your application only ever sees this one
+    interface. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L37">llmrouter.go#L37</a>.
+  </p>
+
+  <Code lang="go" code={`type Provider interface {
+    // Name returns the provider's stable id (e.g. "openai", "anthropic").
+    Name() string
+
+    // CompletionStream issues a streaming chat completion request. The
+    // returned Stream yields normalized chunks until upstream finishes,
+    // the context cancels, or an error occurs. Callers must drain the
+    // stream (or cancel ctx) to release resources.
+    CompletionStream(ctx context.Context, req ChatRequest) (*Stream, error)
+}`} />
+
+  <h3 id="provider-name">Provider.Name</h3>
+  <Code lang="go" code={`Name() string`} />
+  <p>
+    Returns a stable string identifier such as <code>"openai"</code> or
+    <code>"anthropic"</code>. Useful for logging, metrics, and
+    multi-provider routing tables. The value is fixed per provider type
+    and does not change with configuration (an OpenAI-compatible endpoint
+    like Groq still reports <code>"openai"</code>).
+  </p>
+
+  <h3 id="provider-completion-stream">Provider.CompletionStream</h3>
+  <Code lang="go" code={`CompletionStream(ctx context.Context, req ChatRequest) (*Stream, error)`} />
+  <p>
+    Issues a streaming chat completion request. Returns a
+    <code>*Stream</code> that the caller must consume — either by ranging
+    over <code>Chunks()</code> until it closes, or by cancelling
+    <code>ctx</code>. Failure to do either pins the producer goroutine
+    and the underlying HTTP response body.
+  </p>
+  <p>
+    A non-nil error is returned only for synchronous failures (bad
+    config, network connection refused, non-2xx HTTP status). Errors
+    that occur during streaming are surfaced via
+    <a href="/llmrouter/docs/api/stream/#stream-err"><code>Stream.Err()</code></a>
+    after the chunks channel closes.
+  </p>
+
+  <h4>Example: minimal provider usage</h4>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey("sk-..."))
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println("provider:", p.Name()) // openai
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model:    "gpt-4o-mini",
+        Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hello")},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+
+  <h2 id="chatrequest">ChatRequest</h2>
+  <p>
+    The OpenAI-shaped request body. Every field except <code>Model</code>
+    and <code>Messages</code> is optional and uses <code>omitempty</code>
+    so it is omitted from the JSON body when zero-valued. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L51">llmrouter.go#L51</a>.
+  </p>
+
+  <Code lang="go" code={`type ChatRequest struct {
+    Model       string          \`json:"model"\`
+    Messages    []Message       \`json:"messages"\`
+    MaxTokens   int             \`json:"max_tokens,omitempty"\`
+    Temperature *float64        \`json:"temperature,omitempty"\`
+    TopP        *float64        \`json:"top_p,omitempty"\`
+    Stop        []string        \`json:"stop,omitempty"\`
+    User        string          \`json:"user,omitempty"\`
+    Stream      bool            \`json:"stream,omitempty"\`
+    Raw         json.RawMessage \`json:"-"\`
+}`} />
+
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>Provider-specific model identifier (<code>"gpt-4o-mini"</code>, <code>"claude-3-5-sonnet-20241022"</code>). Always emitted, even when empty.</dd>
+
+    <dt><code>Messages</code></dt>
+    <dd>Conversation history. Use <a href="#textmessage"><code>TextMessage</code></a> for plain-text turns; supply your own <code>Message</code> values for multimodal content.</dd>
+
+    <dt><code>MaxTokens</code></dt>
+    <dd>Upper bound on generated tokens. <code>omitempty</code>: zero means "unset, let the upstream decide". Note: the Anthropic provider treats zero as "use its <code>defaultMaxTokens</code> (4096)" because Anthropic requires the field.</dd>
+
+    <dt><code>Temperature</code></dt>
+    <dd>Pointer to a float so <code>0.0</code> can be distinguished from "unset". When nil the field is omitted entirely.</dd>
+
+    <dt><code>TopP</code></dt>
+    <dd>Pointer to a float, same nil semantics as <code>Temperature</code>.</dd>
+
+    <dt><code>Stop</code></dt>
+    <dd>Stop sequences. The Anthropic provider renames this to <code>stop_sequences</code> on the wire.</dd>
+
+    <dt><code>User</code></dt>
+    <dd>Opaque end-user id propagated to OpenAI for abuse monitoring.</dd>
+
+    <dt><code>Stream</code></dt>
+    <dd>OpenAI provider always forces this to <code>true</code> before sending. v0.1 is streaming-only.</dd>
+
+    <dt><code>Raw</code></dt>
+    <dd>
+      <strong>Byte passthrough.</strong> <code>json:"-"</code> — never marshaled
+      with the rest of the struct. When non-empty, OpenAI-compatible providers
+      reuse these bytes verbatim and only overlay <code>model</code>,
+      <code>stream</code>, and <code>stream_options</code>. The Anthropic provider
+      uses <code>Raw</code> to lift tuning knobs (<code>temperature</code>,
+      <code>top_p</code>, <code>top_k</code>, <code>stop</code>) that aren't in
+      the typed struct. Use <code>Raw</code> to forward fields llmrouter does
+      not model (tools, vision, response_format, &hellip;) without re-marshaling.
+    </dd>
+  </dl>
+
+  <h4>Example: typed request</h4>
+  <Code lang="go" code={`temp := 0.2
+req := llmrouter.ChatRequest{
+    Model: "gpt-4o-mini",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are a concise assistant."),
+        llmrouter.TextMessage("user", "Summarise SOLID in one sentence."),
+    },
+    MaxTokens:   200,
+    Temperature: &temp,
+    Stop:        []string{"\\n\\n"},
+}`} />
+
+  <h4>Example: byte passthrough with tools</h4>
+  <Code lang="go" code={`raw := []byte(\`{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What time is it in Tokyo?"}],
+    "tools": [{"type": "function", "function": {"name": "now", "parameters": {"type": "object"}}}],
+    "tool_choice": "auto"
+}\`)
+
+req := llmrouter.ChatRequest{Raw: raw}
+// The OpenAI provider forwards 'tools' and 'tool_choice' untouched; only
+// 'stream' and 'stream_options' are overlaid.`} />
+
+  <h2 id="message">Message</h2>
+  <p>
+    One turn in a conversation. <code>Content</code> is
+    <code>json.RawMessage</code> so multimodal arrays (text + image)
+    pass through without re-serialization. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L65">llmrouter.go#L65</a>.
+  </p>
+
+  <Code lang="go" code={`type Message struct {
+    Role    string          \`json:"role"\`
+    Content json.RawMessage \`json:"content"\`
+}`} />
+
+  <dl>
+    <dt><code>Role</code></dt>
+    <dd>One of <code>"system"</code>, <code>"user"</code>, <code>"assistant"</code>, or <code>"tool"</code>. The Anthropic provider lifts <code>system</code> messages out of the array into a top-level <code>system</code> field.</dd>
+    <dt><code>Content</code></dt>
+    <dd>Raw JSON. Either a quoted string (<code>"hello"</code>) for plain text, or an array of typed parts (<code>{`[{"type":"text","text":"…"},{"type":"image_url",…}]`}</code>) for multimodal input.</dd>
+  </dl>
+
+  <h2 id="textmessage">TextMessage</h2>
+  <p>
+    Convenience constructor for plain-text turns. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L71">llmrouter.go#L71</a>.
+  </p>
+
+  <Code lang="go" code={`func TextMessage(role, text string) Message`} />
+  <p>
+    JSON-encodes <code>text</code> as a quoted string and stores the bytes
+    in <code>Content</code>. The marshal error is discarded — string
+    marshaling never fails for valid UTF-8.
+  </p>
+
+  <h4>Example</h4>
+  <Code lang="go" code={`msgs := []llmrouter.Message{
+    llmrouter.TextMessage("system", "You are a helpful assistant."),
+    llmrouter.TextMessage("user", "Hello!"),
+}`} />
+
+  <h2 id="message-plaintext">Message.PlainText</h2>
+  <p>
+    Extracts text from a <code>Message</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L78">llmrouter.go#L78</a>.
+  </p>
+
+  <Code lang="go" code={`func (m Message) PlainText() string`} />
+
+  <p>Behavior, in order of attempts:</p>
+  <ol>
+    <li>If <code>Content</code> is empty, returns <code>""</code>.</li>
+    <li>
+      Attempts to unmarshal <code>Content</code> as a JSON string. On
+      success, returns that string. This handles the common
+      <code>TextMessage</code> case.
+    </li>
+    <li>
+      Attempts to unmarshal as an array of
+      <code>{ '{ Type, Text }' }</code> objects. On success, concatenates
+      the <code>Text</code> field of every part whose <code>Type</code>
+      equals <code>"text"</code>. Image and other non-text parts are
+      silently ignored.
+    </li>
+    <li>If both attempts fail, returns <code>""</code>.</li>
+  </ol>
+
+  <h4>Example: multimodal extraction</h4>
+  <Code lang="go" code={`m := llmrouter.Message{
+    Role: "user",
+    Content: []byte(\`[
+        {"type": "text", "text": "What is in this image? "},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+        {"type": "text", "text": "Be brief."}
+    ]\`),
+}
+fmt.Println(m.PlainText()) // "What is in this image? Be brief."`} />
+
+  <h2 id="chunk">Chunk</h2>
+  <p>
+    One streaming delta, normalized to the OpenAI Chat Completion chunk
+    shape. <code>Usage</code> is populated only on the final chunk when
+    the upstream reports it. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L105">llmrouter.go#L105</a>.
+  </p>
+
+  <Code lang="go" code={`type Chunk struct {
+    ID      string          \`json:"id"\`
+    Object  string          \`json:"object"\`
+    Created int64           \`json:"created"\`
+    Model   string          \`json:"model"\`
+    Choices []Choice        \`json:"choices"\`
+    Usage   *Usage          \`json:"usage,omitempty"\`
+    Raw     json.RawMessage \`json:"-"\`
+}`} />
+
+  <dl>
+    <dt><code>ID</code></dt>
+    <dd>Chat-completion id. OpenAI passes upstream's id through; the Anthropic provider synthesises <code>"chatcmpl-&lt;uuid&gt;"</code> once per stream and reuses it across every chunk.</dd>
+    <dt><code>Object</code></dt>
+    <dd>Always <code>"chat.completion.chunk"</code> for normalized output.</dd>
+    <dt><code>Created</code></dt>
+    <dd>Unix epoch seconds. Anthropic uses <code>time.Now().Unix()</code> at stream start.</dd>
+    <dt><code>Model</code></dt>
+    <dd>The exact model id reported by the upstream (may differ from <code>ChatRequest.Model</code> if the provider rewrites it).</dd>
+    <dt><code>Choices</code></dt>
+    <dd>One entry per parallel completion (Anthropic always emits a single choice at index 0).</dd>
+    <dt><code>Usage</code></dt>
+    <dd>Nil on every chunk except the final one. Requires the upstream to emit usage; OpenAI is asked to do this via <code>stream_options.include_usage: true</code>.</dd>
+    <dt><code>Raw</code></dt>
+    <dd><strong><code>json:"-"</code> — wire bytes.</strong> Holds the original SSE payload (OpenAI) or the marshaled normalized chunk (Anthropic). Proxies that want to forward bytes verbatim should prefer this over re-marshaling.</dd>
+  </dl>
+
+  <h2 id="choice">Choice</h2>
+  <p>
+    One streaming choice within a <code>Chunk</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L119">llmrouter.go#L119</a>.
+  </p>
+
+  <Code lang="go" code={`type Choice struct {
+    Index        int    \`json:"index"\`
+    Delta        Delta  \`json:"delta"\`
+    FinishReason string \`json:"finish_reason,omitempty"\`
+}`} />
+
+  <dl>
+    <dt><code>Index</code></dt>
+    <dd>Choice index. Always <code>0</code> for single-completion requests.</dd>
+    <dt><code>Delta</code></dt>
+    <dd>Incremental content for this choice.</dd>
+    <dt><code>FinishReason</code></dt>
+    <dd>Set on the final chunk for this choice. OpenAI values: <code>stop</code>, <code>length</code>, <code>tool_calls</code>, <code>content_filter</code>, <code>function_call</code>. Anthropic stop reasons are mapped (see the <a href="/llmrouter/docs/api/provider-anthropic/">anthropic provider page</a>).</dd>
+  </dl>
+
+  <h2 id="delta">Delta</h2>
+  <p>
+    The incremental content within a streaming <code>Choice</code>. Both
+    fields use <code>omitempty</code>: the first chunk typically carries
+    <code>Role</code> only, every subsequent chunk carries
+    <code>Content</code> only, and the final chunk carries neither.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L126">llmrouter.go#L126</a>.
+  </p>
+
+  <Code lang="go" code={`type Delta struct {
+    Role    string \`json:"role,omitempty"\`
+    Content string \`json:"content,omitempty"\`
+}`} />
+
+  <h4>Example: assembling a complete response</h4>
+  <Code lang="go" code={`var full strings.Builder
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        full.WriteString(c.Delta.Content)
+    }
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}
+fmt.Println("assistant said:", full.String())`} />
+
+  <h2 id="usage">Usage</h2>
+  <p>
+    Token-count summary reported by the upstream on the final chunk.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/llmrouter.go#L132">llmrouter.go#L132</a>.
+  </p>
+
+  <Code lang="go" code={`type Usage struct {
+    PromptTokens     int \`json:"prompt_tokens"\`
+    CompletionTokens int \`json:"completion_tokens"\`
+    TotalTokens      int \`json:"total_tokens"\`
+}`} />
+
+  <h4>Example: capturing usage</h4>
+  <Code lang="go" code={`var lastUsage *llmrouter.Usage
+for chunk := range stream.Chunks() {
+    if chunk.Usage != nil {
+        lastUsage = chunk.Usage
+    }
+}
+if lastUsage != nil {
+    fmt.Printf("prompt=%d completion=%d total=%d\\n",
+        lastUsage.PromptTokens, lastUsage.CompletionTokens, lastUsage.TotalTokens)
+}`} />
+</DocsLayout>

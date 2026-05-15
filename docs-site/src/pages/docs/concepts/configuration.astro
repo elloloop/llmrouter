@@ -1,0 +1,472 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Configuration & Options">
+  <h1>Configuration &amp; Options</h1>
+  <p>
+    Every provider in <code>llmrouter</code> is constructed with the
+    same shape: a variadic list of functional options.
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey("sk-..."),
+    llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+    llmrouter.WithTimeout(30*time.Second),
+)`} />
+
+  <p>
+    The options live in <a href="/llmrouter/docs/api/llmrouter/"><code>llmrouter/options.go</code></a>
+    and are shared across every provider. A provider's
+    <code>New(opts ...llmrouter.Option)</code> walks them, builds a
+    <code>*llmrouter.Config</code>, then validates the bits it cares
+    about (API key, base URL).
+  </p>
+
+  <h2>Why functional options</h2>
+  <p>
+    The alternative — a public <code>Config</code> struct passed to
+    <code>New(cfg Config)</code> — has three problems this design
+    avoids:
+  </p>
+  <ul>
+    <li>
+      <strong>Zero-value safety.</strong> A struct's zero value is
+      always valid Go, but it's almost never a valid configuration. A
+      caller who forgets to set <code>APIKey</code> sees an upstream
+      401 at request time, not a clear error at construction time.
+      Functional options can require <code>WithAPIKey</code> and tell
+      you why <code>New</code> failed.
+    </li>
+    <li>
+      <strong>Forward-compatibility.</strong> Adding a new field to a
+      struct doesn't break callers, but adding a required field does.
+      Adding a new <code>WithX</code> function is purely additive — old
+      code keeps compiling and old behavior is preserved.
+    </li>
+    <li>
+      <strong>Per-option validation.</strong> Each option returns an
+      <code>error</code>. The first failing option short-circuits
+      <code>New</code> and gives you a precise pointer to which option
+      was wrong, with a message that mentions <em>that</em> option.
+    </li>
+  </ul>
+
+  <h2>The <code>Option</code> type</h2>
+  <Code lang="go" code={`type Option func(*Config) error`} />
+  <p>
+    That's it. An <code>Option</code> is a function that mutates a
+    <code>Config</code> and reports whether the mutation succeeded.
+    Internally <code>NewConfig</code> walks the slice:
+  </p>
+  <Code lang="go" code={`func NewConfig(opts ...Option) (*Config, error) {
+    c := &Config{Timeout: 120 * time.Second}
+    for _, opt := range opts {
+        if opt == nil {
+            continue
+        }
+        if err := opt(c); err != nil {
+            return nil, err
+        }
+    }
+    return c, nil
+}`} />
+
+  <p>
+    <code>nil</code> options are skipped silently — this matters when
+    you build the option list conditionally:
+  </p>
+  <Code lang="go" code={`var baseURL llmrouter.Option
+if env := os.Getenv("LLM_BASE_URL"); env != "" {
+    baseURL = llmrouter.WithBaseURL(env)
+}
+p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    baseURL, // nil here is fine; falls back to provider default
+)`} />
+
+  <h2>Available options</h2>
+
+  <h3><code>WithAPIKey(key string)</code></h3>
+  <p>
+    Sets the API key. The string is trimmed; empty (after trim) is an
+    error. Every provider requires this — <code>New</code> wraps
+    <code>llmrouter.ErrInvalidConfig</code> if it's missing.
+  </p>
+  <Code lang="go" code={`llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY"))`} />
+
+  <h3><code>WithBaseURL(url string)</code></h3>
+  <p>
+    Overrides the provider's default base URL. Validated as a URL;
+    trailing slashes are stripped. Most useful for the OpenAI provider
+    pointed at an OpenAI-compatible endpoint:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Endpoint</th><th>Base URL</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>OpenAI (default)</td>
+        <td><code>https://api.openai.com/v1</code></td>
+      </tr>
+      <tr>
+        <td>OpenRouter</td>
+        <td><code>https://openrouter.ai/api/v1</code></td>
+      </tr>
+      <tr>
+        <td>Together</td>
+        <td><code>https://api.together.xyz/v1</code></td>
+      </tr>
+      <tr>
+        <td>Groq</td>
+        <td><code>https://api.groq.com/openai/v1</code></td>
+      </tr>
+      <tr>
+        <td>Fireworks</td>
+        <td><code>https://api.fireworks.ai/inference/v1</code></td>
+      </tr>
+      <tr>
+        <td>vLLM (self-hosted)</td>
+        <td><code>http://localhost:8000/v1</code></td>
+      </tr>
+      <tr>
+        <td>Ollama</td>
+        <td><code>http://localhost:11434/v1</code></td>
+      </tr>
+      <tr>
+        <td>Anthropic (default)</td>
+        <td><code>https://api.anthropic.com/v1</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    For OpenAI-compatible endpoints that don't require a real key
+    (vLLM, Ollama in default config), you still must pass
+    <code>WithAPIKey</code> with something non-empty — the OpenAI
+    provider always sets the <code>Authorization</code> header. Pass
+    any placeholder:
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey("ollama"),
+    llmrouter.WithBaseURL("http://localhost:11434/v1"),
+)`} />
+
+  <h3><code>WithHTTPClient(client *http.Client)</code></h3>
+  <p>
+    Supplies a custom <code>*http.Client</code>. Useful for wrapping
+    the transport with retries, OpenTelemetry instrumentation,
+    proxying, mTLS, or anything else that lives at the HTTP layer.
+    Required when you want behavior <code>WithTimeout</code> can't
+    express.
+  </p>
+  <p>
+    <strong>When you pass this, <code>WithTimeout</code> is
+    ignored.</strong> Your client's transport governs all timeouts.
+    Set them on the client yourself.
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "errors"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// retryingTransport retries on 429 and 5xx responses up to maxAttempts
+// times, with exponential backoff. It does NOT retry on 4xx (other
+// than 429) or network errors — those need application-level decisions.
+type retryingTransport struct {
+    base        http.RoundTripper
+    maxAttempts int
+}
+
+func (t *retryingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    var lastResp *http.Response
+    var lastErr error
+    for attempt := 0; attempt < t.maxAttempts; attempt++ {
+        if attempt > 0 {
+            select {
+            case <-time.After(backoff(attempt)):
+            case <-req.Context().Done():
+                return nil, req.Context().Err()
+            }
+        }
+        resp, err := t.base.RoundTrip(req)
+        if err != nil {
+            return nil, err
+        }
+        if resp.StatusCode != 429 && resp.StatusCode < 500 {
+            return resp, nil
+        }
+        lastResp = resp
+        if attempt+1 < t.maxAttempts {
+            resp.Body.Close()
+        }
+        lastErr = errors.New(resp.Status)
+    }
+    if lastResp != nil {
+        return lastResp, nil
+    }
+    return nil, fmt.Errorf("retries exhausted: %w", lastErr)
+}
+
+func backoff(attempt int) time.Duration {
+    return time.Duration(1<<attempt) * time.Second
+}
+
+func main() {
+    client := &http.Client{
+        Timeout: 2 * time.Minute,
+        Transport: &retryingTransport{
+            base:        http.DefaultTransport,
+            maxAttempts: 3,
+        },
+    }
+    p, err := openai.New(
+        llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+        llmrouter.WithHTTPClient(client),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = p // use p ...
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Streaming gotcha.</strong> Retries on the request-build
+    side (before headers come back) are safe. Once the SSE stream has
+    started emitting chunks, retrying re-runs the prompt and produces a
+    different completion — you usually don't want that. The
+    <code>retryingTransport</code> above only retries based on the
+    initial response status; after the body starts streaming it's
+    already too late.
+  </aside>
+
+  <h3><code>WithTimeout(d time.Duration)</code></h3>
+  <p>
+    Sets the per-request HTTP client timeout used by the default
+    client. Default is 120 seconds. Ignored if
+    <code>WithHTTPClient</code> is also supplied.
+  </p>
+  <Code lang="go" code={`llmrouter.WithTimeout(30 * time.Second)`} />
+
+  <h3><code>WithTimeout</code> vs <code>context.WithTimeout</code></h3>
+  <p>
+    These do different things and you usually want both:
+  </p>
+  <ul>
+    <li>
+      <strong><code>WithTimeout</code></strong> is a setting on the
+      HTTP client, applied at provider-construction time. It governs
+      the entire HTTP request lifecycle — connect, headers, body. It
+      kicks in even if the caller forgets to pass a deadline.
+    </li>
+    <li>
+      <strong><code>context.WithTimeout</code></strong> is a per-call
+      deadline. It governs <em>this</em> request, and it propagates
+      through the stream — cancelling the context cancels the producer
+      goroutine and the upstream HTTP read.
+    </li>
+  </ul>
+  <p>
+    Use both for defense in depth: <code>WithTimeout</code> as the
+    upper bound the provider will ever wait, <code>WithTimeout</code>
+    on the context as the request-specific budget.
+  </p>
+  <Code lang="go" code={`// Provider-level safety net.
+p, _ := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    llmrouter.WithTimeout(2*time.Minute), // hard ceiling
+)
+
+// Per-call deadline.
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+stream, err := p.CompletionStream(ctx, req)`} />
+
+  <h3><code>WithExtra(key string, value any)</code></h3>
+  <p>
+    Stores a provider-specific value on the <code>Config</code>.
+    Providers document the keys they read.
+  </p>
+  <Code lang="go" code={`// AWS Bedrock (planned):
+llmrouter.WithExtra("region", "us-east-1")
+llmrouter.WithExtra("aws_profile", "production")
+
+// Azure OpenAI (planned):
+llmrouter.WithExtra("api-version", "2024-10-21")
+llmrouter.WithExtra("deployment", "gpt-4o-prod")
+
+// Vertex AI (planned):
+llmrouter.WithExtra("project", "my-gcp-project")
+llmrouter.WithExtra("region", "us-central1")`} />
+
+  <p>
+    Empty keys are an error. Values are typed as <code>any</code>;
+    providers cast or assert on read. Unknown keys are ignored by
+    providers that don't care about them, so it's safe to pass a
+    superset of options when you have provider-selecting code.
+  </p>
+
+  <h2>Validation</h2>
+  <p>
+    Options validate eagerly. <code>NewConfig</code> walks them in
+    order and returns the <em>first</em> failing option's error. The
+    caller's <code>New</code> wraps that error with
+    <code>llmrouter.ErrInvalidConfig</code> for sentinel matching:
+  </p>
+  <Code lang="go" code={`// providers/openai/openai.go
+func New(opts ...llmrouter.Option) (*Provider, error) {
+    cfg, err := llmrouter.NewConfig(opts...)
+    if err != nil {
+        return nil, err
+    }
+    if cfg.APIKey == "" {
+        return nil, fmt.Errorf("%w: api key required", llmrouter.ErrInvalidConfig)
+    }
+    if cfg.BaseURL == "" {
+        cfg.BaseURL = defaultBaseURL
+    }
+    return &Provider{cfg: cfg}, nil
+}`} />
+
+  <p>So you can detect configuration errors specifically:</p>
+  <Code lang="go" code={`p, err := openai.New(llmrouter.WithAPIKey(""))
+if errors.Is(err, llmrouter.ErrInvalidConfig) {
+    log.Fatalf("misconfigured: %v", err)
+}`} />
+
+  <p>
+    See <a href="/llmrouter/docs/concepts/errors/">Error Handling</a>
+    for the full error taxonomy.
+  </p>
+
+  <h2>Full example: a provider factory</h2>
+  <p>
+    Real applications usually pick a provider at runtime from
+    configuration. The factory below builds either OpenAI or Anthropic
+    from a config struct, with sensible per-provider defaults:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// ProviderConfig is the application's view of provider settings. Real
+// code would populate this from flags / env / config file.
+type ProviderConfig struct {
+    Name    string        // "openai", "anthropic", "openrouter"
+    APIKey  string
+    BaseURL string        // optional override (mostly for OpenAI-compatible)
+    Timeout time.Duration // 0 = default 120s
+}
+
+// NewProvider builds an llmrouter.Provider from a ProviderConfig. It
+// returns ErrInvalidConfig for misconfiguration so callers can decide
+// whether to fail-fast or fall back.
+func NewProvider(cfg ProviderConfig) (llmrouter.Provider, error) {
+    if cfg.APIKey == "" {
+        return nil, fmt.Errorf("%w: api key required for %s",
+            llmrouter.ErrInvalidConfig, cfg.Name)
+    }
+    opts := []llmrouter.Option{llmrouter.WithAPIKey(cfg.APIKey)}
+    if cfg.BaseURL != "" {
+        opts = append(opts, llmrouter.WithBaseURL(cfg.BaseURL))
+    }
+    if cfg.Timeout > 0 {
+        opts = append(opts, llmrouter.WithTimeout(cfg.Timeout))
+    }
+
+    switch cfg.Name {
+    case "openai":
+        return openai.New(opts...)
+    case "anthropic":
+        return anthropic.New(opts...)
+    case "openrouter":
+        opts = append(opts, llmrouter.WithBaseURL("https://openrouter.ai/api/v1"))
+        return openai.New(opts...)
+    case "groq":
+        opts = append(opts, llmrouter.WithBaseURL("https://api.groq.com/openai/v1"))
+        return openai.New(opts...)
+    default:
+        return nil, fmt.Errorf("%w: unknown provider %q",
+            llmrouter.ErrInvalidConfig, cfg.Name)
+    }
+}
+
+func main() {
+    cfg := ProviderConfig{
+        Name:    os.Getenv("LLM_PROVIDER"),
+        APIKey:  os.Getenv("LLM_API_KEY"),
+        Timeout: 60 * time.Second,
+    }
+    p, err := NewProvider(cfg)
+    if err != nil {
+        if errors.Is(err, llmrouter.ErrInvalidConfig) {
+            log.Fatalf("invalid config: %v", err)
+        }
+        log.Fatal(err)
+    }
+    log.Printf("using provider: %s", p.Name())
+
+    ctx := context.Background()
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "hi"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    fmt.Println()
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+// Suppress unused import in this trimmed example.
+var _ = http.DefaultClient`} />
+
+  <h2>Next steps</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/errors/">Error Handling</a> —
+      the full error taxonomy and how to wire up retries.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/context/">Context &amp;
+      Cancellation</a> — interaction between <code>WithTimeout</code>
+      and per-call deadlines.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> —
+      <code>WithBaseURL</code> for OpenAI-compatible endpoints.
+    </li>
+  </ul>
+</DocsLayout>

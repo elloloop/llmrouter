@@ -1,0 +1,218 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Configuration & Options">
+  <h1>Package llmrouter — Configuration &amp; Options</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go"><code>options.go</code></a>.
+    Configuration is built with a functional-options pattern: each
+    provider's <code>New(opts ...llmrouter.Option)</code> calls
+    <a href="#newconfig"><code>NewConfig</code></a> internally to fold the
+    options into a <a href="#config"><code>*Config</code></a>. Most
+    consumers only ever touch the <code>With*</code> helpers below.
+  </p>
+
+  <h2 id="config">Config</h2>
+  <p>
+    Per-provider configuration. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L15">options.go#L15</a>.
+  </p>
+
+  <Code lang="go" code={`type Config struct {
+    APIKey     string
+    BaseURL    string
+    HTTPClient *http.Client
+    Timeout    time.Duration
+    Extra      map[string]any
+}`} />
+
+  <dl>
+    <dt><code>APIKey</code></dt>
+    <dd>The credential sent in the <code>Authorization</code> (OpenAI) or <code>x-api-key</code> (Anthropic) header.</dd>
+    <dt><code>BaseURL</code></dt>
+    <dd>Endpoint root, trailing slashes stripped. Empty means "use the provider's default" (OpenAI: <code>https://api.openai.com/v1</code>; Anthropic: <code>https://api.anthropic.com/v1</code>).</dd>
+    <dt><code>HTTPClient</code></dt>
+    <dd>The HTTP client used for every request. Lazy default constructed by <a href="#config-http"><code>HTTP()</code></a> when nil.</dd>
+    <dt><code>Timeout</code></dt>
+    <dd>Per-request timeout applied to the default HTTP client. Default: <code>120 * time.Second</code>. Ignored if <code>HTTPClient</code> was supplied.</dd>
+    <dt><code>Extra</code></dt>
+    <dd>Free-form bag for provider-specific knobs (Azure <code>api-version</code>, AWS <code>region</code>, GCP <code>project</code>, &hellip;). Each provider documents the keys it reads.</dd>
+  </dl>
+
+  <h2 id="option">Option</h2>
+  <p>
+    The functional-options type. Returned by every <code>With*</code>
+    helper below. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L26">options.go#L26</a>.
+  </p>
+
+  <Code lang="go" code={`type Option func(*Config) error`} />
+  <p>
+    An <code>Option</code> mutates a <code>*Config</code> in place. A
+    non-nil error short-circuits <code>NewConfig</code>, which then
+    surfaces the error from the provider's <code>New</code>. Nil
+    <code>Option</code> values are skipped — useful for conditional
+    composition.
+  </p>
+
+  <h2 id="newconfig">NewConfig</h2>
+  <p>
+    Applies the given options to a fresh <code>Config</code>. Each
+    provider calls this internally from its <code>New</code>; you don't
+    normally call it directly. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L30">options.go#L30</a>.
+  </p>
+
+  <Code lang="go" code={`func NewConfig(opts ...Option) (*Config, error)`} />
+
+  <p>Behavior:</p>
+  <ul>
+    <li>Initialises <code>{`Config{Timeout: 120 * time.Second}`}</code>.</li>
+    <li>Iterates the options in order, skipping any nil entry.</li>
+    <li>Returns the first non-nil error from an option, leaving the partial config unreturned.</li>
+    <li>Returns <code>(*Config, nil)</code> on success.</li>
+  </ul>
+
+  <h4>Example: composing options from a flag-set</h4>
+  <Code lang="go" code={`func buildOpts(apiKey, baseURL string) []llmrouter.Option {
+    opts := []llmrouter.Option{llmrouter.WithAPIKey(apiKey)}
+    if baseURL != "" {
+        opts = append(opts, llmrouter.WithBaseURL(baseURL))
+    }
+    return opts
+}
+
+p, err := openai.New(buildOpts(os.Getenv("OPENAI_API_KEY"), "")...)`} />
+
+  <h2 id="config-http">Config.HTTP</h2>
+  <p>
+    Returns the configured HTTP client, constructing a default one
+    lazily on first call. Provider implementations should always go
+    through this method rather than reading <code>cfg.HTTPClient</code>
+    directly. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L46">options.go#L46</a>.
+  </p>
+
+  <Code lang="go" code={`func (c *Config) HTTP() *http.Client`} />
+
+  <p>Behavior:</p>
+  <ul>
+    <li>If <code>c.HTTPClient</code> is non-nil, returns it unchanged.</li>
+    <li>Otherwise constructs <code>{`&http.Client{Timeout: c.Timeout}`}</code>, stores it on <code>c.HTTPClient</code>, and returns it. Subsequent calls return the same instance.</li>
+  </ul>
+
+  <h2 id="withapikey">WithAPIKey</h2>
+  <Code lang="go" code={`func WithAPIKey(key string) Option`} />
+  <p>
+    Sets the API key. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L55">options.go#L55</a>.
+  </p>
+  <p>Validation:</p>
+  <ul>
+    <li>Trims leading and trailing whitespace from <code>key</code>.</li>
+    <li>Returns <code>errors.New("api key cannot be empty")</code> if the trimmed result is empty.</li>
+  </ul>
+
+  <h4>Example</h4>
+  <Code lang="go" code={`p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))`} />
+
+  <h2 id="withbaseurl">WithBaseURL</h2>
+  <Code lang="go" code={`func WithBaseURL(u string) Option`} />
+  <p>
+    Overrides the provider's default base URL. Use it to point the
+    OpenAI provider at OpenRouter, Together, Groq, or a self-hosted
+    endpoint; or to target a specific
+    <code>*.openai.azure.com</code> resource. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L70">options.go#L70</a>.
+  </p>
+  <p>Validation:</p>
+  <ul>
+    <li>Trims leading and trailing whitespace.</li>
+    <li>Returns <code>errors.New("base url cannot be empty")</code> if the trimmed result is empty.</li>
+    <li>Runs the value through <code>url.Parse</code> and returns <code>fmt.Errorf("invalid base url: %w", err)</code> on parse failure.</li>
+    <li>Strips trailing slashes via <code>strings.TrimRight(u, "/")</code> before storing.</li>
+  </ul>
+
+  <h4>Example: point at Groq</h4>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("GROQ_API_KEY")),
+    llmrouter.WithBaseURL("https://api.groq.com/openai/v1"),
+)`} />
+
+  <h2 id="withhttpclient">WithHTTPClient</h2>
+  <Code lang="go" code={`func WithHTTPClient(client *http.Client) Option`} />
+  <p>
+    Supplies a custom HTTP client. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L86">options.go#L86</a>.
+  </p>
+  <p>Validation and precedence:</p>
+  <ul>
+    <li>Returns <code>errors.New("http client cannot be nil")</code> when <code>client</code> is nil.</li>
+    <li>Stores the supplied client on <code>Config.HTTPClient</code>.</li>
+    <li><strong>Takes precedence over <a href="#withtimeout"><code>WithTimeout</code></a>.</strong> When you supply your own client, <code>Config.Timeout</code> still gets set if <code>WithTimeout</code> ran, but it is never read — the client's own transport governs timeouts.</li>
+  </ul>
+
+  <h4>Example: instrumented client with retries</h4>
+  <Code lang="go" code={`import "github.com/hashicorp/go-retryablehttp"
+
+retry := retryablehttp.NewClient()
+retry.RetryMax = 3
+retry.Logger = nil
+
+p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    llmrouter.WithHTTPClient(retry.StandardClient()),
+)`} />
+
+  <h2 id="withtimeout">WithTimeout</h2>
+  <Code lang="go" code={`func WithTimeout(d time.Duration) Option`} />
+  <p>
+    Sets the request timeout used by the default HTTP client. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L98">options.go#L98</a>.
+  </p>
+  <p>Validation and precedence:</p>
+  <ul>
+    <li>Returns <code>errors.New("timeout must be positive")</code> when <code>d &lt;= 0</code>.</li>
+    <li>Stored on <code>Config.Timeout</code>; consumed by <a href="#config-http"><code>HTTP()</code></a> when it lazily constructs the default client.</li>
+    <li><strong>Ignored if <a href="#withhttpclient"><code>WithHTTPClient</code></a> is also supplied</strong> — the custom client's transport governs timeouts.</li>
+  </ul>
+
+  <h4>Example</h4>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    llmrouter.WithTimeout(30 * time.Second),
+)`} />
+
+  <h2 id="withextra">WithExtra</h2>
+  <Code lang="go" code={`func WithExtra(key string, value any) Option`} />
+  <p>
+    Attaches a provider-specific config value. Each provider documents
+    the keys it reads from <code>Config.Extra</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/options.go#L112">options.go#L112</a>.
+  </p>
+  <p>Validation and semantics:</p>
+  <ul>
+    <li>Trims whitespace from <code>key</code>.</li>
+    <li>Returns <code>errors.New("extra key cannot be empty")</code> if the trimmed key is empty.</li>
+    <li><code>value</code> is <strong>not</strong> validated — nil is allowed.</li>
+    <li>Lazily initialises <code>Config.Extra</code> on first call.</li>
+    <li><strong>Overwrites</strong> on duplicate key. Last call wins.</li>
+  </ul>
+
+  <h4>Example: Azure OpenAI</h4>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("AZURE_OPENAI_KEY")),
+    llmrouter.WithBaseURL("https://my-resource.openai.azure.com"),
+    llmrouter.WithExtra("api-version", "2024-10-21"),
+    llmrouter.WithExtra("deployment", "gpt-4o-mini"),
+)`} />
+
+  <h4>Example: AWS Bedrock</h4>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(awsAccessKey),
+    llmrouter.WithExtra("region", "us-east-1"),
+)`} />
+</DocsLayout>

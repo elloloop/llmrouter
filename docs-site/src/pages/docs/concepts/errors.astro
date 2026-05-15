@@ -1,0 +1,513 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Error Handling">
+  <h1>Error Handling</h1>
+  <p>
+    <code>llmrouter</code> surfaces errors from five distinct places.
+    Knowing which is which is the difference between a retry loop that
+    rescues a flaky network and a retry loop that hammers a permanently
+    misconfigured endpoint. This page walks the taxonomy, the sentinel
+    and wrapper types, and the patterns for handling each.
+  </p>
+
+  <h2>Where errors come from</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Source</th>
+        <th>Returned from</th>
+        <th>Retryable?</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Configuration</td>
+        <td><code>provider.New(...)</code></td>
+        <td>No — fix the config</td>
+      </tr>
+      <tr>
+        <td>Request build</td>
+        <td><code>CompletionStream</code></td>
+        <td>No — fix the request</td>
+      </tr>
+      <tr>
+        <td>Network</td>
+        <td><code>CompletionStream</code></td>
+        <td>Yes (with care)</td>
+      </tr>
+      <tr>
+        <td>Upstream HTTP</td>
+        <td><code>CompletionStream</code></td>
+        <td>Depends on status code</td>
+      </tr>
+      <tr>
+        <td>Stream read</td>
+        <td><code>Stream.Err()</code></td>
+        <td>Depends — usually no</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    The two functions that produce errors are
+    <code>CompletionStream</code> (synchronous error on open) and
+    <code>Stream.Err()</code> (terminal error after the producer
+    goroutine finishes). Treating those as the only error checkpoints
+    is the simplest mental model:
+  </p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, req)
+if err != nil {
+    // configuration, request-build, network, or upstream HTTP error
+}
+for chunk := range stream.Chunks() {
+    // ...
+}
+if err := stream.Err(); err != nil {
+    // network read failure during streaming, or context cancellation
+}`} />
+
+  <h2><code>ErrInvalidConfig</code> — configuration errors</h2>
+  <Code lang="go" code={`var ErrInvalidConfig = errors.New("invalid provider config")`} />
+  <p>
+    A sentinel returned (wrapped) from <code>provider.New</code> when an
+    option fails validation or the provider rejects the final
+    configuration. Match it with <code>errors.Is</code>:
+  </p>
+  <Code lang="go" code={`p, err := openai.New(llmrouter.WithAPIKey(""))
+if errors.Is(err, llmrouter.ErrInvalidConfig) {
+    log.Fatalf("invalid configuration: %v", err)
+}`} />
+  <p>
+    Causes include empty API key, malformed base URL, negative
+    timeout, and provider-specific requirements (the Anthropic provider
+    requires an API key; future Azure/Bedrock providers will require
+    keys from <code>WithExtra</code>).
+  </p>
+  <p>
+    These errors are <em>eager</em>: you see them at construction
+    time, not at request time. That's deliberate — config errors should
+    fail fast at startup, not at 3 AM under load.
+  </p>
+
+  <h2><code>*ErrUpstream</code> — upstream HTTP errors</h2>
+  <Code lang="go" code={`type ErrUpstream struct {
+    Provider   string
+    StatusCode int
+    Body       string
+}
+
+func (e *ErrUpstream) Error() string {
+    return fmt.Sprintf("%s upstream %d: %s", e.Provider, e.StatusCode, e.Body)
+}`} />
+  <p>
+    Returned synchronously from <code>CompletionStream</code> when the
+    upstream responds with status &gt;= 400, before any SSE frames have
+    been read. Match it with <code>errors.As</code>:
+  </p>
+  <Code lang="go" code={`var ue *llmrouter.ErrUpstream
+if errors.As(err, &ue) {
+    log.Printf("provider=%s status=%d body=%s",
+        ue.Provider, ue.StatusCode, ue.Body)
+}`} />
+  <p>The body is truncated for log safety:</p>
+  <ul>
+    <li><strong>OpenAI provider</strong> — up to 1KB.</li>
+    <li><strong>Anthropic provider</strong> — up to 8KB.</li>
+  </ul>
+  <p>
+    Truncation happens because some upstreams return HTML error pages,
+    multi-megabyte stack traces, or other noise on failure. The
+    truncated snippet is enough to debug the typical
+    <code>{`{"error":{"message":"..."}}`}</code> case without blowing
+    up your logs.
+  </p>
+
+  <h2>Distinguishing upstream errors</h2>
+  <p>
+    The <code>StatusCode</code> field is your routing key:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Status</th><th>Meaning</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>400</code></td>
+        <td>Malformed request, unknown model, content policy</td>
+        <td>Fail — bad input</td>
+      </tr>
+      <tr>
+        <td><code>401</code></td>
+        <td>Invalid API key</td>
+        <td>Fail loudly — config issue</td>
+      </tr>
+      <tr>
+        <td><code>403</code></td>
+        <td>Key valid but not authorized for this resource</td>
+        <td>Fail — permission issue</td>
+      </tr>
+      <tr>
+        <td><code>404</code></td>
+        <td>Model not found, wrong base URL</td>
+        <td>Fail — config issue</td>
+      </tr>
+      <tr>
+        <td><code>408</code></td>
+        <td>Request timeout (rare for chat completions)</td>
+        <td>Retry with backoff</td>
+      </tr>
+      <tr>
+        <td><code>429</code></td>
+        <td>Rate-limited or quota exhausted</td>
+        <td>Retry with backoff; honor <code>Retry-After</code> if present</td>
+      </tr>
+      <tr>
+        <td><code>500</code> / <code>502</code> / <code>503</code> / <code>504</code></td>
+        <td>Upstream server error</td>
+        <td>Retry with backoff (bounded)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>A simple classifier:</p>
+  <Code lang="go" code={`func isRetryable(err error) bool {
+    var ue *llmrouter.ErrUpstream
+    if !errors.As(err, &ue) {
+        // Not an upstream error — could be network, config, etc.
+        return false
+    }
+    switch ue.StatusCode {
+    case 408, 429, 500, 502, 503, 504:
+        return true
+    default:
+        return false
+    }
+}`} />
+
+  <h2>Retrying transient errors</h2>
+  <p>
+    The most reliable place to retry is inside the
+    <code>http.RoundTripper</code> — it sits below the streaming layer,
+    so it can retry on the initial response status (when no bytes have
+    been delivered to the caller yet) without re-running an
+    in-progress completion.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "errors"
+    "fmt"
+    "io"
+    "math/rand"
+    "net/http"
+    "strconv"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// retryTransport retries on 429 and 5xx with exponential backoff
+// and jitter. Stops retrying as soon as the body starts streaming —
+// at that point the upstream has committed tokens to the response.
+type retryTransport struct {
+    base        http.RoundTripper
+    maxAttempts int
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    for attempt := 1; ; attempt++ {
+        resp, err := t.base.RoundTrip(req)
+        // Network error: try again unless we're out of attempts.
+        if err != nil {
+            if attempt >= t.maxAttempts {
+                return nil, err
+            }
+            if !sleep(req, backoff(attempt)) {
+                return nil, req.Context().Err()
+            }
+            continue
+        }
+        // Don't retry success or non-retryable failures.
+        if resp.StatusCode < 400 ||
+            (resp.StatusCode != 429 && resp.StatusCode < 500) {
+            return resp, nil
+        }
+        // Retryable error. Drain and close to free the connection.
+        _, _ = io.Copy(io.Discard, resp.Body)
+        resp.Body.Close()
+        if attempt >= t.maxAttempts {
+            return nil, fmt.Errorf("after %d attempts: %s",
+                attempt, resp.Status)
+        }
+        wait := retryAfter(resp.Header)
+        if wait == 0 {
+            wait = backoff(attempt)
+        }
+        if !sleep(req, wait) {
+            return nil, req.Context().Err()
+        }
+    }
+}
+
+func backoff(attempt int) time.Duration {
+    base := time.Duration(1<<attempt) * 500 * time.Millisecond
+    jitter := time.Duration(rand.Int63n(int64(base) / 2))
+    return base + jitter
+}
+
+func retryAfter(h http.Header) time.Duration {
+    v := h.Get("Retry-After")
+    if v == "" {
+        return 0
+    }
+    if secs, err := strconv.Atoi(v); err == nil {
+        return time.Duration(secs) * time.Second
+    }
+    return 0
+}
+
+func sleep(req *http.Request, d time.Duration) bool {
+    select {
+    case <-time.After(d):
+        return true
+    case <-req.Context().Done():
+        return false
+    }
+}
+
+// Compose into a provider.
+func newProvider(apiKey string) (llmrouter.Provider, error) {
+    client := &http.Client{
+        Timeout: 5 * time.Minute,
+        Transport: &retryTransport{
+            base:        http.DefaultTransport,
+            maxAttempts: 4,
+        },
+    }
+    return openai.New(
+        llmrouter.WithAPIKey(apiKey),
+        llmrouter.WithHTTPClient(client),
+    )
+}
+
+// Suppress unused: errors import for the larger example below.
+var _ = errors.New`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Only retry pre-body.</strong> The transport above retries
+    based on response status, which arrives before the SSE body
+    starts. Once the body is streaming, retrying re-runs the prompt
+    and you get a different completion. Always retry above the stream,
+    never inside it.
+  </aside>
+
+  <h2>Stream errors</h2>
+  <p>
+    A stream that opened successfully may still fail later. The
+    producer goroutine reports any terminal failure through
+    <code>Stream.Err()</code>:
+  </p>
+  <Code lang="go" code={`for chunk := range stream.Chunks() {
+    // ...
+}
+if err := stream.Err(); err != nil {
+    // possibilities:
+    //   - context.Canceled         (caller called cancel or stream.Cancel)
+    //   - context.DeadlineExceeded (request context deadline fired)
+    //   - network read error       (wrapped, e.g. "openai: read stream: ...")
+    //   - upstream protocol error  (SSE buffer overflow, malformed frame)
+}`} />
+  <p>The OpenAI provider wraps read errors like this:</p>
+  <Code lang="go" code={`if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+    hooks.Finish(fmt.Errorf("openai: read stream: %w", err))
+    return
+}`} />
+  <p>And the Anthropic provider:</p>
+  <Code lang="go" code={`if err := scanner.Err(); err != nil && err != io.EOF {
+    hooks.Finish(fmt.Errorf("anthropic: read stream: %w", err))
+    return
+}`} />
+  <p>
+    Stream errors are <em>not</em> safely retryable from outside the
+    stream — you've already shipped some chunks to the caller, and you
+    can't un-ship them. The right response is usually to surface the
+    error and let the caller (a UI, an upstream gateway) decide
+    whether to start a new request.
+  </p>
+
+  <h2>Context-cancelled errors</h2>
+  <p>
+    Two well-known sentinels surface from <code>Stream.Err()</code>:
+  </p>
+  <ul>
+    <li>
+      <strong><code>context.Canceled</code></strong> — caller cancelled
+      the parent context, or called <code>stream.Cancel()</code>. Treat
+      as expected; not an error to log noisily.
+    </li>
+    <li>
+      <strong><code>context.DeadlineExceeded</code></strong> —
+      <code>context.WithTimeout</code> or
+      <code>context.WithDeadline</code> fired. The request ran out of
+      budget. Treat as a soft failure; possibly retry with a longer
+      budget.
+    </li>
+  </ul>
+  <Code lang="go" code={`switch {
+case errors.Is(err, context.Canceled):
+    // intentional — silent
+case errors.Is(err, context.DeadlineExceeded):
+    log.Printf("request exceeded deadline")
+case err != nil:
+    log.Printf("stream failed: %v", err)
+}`} />
+
+  <h2>Structured logging</h2>
+  <p>
+    For production, log upstream errors with structured fields so
+    you can build alerts and dashboards on them:
+  </p>
+  <Code lang="go" code={`import "log/slog"
+
+func logErr(ctx context.Context, err error) {
+    var ue *llmrouter.ErrUpstream
+    switch {
+    case errors.As(err, &ue):
+        slog.ErrorContext(ctx, "llm upstream error",
+            "provider", ue.Provider,
+            "status", ue.StatusCode,
+            "body", ue.Body,
+        )
+    case errors.Is(err, context.DeadlineExceeded):
+        slog.WarnContext(ctx, "llm request exceeded deadline")
+    case errors.Is(err, context.Canceled):
+        // expected; suppress
+    case errors.Is(err, llmrouter.ErrInvalidConfig):
+        slog.ErrorContext(ctx, "llm config error", "err", err)
+    default:
+        slog.ErrorContext(ctx, "llm unknown error", "err", err)
+    }
+}`} />
+
+  <h2>Full example: tiered error handler</h2>
+  <p>
+    Putting it together — a function that retries 429 and 5xx, fails
+    fast on other 4xx, surfaces stream errors to the caller, and
+    distinguishes cancellation from deadline-exceeded:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "io"
+    "log/slog"
+    "strings"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+)
+
+// completeWithRetry calls p.CompletionStream with retry on transient
+// failures, then streams the response into a string. The retry only
+// applies to the open phase; stream-read errors are surfaced as-is.
+func completeWithRetry(
+    ctx context.Context,
+    p llmrouter.Provider,
+    req llmrouter.ChatRequest,
+    maxAttempts int,
+) (string, error) {
+    var lastErr error
+    for attempt := 1; attempt <= maxAttempts; attempt++ {
+        text, err := completeOnce(ctx, p, req)
+        if err == nil {
+            return text, nil
+        }
+        if !isTransient(err) {
+            return "", err
+        }
+        lastErr = err
+        slog.WarnContext(ctx, "llm transient failure",
+            "provider", p.Name(),
+            "attempt", attempt,
+            "err", err.Error(),
+        )
+        select {
+        case <-time.After(backoff(attempt)):
+        case <-ctx.Done():
+            return "", ctx.Err()
+        }
+    }
+    return "", fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
+}
+
+func completeOnce(ctx context.Context, p llmrouter.Provider, req llmrouter.ChatRequest) (string, error) {
+    stream, err := p.CompletionStream(ctx, req)
+    if err != nil {
+        return "", err
+    }
+    var out strings.Builder
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            out.WriteString(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        // Stream errors are NOT retried — partial content was already
+        // observed by the producer goroutine. Surface and let the
+        // caller decide.
+        return out.String(), err
+    }
+    return out.String(), nil
+}
+
+// isTransient returns true for errors that may resolve on retry.
+func isTransient(err error) bool {
+    // context cancellation / deadline are not retryable here — the
+    // caller's deadline applies to every attempt.
+    if errors.Is(err, context.Canceled) ||
+        errors.Is(err, context.DeadlineExceeded) {
+        return false
+    }
+    var ue *llmrouter.ErrUpstream
+    if errors.As(err, &ue) {
+        switch ue.StatusCode {
+        case 408, 429, 500, 502, 503, 504:
+            return true
+        default:
+            return false
+        }
+    }
+    // Bare network errors at the open phase: retry.
+    return errors.Is(err, io.ErrUnexpectedEOF) ||
+        strings.Contains(err.Error(), "connection refused") ||
+        strings.Contains(err.Error(), "EOF")
+}
+
+func backoff(attempt int) time.Duration {
+    return time.Duration(1<<attempt) * 500 * time.Millisecond
+}`} />
+
+  <h2>Next steps</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/context/">Context &amp;
+      Cancellation</a> — how deadlines and cancellation interact with
+      streams.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/configuration/">Configuration
+      &amp; Options</a> — wiring a custom <code>http.Client</code> with
+      retries through <code>WithHTTPClient</code>.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/streaming/">The Streaming
+      Model</a> — for the broader picture of stream lifecycle and
+      <code>Err()</code> semantics.
+    </li>
+  </ul>
+</DocsLayout>

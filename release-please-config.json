@@ -1,0 +1,17 @@
+{
+  "release-type": "go",
+  "include-component-in-tag": false,
+  "tag-separator": "/",
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "llmrouter",
+      "changelog-path": "CHANGELOG.md",
+      "include-v-in-tag": true,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": false,
+      "draft": false,
+      "prerelease": false
+    }
+  }
+}

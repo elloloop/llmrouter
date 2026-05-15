@@ -1,0 +1,478 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Anthropic Provider">
+  <h1>Anthropic Provider</h1>
+  <p>
+    The <code>anthropic</code> provider talks to Anthropic's
+    <code>/v1/messages</code> API. Unlike the
+    <a href="/llmrouter/docs/providers/openai/">OpenAI provider</a>,
+    which is byte-passthrough, this provider does <strong>full
+    translation</strong>: incoming OpenAI-shaped
+    <a href="/llmrouter/docs/api/llmrouter/#chatrequest"><code>ChatRequest</code></a>
+    values are rewritten to Anthropic's request shape, and Anthropic's
+    SSE event stream is rewritten back into OpenAI-shaped
+    <a href="/llmrouter/docs/api/llmrouter/#chunk"><code>Chunk</code></a>
+    values. The result: the same application code can target Anthropic
+    without branching on provider, and your streaming consumer is
+    none-the-wiser.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+)`} />
+
+  <h2 id="defaults">Default endpoint</h2>
+  <p>
+    With no <code>WithBaseURL</code> override, the provider targets
+    <code>https://api.anthropic.com/v1</code>. The request URL is
+    <code>{`{BaseURL}/messages`}</code>.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`provider, err := anthropic.New(
+    llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    The constructor wraps shared <code>llmrouter.NewConfig</code>,
+    requires a non-empty API key (returns a wrapped
+    <code>ErrInvalidConfig</code> otherwise), and falls back to the
+    default base URL.
+  </p>
+
+  <h2 id="wire-level">What's wire-level</h2>
+  <p>
+    The provider speaks Anthropic's <code>/v1/messages</code> on the
+    wire. Two translations happen on every request:
+  </p>
+  <ul>
+    <li>
+      <strong>Request translation.</strong> The OpenAI-shaped
+      <code>ChatRequest</code> is converted to Anthropic's request body
+      shape — <code>system</code> messages lifted to a top-level field,
+      <code>messages</code> kept as-is, <code>max_tokens</code>
+      defaulted, sampling knobs renamed where Anthropic uses different
+      keys.
+    </li>
+    <li>
+      <strong>Response translation.</strong> Each Anthropic SSE event
+      (<code>message_start</code>, <code>content_block_delta</code>,
+      <code>message_delta</code>, <code>message_stop</code>) is
+      converted to one or more OpenAI-shaped streaming chunks before
+      being sent to the consumer.
+    </li>
+  </ul>
+  <p>
+    Streaming is always on — the provider forces
+    <code>{`"stream": true`}</code> in the outgoing body regardless of
+    what the caller passed.
+  </p>
+
+  <h2 id="request-translation">Request translation</h2>
+  <p>The following mappings happen inside the provider:</p>
+  <ul>
+    <li>
+      <strong>System messages → top-level <code>system</code>.</strong>
+      Anthropic does not accept <code>{`{"role":"system"}`}</code> in the
+      <code>messages</code> array. The provider collects every message
+      whose <code>Role</code> is <code>"system"</code>, extracts the
+      plain text via <code>Message.PlainText</code>, and joins them
+      with <code>{`"\\n\\n"`}</code> into a single top-level
+      <code>system</code> field. The system messages are then removed
+      from the <code>messages</code> array.
+    </li>
+    <li>
+      <strong><code>max_tokens</code> defaults to 4096.</strong>
+      Anthropic <em>requires</em> <code>max_tokens</code>. If the
+      caller did not set it on <code>ChatRequest</code>, the provider
+      defaults to <code>4096</code> so callers don't have to know that
+      detail.
+    </li>
+    <li>
+      <strong>Streaming is forced.</strong> <code>stream: true</code>
+      is always set, even if the caller passed <code>stream:
+      false</code>. Non-streaming calls are not supported in v0.1.
+    </li>
+    <li>
+      <strong>Sampling knobs pass through.</strong>
+      <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+      and <code>stop</code> are copied to the outgoing body. The
+      <code>stop</code> field is renamed to
+      <code>stop_sequences</code>, which is what Anthropic expects.
+      When the caller supplies <code>ChatRequest.Raw</code>, these
+      knobs are read from the raw body; otherwise they are read from
+      the typed <code>ChatRequest</code> fields.
+    </li>
+    <li>
+      <strong>Other fields ride on <code>Raw</code>.</strong> Anything
+      Anthropic accepts that the typed <code>ChatRequest</code>
+      doesn't model — <code>tools</code>, <code>tool_choice</code>,
+      <code>metadata</code> — needs to be passed via
+      <code>ChatRequest.Raw</code>. The provider only looks at four
+      keys (<code>temperature</code>, <code>top_p</code>,
+      <code>top_k</code>, <code>stop</code>) from the raw body when
+      assembling the outgoing request; the rest is currently dropped.
+      To get full passthrough, build the Anthropic body yourself and
+      use the <a href="/llmrouter/docs/providers/openai/">OpenAI
+      provider</a> against an OpenAI-compatible proxy of Anthropic
+      instead.
+    </li>
+  </ul>
+
+  <h2 id="response-translation">Response translation</h2>
+  <p>
+    Anthropic emits a typed event stream. Each event becomes zero or
+    more OpenAI chunks:
+  </p>
+  <ul>
+    <li>
+      <code>message_start</code> → emits a role-primer chunk
+      <code>{`{"delta":{"role":"assistant"}}`}</code> and captures
+      <code>input_tokens</code> from the event's
+      <code>message.usage</code>. The model id from
+      <code>message.model</code> overrides the caller's value if it
+      differs.
+    </li>
+    <li>
+      <code>content_block_delta</code> with
+      <code>{`{"type":"text_delta"}`}</code> → emits a content chunk with
+      <code>{`{"delta":{"content":"..."}}`}</code>. Other delta types
+      (<code>thinking_delta</code>, <code>input_json_delta</code>) are
+      currently <strong>dropped</strong> — see <a href="#caveats">Caveats</a>.
+    </li>
+    <li>
+      <code>message_delta</code> → emits a final chunk with the
+      mapped <code>finish_reason</code> and the accumulated
+      <code>Usage</code> object. Anthropic's stop reasons map as
+      follows:
+      <ul>
+        <li><code>end_turn</code>, <code>stop_sequence</code> → <code>stop</code></li>
+        <li><code>max_tokens</code> → <code>length</code></li>
+        <li><code>tool_use</code> → <code>tool_calls</code></li>
+        <li>anything else → <code>stop</code></li>
+      </ul>
+    </li>
+    <li>
+      <code>message_stop</code> → terminates the stream
+      (<code>hooks.Finish(nil)</code>).
+    </li>
+    <li>
+      <code>ping</code>, <code>content_block_start</code>,
+      <code>content_block_stop</code> → ignored. They carry no
+      consumer-relevant payload in v0.1.
+    </li>
+  </ul>
+  <p>
+    Every emitted chunk has its <code>Object</code> set to
+    <code>"chat.completion.chunk"</code>, a stable
+    <code>chatcmpl-{`<uuid>`}</code> id reused across every chunk in
+    the stream, and a <code>Created</code> timestamp captured at the
+    start of the stream.
+  </p>
+
+  <h2 id="auth">Authentication</h2>
+  <p>Anthropic uses two headers, both set automatically:</p>
+  <ul>
+    <li><code>x-api-key: {`<your key>`}</code></li>
+    <li><code>anthropic-version: 2023-06-01</code></li>
+  </ul>
+  <p>
+    The version header is pinned to <code>2023-06-01</code> in v0.1. A
+    later release will allow overriding it via
+    <code>llmrouter.WithExtra("anthropic-version", ...)</code> for
+    callers that need a different API version.
+  </p>
+
+  <h2 id="example-basic">Full example</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+)
+
+func main() {
+    p, err := anthropic.New(
+        llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx := context.Background()
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        Model:     "claude-3-5-sonnet-latest",
+        MaxTokens: 256,
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("system", "You are a concise assistant."),
+            llmrouter.TextMessage("user", "Explain the speed of light in one sentence."),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, choice := range chunk.Choices {
+            fmt.Print(choice.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+  <p>
+    Note <code>MaxTokens: 256</code>. You can leave it at zero and the
+    provider will default to 4096, but setting it explicitly is cheap
+    insurance for cost-sensitive code.
+  </p>
+
+  <h2 id="system-prompts">Multiple system prompts</h2>
+  <p>
+    Pass multiple <code>{`{"role":"system"}`}</code> messages and the
+    provider will join them with <code>{`"\\n\\n"`}</code> before
+    sending. This is useful for layering a persona, a task
+    description, and a set of constraints in separate
+    semantically-grouped messages:
+  </p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-5-sonnet-latest",
+    MaxTokens: 512,
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are a senior staff engineer."),
+        llmrouter.TextMessage("system", "Use markdown. Cite line numbers."),
+        llmrouter.TextMessage("system", "When unsure, say so. Never invent APIs."),
+        llmrouter.TextMessage("user", "Review the following Go function..."),
+    },
+})`} />
+  <p>
+    The wire-level body Anthropic sees will have a single
+    <code>system</code> string concatenating the three system messages.
+  </p>
+
+  <h2 id="stop-sequences">Stop sequences</h2>
+  <p>
+    The typed <code>ChatRequest.Stop</code> field flows through as
+    Anthropic's <code>stop_sequences</code>:
+  </p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-5-haiku-latest",
+    MaxTokens: 200,
+    Stop:      []string{"\\n\\nUSER:", "END_OF_RESPONSE"},
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Continue: Once upon a time"),
+    },
+})`} />
+  <p>
+    When the model halts on a stop sequence, the final chunk's
+    <code>FinishReason</code> is <code>"stop"</code> (Anthropic's
+    <code>stop_sequence</code> maps to OpenAI's <code>stop</code>).
+  </p>
+
+  <h2 id="vision">Vision / multimodal</h2>
+  <p>
+    Anthropic's content array shape differs from OpenAI's — image
+    blocks use <code>{`{"type":"image","source":{...}}`}</code> instead
+    of OpenAI's <code>{`{"type":"image_url","image_url":...}`}</code>.
+    Because the typed surface in <code>llmrouter.Message</code> is
+    OpenAI-shaped, multimodal Anthropic requests need you to either
+    construct the Anthropic-shape content manually or pass the entire
+    request via <code>Raw</code>.
+  </p>
+  <Code lang="go" code={`// Anthropic-shape content array, built by hand.
+content, _ := json.Marshal([]map[string]any{
+    {
+        "type": "image",
+        "source": map[string]any{
+            "type":       "base64",
+            "media_type": "image/jpeg",
+            "data":       base64Encoded,
+        },
+    },
+    {
+        "type": "text",
+        "text": "What's in this image?",
+    },
+})
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-5-sonnet-latest",
+    MaxTokens: 512,
+    Messages: []llmrouter.Message{{
+        Role:    "user",
+        Content: content,
+    }},
+})`} />
+  <p>
+    The system-message lift (see <a href="#request-translation">Request
+    translation</a>) still applies, so you can keep using OpenAI-style
+    system messages even when the user messages carry vision content.
+  </p>
+
+  <h2 id="tool-use">Tool use</h2>
+  <p>
+    Tool use needs to ride on <code>ChatRequest.Raw</code> because the
+    typed surface does not model <code>tools</code> or
+    <code>tool_choice</code> yet. The provider currently only looks at
+    sampling knobs in the raw body, so tool-use requests are best
+    constructed by hand:
+  </p>
+  <Code lang="go" code={`reqBody := []byte(` + "`" + `{
+  "model": "claude-3-5-sonnet-latest",
+  "max_tokens": 1024,
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get current weather for a city",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"}
+        },
+        "required": ["city"]
+      }
+    }
+  ],
+  "messages": [
+    {"role": "user", "content": "What is the weather in Paris?"}
+  ]
+}` + "`" + `)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "claude-3-5-sonnet-latest",
+    Raw:   reqBody,
+})`} />
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Current limitation.</strong> The Anthropic provider's body
+    builder only forwards <code>temperature</code>, <code>top_p</code>,
+    <code>top_k</code>, and <code>stop</code> from
+    <code>ChatRequest.Raw</code>. Other fields like <code>tools</code>
+    are dropped. Until full raw passthrough lands (planned for v0.3),
+    use the official Anthropic SDK for production tool-use workloads
+    or build your own thin wrapper over <code>/v1/messages</code>.
+  </aside>
+  <p>
+    When the model decides to call a tool, the final chunk's
+    <code>FinishReason</code> is <code>"tool_calls"</code> (mapped from
+    Anthropic's <code>tool_use</code>).
+  </p>
+
+  <h2 id="usage">Token counting</h2>
+  <p>
+    The provider accumulates <code>input_tokens</code> from
+    <code>message_start</code> and <code>output_tokens</code> from
+    <code>message_delta</code>, then attaches them to the final chunk:
+  </p>
+  <Code lang="go" code={`var usage *llmrouter.Usage
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+    if chunk.Usage != nil {
+        usage = chunk.Usage
+    }
+}
+if usage != nil {
+    fmt.Printf("\\nprompt=%d completion=%d total=%d\\n",
+        usage.PromptTokens,
+        usage.CompletionTokens,
+        usage.TotalTokens,
+    )
+}`} />
+
+  <h2 id="caveats">Caveats and known gaps</h2>
+  <ul>
+    <li>
+      <strong><code>Chunk.Raw</code> is the translated form.</strong>
+      Each chunk's <code>Raw</code> field carries the OpenAI-shape JSON
+      built by the provider, <em>not</em> the original Anthropic SSE
+      event. If you need to inspect the original Anthropic events
+      (e.g. to extract <code>content_block_start</code> with tool
+      ids), use the official <code>anthropic-sdk-go</code> directly.
+    </li>
+    <li>
+      <strong>Cache metrics are not surfaced.</strong>
+      Anthropic reports <code>cache_creation_input_tokens</code> and
+      <code>cache_read_input_tokens</code> in
+      <code>message_start.usage</code>. The provider currently only
+      reads <code>input_tokens</code> and <code>output_tokens</code>.
+      Use the official SDK if you need cache visibility for billing.
+    </li>
+    <li>
+      <strong>Thinking deltas are dropped.</strong> Extended-thinking
+      models emit <code>{`{"type":"thinking_delta"}`}</code> events
+      inside <code>content_block_delta</code>. The provider only
+      forwards <code>text_delta</code>; thinking content is silently
+      discarded. Surfacing thinking content is on the v0.3 roadmap.
+    </li>
+    <li>
+      <strong>Most raw fields are dropped.</strong> When
+      <code>ChatRequest.Raw</code> is set, only the four sampling keys
+      listed under <a href="#request-translation">Request translation</a>
+      are forwarded. This is the most common reason a tool-use request
+      doesn't work as expected.
+    </li>
+  </ul>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter/#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider: "anthropic"</code>. Anthropic uses a typed
+    error body shape:
+  </p>
+  <Code lang="go" code={`{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "max_tokens: Field required"
+  }
+}`} />
+  <p>The same pattern as OpenAI works for branching on status:</p>
+  <Code lang="go" code={`stream, err := p.CompletionStream(ctx, req)
+if err != nil {
+    var upstream *llmrouter.ErrUpstream
+    if errors.As(err, &upstream) {
+        log.Printf("anthropic error: status=%d body=%s",
+            upstream.StatusCode, upstream.Body)
+        switch upstream.StatusCode {
+        case 429:
+            // overloaded — back off
+        case 401:
+            // bad api key — fail fast
+        case 400:
+            // malformed request
+        }
+        return
+    }
+    log.Fatal(err)
+}`} />
+  <p>
+    The body field carries up to 8 KiB of the raw response, which is
+    enough for the typed error envelope above. Parse it with
+    <code>json.Unmarshal</code> if you want to branch on
+    <code>error.type</code>.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> — byte-passthrough sibling.</li>
+    <li><a href="/llmrouter/docs/providers/openai-compatible/">OpenAI-compatible endpoints</a> — OpenRouter, Together, Groq, vLLM, Ollama.</li>
+    <li><a href="/llmrouter/docs/providers/adding-a-provider/">Adding a new provider</a> — the <code>Provider</code> contract.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming">Streaming model</a> — chunk channel and cancellation.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type.</li>
+  </ul>
+</DocsLayout>

@@ -1,0 +1,710 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Build an OpenAI-compatible Chat Gateway">
+  <h1>Build an OpenAI-compatible Chat Gateway</h1>
+  <p>
+    This is the headline use case for <code>llmrouter</code>. We're going
+    to build a single HTTP endpoint at <code>/v1/chat/completions</code>
+    that accepts requests in the OpenAI Chat Completions shape and routes
+    them — by model name — to OpenAI, Anthropic, or any other configured
+    upstream. The response stream stays byte-identical to OpenAI's SSE
+    format, so any OpenAI SDK pointed at this gateway just works.
+  </p>
+
+  <p>
+    At the end you'll have a ~250-line Go program that:
+  </p>
+  <ul>
+    <li>routes by model prefix (<code>gpt-</code>, <code>claude-</code>, …);</li>
+    <li>streams bytes back to the client without re-marshaling;</li>
+    <li>cancels upstream on client disconnect;</li>
+    <li>translates upstream errors to correct HTTP status codes;</li>
+    <li>enforces a per-request token budget read from the final SSE chunk.</li>
+  </ul>
+
+  <h2>Goal</h2>
+  <p>
+    Pretend you're running a small AI product and you don't want every
+    service that needs an LLM to embed three different SDKs. Instead, one
+    internal gateway speaks the OpenAI dialect and dispatches to whichever
+    upstream owns the requested model. Clients keep using
+    <code>openai</code> SDK, point its base URL at your gateway, and get
+    free vendor-routing.
+  </p>
+
+  <Code lang="bash" code={`curl -X POST http://localhost:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role":"user","content":"hello"}],
+    "stream": true
+  }'
+
+# same gateway, different upstream — just change the model
+curl -X POST http://localhost:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "messages": [{"role":"user","content":"hello"}],
+    "stream": true
+  }'`} />
+
+  <h2>Architecture</h2>
+  <p>
+    The shape of the gateway is small. We use <code>chi</code> for
+    routing because it's the standard Go HTTP router and it gets out of
+    the way; the actual logic is in one handler.
+  </p>
+
+  <Code lang="text" code={`HTTP request (OpenAI-shape JSON)
+   │
+   ▼
+chi router  ──►  /v1/chat/completions handler
+   │
+   ▼
+pick provider by model prefix
+   │ gpt-*      ──►  llmrouter openai.Provider
+   │ claude-*   ──►  llmrouter anthropic.Provider
+   │ ...
+   ▼
+CompletionStream(ctx, ChatRequest{Raw: bodyBytes})
+   │
+   ▼
+for each Chunk: write "data: " + chunk.Raw + "\\n\\n"
+   │
+   ▼
+on stream end: write "data: [DONE]\\n\\n"`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Why byte-passthrough?</strong> If you decode each chunk to a
+    typed struct and re-encode it, you risk dropping fields the client's
+    SDK is parsing strictly. By writing <code>chunk.Raw</code> verbatim
+    you stay byte-identical to whatever OpenAI sends. See the
+    <a href="/llmrouter/docs/guides/byte-passthrough-proxy/">byte-passthrough proxy</a>
+    recipe for the deep dive.
+  </aside>
+
+  <h2>Step 1: project scaffold</h2>
+  <Code lang="bash" code={`mkdir chat-gateway && cd chat-gateway
+go mod init example.com/chat-gateway
+
+go get github.com/elloloop/llmrouter@latest
+go get github.com/elloloop/llmrouter/providers/openai@latest
+go get github.com/elloloop/llmrouter/providers/anthropic@latest
+go get github.com/go-chi/chi/v5@latest`} />
+
+  <p>
+    Set your upstream credentials:
+  </p>
+  <Code lang="bash" code={`export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...`} />
+
+  <h2>Step 2: provider registry</h2>
+  <p>
+    We hold every configured upstream in a <code>map[string]llmrouter.Provider</code>
+    keyed by a short id (<code>"openai"</code>, <code>"anthropic"</code>).
+    Providers are concurrency-safe; one instance serves the whole
+    process.
+  </p>
+
+  <Code lang="go" code={`type Registry struct {
+    byID map[string]llmrouter.Provider
+}
+
+func NewRegistry() (*Registry, error) {
+    oa, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        return nil, fmt.Errorf("openai: %w", err)
+    }
+    an, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    if err != nil {
+        return nil, fmt.Errorf("anthropic: %w", err)
+    }
+    return &Registry{byID: map[string]llmrouter.Provider{
+        "openai":    oa,
+        "anthropic": an,
+    }}, nil
+}
+
+// pick returns the provider that owns the given model id, or "", nil
+// if no provider claims it.
+func (r *Registry) pick(model string) (string, llmrouter.Provider) {
+    switch {
+    case strings.HasPrefix(model, "gpt-"), strings.HasPrefix(model, "o1-"), strings.HasPrefix(model, "o3-"):
+        return "openai", r.byID["openai"]
+    case strings.HasPrefix(model, "claude-"):
+        return "anthropic", r.byID["anthropic"]
+    }
+    return "", nil
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Production tip.</strong> Don't hardcode the prefix map. Drive
+    it from config — a YAML file or a database — so adding a new provider
+    is a deploy, not a code change. The example above keeps things small
+    so the flow is easy to read.
+  </aside>
+
+  <h2>Step 3: the HTTP handler</h2>
+  <p>
+    The handler decodes only what it needs (the <code>model</code> field),
+    keeps the rest of the body as raw bytes, looks up the provider, and
+    forwards.
+  </p>
+
+  <Code lang="go" code={`// onlyModel is a small struct used to peek at the model field without
+// fully decoding the request. We re-use the original body bytes as
+// ChatRequest.Raw to preserve any fields llmrouter doesn't model.
+type onlyModel struct {
+    Model string \`json:"model"\`
+}
+
+func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+            "only POST is supported")
+        return
+    }
+
+    body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
+    if err != nil {
+        writeJSONError(w, http.StatusBadRequest, "read_body",
+            fmt.Sprintf("could not read body: %v", err))
+        return
+    }
+    var peek onlyModel
+    if err := json.Unmarshal(body, &peek); err != nil {
+        writeJSONError(w, http.StatusBadRequest, "invalid_json",
+            "request body must be JSON with a 'model' field")
+        return
+    }
+    providerID, provider := g.reg.pick(peek.Model)
+    if provider == nil {
+        writeJSONError(w, http.StatusBadRequest, "unknown_model",
+            fmt.Sprintf("no provider configured for model %q", peek.Model))
+        return
+    }
+
+    // Budget check before we open the upstream.
+    if err := g.budget.check(r); err != nil {
+        writeJSONError(w, http.StatusTooManyRequests, "budget_exceeded", err.Error())
+        return
+    }
+
+    req := llmrouter.ChatRequest{
+        Model: peek.Model,
+        Raw:   body,
+    }
+    stream, err := provider.CompletionStream(r.Context(), req)
+    if err != nil {
+        translateUpstreamError(w, providerID, err)
+        return
+    }
+
+    // We don't write headers until we know the upstream accepted the
+    // request — that way a 4xx/5xx from upstream becomes the same status
+    // back to the client.
+    writeSSEHeaders(w)
+    flusher, _ := w.(http.Flusher)
+
+    var lastUsage *llmrouter.Usage
+    for chunk := range stream.Chunks() {
+        if _, err := w.Write([]byte("data: ")); err != nil {
+            return
+        }
+        if _, err := w.Write(chunk.Raw); err != nil {
+            return
+        }
+        if _, err := w.Write([]byte("\\n\\n")); err != nil {
+            return
+        }
+        if flusher != nil {
+            flusher.Flush()
+        }
+        if chunk.Usage != nil {
+            lastUsage = chunk.Usage
+        }
+    }
+    if err := stream.Err(); err != nil {
+        // The headers are already on the wire — best we can do is log it
+        // and let the client see the truncated stream.
+        log.Printf("stream error from %s: %v", providerID, err)
+        return
+    }
+    if _, err := w.Write([]byte("data: [DONE]\\n\\n")); err == nil {
+        if flusher != nil {
+            flusher.Flush()
+        }
+    }
+    if lastUsage != nil {
+        g.budget.record(r, lastUsage.TotalTokens)
+    }
+}`} />
+
+  <h2>Step 4: byte-identical SSE writer</h2>
+  <p>
+    The crucial line above is <code>w.Write(chunk.Raw)</code>. The OpenAI
+    provider populates <code>Chunk.Raw</code> with the exact payload it
+    received from <code>api.openai.com</code>. Writing those bytes back
+    out — wrapped in the standard SSE envelope — means downstream
+    clients can't tell whether they're talking to OpenAI directly or to
+    our proxy.
+  </p>
+
+  <p>
+    For Anthropic the bytes in <code>chunk.Raw</code> aren't literal
+    Anthropic SSE — they're the OpenAI-shaped chunk that the Anthropic
+    provider synthesized from Anthropic's event stream. So clients still
+    see a valid OpenAI-shape response; they just don't see Anthropic's
+    internal events.
+  </p>
+
+  <Code lang="go" code={`func writeSSEHeaders(w http.ResponseWriter) {
+    h := w.Header()
+    h.Set("Content-Type", "text/event-stream; charset=utf-8")
+    h.Set("Cache-Control", "no-cache, no-transform")
+    h.Set("Connection", "keep-alive")
+    // Disable nginx response buffering — required for SSE through most reverse proxies.
+    h.Set("X-Accel-Buffering", "no")
+    w.WriteHeader(http.StatusOK)
+}`} />
+
+  <h2>Step 5: client disconnect handling</h2>
+  <p>
+    Pass <code>r.Context()</code> as the first argument to
+    <code>CompletionStream</code>. When the client closes the TCP
+    connection, the request's context is cancelled, which propagates
+    through the SSE pump goroutine inside the provider — it stops
+    reading from the upstream, closes the response body, and the upstream
+    HTTP/2 stream is torn down.
+  </p>
+
+  <Code lang="go" code={`stream, err := provider.CompletionStream(r.Context(), req)`} />
+
+  <p>
+    That single line gives you correct fan-in/fan-out cancellation. No
+    extra goroutines watching <code>r.Context().Done()</code>. No
+    per-request bookkeeping. If you've worked with the standard library
+    long enough, this is the payoff for the streaming-first design.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Verify it.</strong> Start the gateway, hit it with curl, then
+    Ctrl-C the curl process mid-response. The provider goroutine
+    finishes within milliseconds and the upstream stream is closed. If
+    you forget to pass the context, the upstream keeps generating tokens
+    (and billing you) until it finishes.
+  </aside>
+
+  <h2>Step 6: error responses</h2>
+  <p>
+    The provider returns <code>*llmrouter.ErrUpstream</code> when the
+    upstream sends a non-2xx status. We translate that back into the
+    correct HTTP status for the client; network errors become 502.
+  </p>
+
+  <Code lang="go" code={`func translateUpstreamError(w http.ResponseWriter, providerID string, err error) {
+    var upstream *llmrouter.ErrUpstream
+    if errors.As(err, &upstream) {
+        // Re-use the original upstream status code so SDK clients see the
+        // same shape they'd see talking to OpenAI directly (401 for auth,
+        // 429 for rate limit, 400 for malformed request, etc.).
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(upstream.StatusCode)
+        _, _ = w.Write([]byte(upstream.Body))
+        return
+    }
+    // Network / DNS / timeout — surface as 502.
+    log.Printf("provider %s: %v", providerID, err)
+    writeJSONError(w, http.StatusBadGateway, "upstream_unavailable",
+        fmt.Sprintf("upstream %s did not respond", providerID))
+}
+
+func writeJSONError(w http.ResponseWriter, status int, code, msg string) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "error": map[string]any{
+            "type":    code,
+            "message": msg,
+        },
+    })
+}`} />
+
+  <h2>Step 7: token counting and per-request budgets</h2>
+  <p>
+    On the last chunk before <code>[DONE]</code>, both OpenAI (when
+    <code>stream_options.include_usage: true</code> is set — which the
+    provider sets automatically) and Anthropic report token usage in
+    <code>Chunk.Usage</code>. We read that and feed it back into a
+    budget store keyed by client identity.
+  </p>
+
+  <p>
+    For brevity the example below buckets by source IP. Real deployments
+    key by API key, tenant id, or workspace.
+  </p>
+
+  <Code lang="go" code={`type Budget struct {
+    mu        sync.Mutex
+    used      map[string]int
+    cap       int
+    windowKey func(*http.Request) string
+}
+
+func NewBudget(cap int) *Budget {
+    return &Budget{
+        used: make(map[string]int),
+        cap:  cap,
+        windowKey: func(r *http.Request) string {
+            // 1-minute window keyed by client IP.
+            ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+            return fmt.Sprintf("%s|%d", ip, time.Now().Unix()/60)
+        },
+    }
+}
+
+func (b *Budget) check(r *http.Request) error {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    if b.used[b.windowKey(r)] >= b.cap {
+        return fmt.Errorf("per-minute token cap of %d exceeded", b.cap)
+    }
+    return nil
+}
+
+func (b *Budget) record(r *http.Request, tokens int) {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    b.used[b.windowKey(r)] += tokens
+}`} />
+
+  <p>
+    Two things to note about this budget store:
+  </p>
+  <ul>
+    <li>
+      The budget is checked <em>before</em> opening the upstream stream.
+      This stops new requests from queueing once the cap is hit instead
+      of cutting them off mid-stream. (Cutting off mid-stream is also
+      possible — see <a href="/llmrouter/docs/guides/cancellation-and-timeouts/">cancellation
+      &amp; timeouts</a> — but it's a worse UX.)
+    </li>
+    <li>
+      Usage is read from the <strong>final</strong> chunk. Earlier
+      chunks don't have usage; the OpenAI provider asks for
+      <code>include_usage: true</code> so the upstream emits a final
+      chunk with totals.
+    </li>
+  </ul>
+
+  <h2>The full program</h2>
+  <p>
+    Put it all in <code>main.go</code>:
+  </p>
+
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    "net"
+    "net/http"
+    "os"
+    "os/signal"
+    "strings"
+    "sync"
+    "syscall"
+    "time"
+
+    "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+type Registry struct {
+    byID map[string]llmrouter.Provider
+}
+
+func NewRegistry() (*Registry, error) {
+    oa, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        return nil, fmt.Errorf("openai: %w", err)
+    }
+    an, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    if err != nil {
+        return nil, fmt.Errorf("anthropic: %w", err)
+    }
+    return &Registry{byID: map[string]llmrouter.Provider{
+        "openai":    oa,
+        "anthropic": an,
+    }}, nil
+}
+
+func (r *Registry) pick(model string) (string, llmrouter.Provider) {
+    switch {
+    case strings.HasPrefix(model, "gpt-"),
+        strings.HasPrefix(model, "o1-"),
+        strings.HasPrefix(model, "o3-"):
+        return "openai", r.byID["openai"]
+    case strings.HasPrefix(model, "claude-"):
+        return "anthropic", r.byID["anthropic"]
+    }
+    return "", nil
+}
+
+type Budget struct {
+    mu        sync.Mutex
+    used      map[string]int
+    cap       int
+    windowKey func(*http.Request) string
+}
+
+func NewBudget(cap int) *Budget {
+    return &Budget{
+        used: make(map[string]int),
+        cap:  cap,
+        windowKey: func(r *http.Request) string {
+            ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+            return fmt.Sprintf("%s|%d", ip, time.Now().Unix()/60)
+        },
+    }
+}
+
+func (b *Budget) check(r *http.Request) error {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    if b.used[b.windowKey(r)] >= b.cap {
+        return fmt.Errorf("per-minute token cap of %d exceeded", b.cap)
+    }
+    return nil
+}
+
+func (b *Budget) record(r *http.Request, tokens int) {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    b.used[b.windowKey(r)] += tokens
+}
+
+type Gateway struct {
+    reg    *Registry
+    budget *Budget
+}
+
+type onlyModel struct {
+    Model string \`json:"model"\`
+}
+
+func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+    body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
+    if err != nil {
+        writeJSONError(w, http.StatusBadRequest, "read_body",
+            fmt.Sprintf("could not read body: %v", err))
+        return
+    }
+    var peek onlyModel
+    if err := json.Unmarshal(body, &peek); err != nil {
+        writeJSONError(w, http.StatusBadRequest, "invalid_json",
+            "request body must be JSON with a 'model' field")
+        return
+    }
+    providerID, provider := g.reg.pick(peek.Model)
+    if provider == nil {
+        writeJSONError(w, http.StatusBadRequest, "unknown_model",
+            fmt.Sprintf("no provider configured for model %q", peek.Model))
+        return
+    }
+    if err := g.budget.check(r); err != nil {
+        writeJSONError(w, http.StatusTooManyRequests, "budget_exceeded", err.Error())
+        return
+    }
+
+    req := llmrouter.ChatRequest{Model: peek.Model, Raw: body}
+    stream, err := provider.CompletionStream(r.Context(), req)
+    if err != nil {
+        translateUpstreamError(w, providerID, err)
+        return
+    }
+
+    writeSSEHeaders(w)
+    flusher, _ := w.(http.Flusher)
+
+    var lastUsage *llmrouter.Usage
+    for chunk := range stream.Chunks() {
+        if _, err := w.Write([]byte("data: ")); err != nil {
+            return
+        }
+        if _, err := w.Write(chunk.Raw); err != nil {
+            return
+        }
+        if _, err := w.Write([]byte("\\n\\n")); err != nil {
+            return
+        }
+        if flusher != nil {
+            flusher.Flush()
+        }
+        if chunk.Usage != nil {
+            lastUsage = chunk.Usage
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Printf("stream error from %s: %v", providerID, err)
+        return
+    }
+    _, _ = w.Write([]byte("data: [DONE]\\n\\n"))
+    if flusher != nil {
+        flusher.Flush()
+    }
+    if lastUsage != nil {
+        g.budget.record(r, lastUsage.TotalTokens)
+    }
+}
+
+func translateUpstreamError(w http.ResponseWriter, providerID string, err error) {
+    var upstream *llmrouter.ErrUpstream
+    if errors.As(err, &upstream) {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(upstream.StatusCode)
+        _, _ = w.Write([]byte(upstream.Body))
+        return
+    }
+    log.Printf("provider %s: %v", providerID, err)
+    writeJSONError(w, http.StatusBadGateway, "upstream_unavailable",
+        fmt.Sprintf("upstream %s did not respond", providerID))
+}
+
+func writeJSONError(w http.ResponseWriter, status int, code, msg string) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "error": map[string]any{"type": code, "message": msg},
+    })
+}
+
+func writeSSEHeaders(w http.ResponseWriter) {
+    h := w.Header()
+    h.Set("Content-Type", "text/event-stream; charset=utf-8")
+    h.Set("Cache-Control", "no-cache, no-transform")
+    h.Set("Connection", "keep-alive")
+    h.Set("X-Accel-Buffering", "no")
+    w.WriteHeader(http.StatusOK)
+}
+
+func main() {
+    reg, err := NewRegistry()
+    if err != nil {
+        log.Fatal(err)
+    }
+    g := &Gateway{reg: reg, budget: NewBudget(50_000)}
+
+    r := chi.NewRouter()
+    r.Use(middleware.Logger)
+    r.Use(middleware.Recoverer)
+    r.Post("/v1/chat/completions", g.handleChatCompletions)
+
+    srv := &http.Server{
+        Addr:              ":8080",
+        Handler:           r,
+        ReadHeaderTimeout: 10 * time.Second,
+        // No WriteTimeout — streams can be long.
+    }
+
+    ctx, stop := signal.NotifyContext(context.Background(),
+        syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    go func() {
+        log.Printf("listening on %s", srv.Addr)
+        if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Fatal(err)
+        }
+    }()
+
+    <-ctx.Done()
+    log.Println("shutting down")
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    _ = srv.Shutdown(shutdownCtx)
+}`} />
+
+  <h2>Test it</h2>
+  <Code lang="bash" code={`go run .
+
+# in another terminal
+curl -N -X POST http://localhost:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role":"user","content":"count to 5"}],
+    "stream": true
+  }'
+
+# you should see SSE chunks streaming back, ending in:
+#   data: [DONE]
+#
+# then try Anthropic — same endpoint:
+curl -N -X POST http://localhost:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "messages": [{"role":"user","content":"count to 5"}],
+    "stream": true,
+    "max_tokens": 200
+  }'`} />
+
+  <h2>Use it from the OpenAI SDK</h2>
+  <p>
+    Because the wire format is OpenAI-shape SSE, any OpenAI client works.
+    For example, with the Python SDK:
+  </p>
+
+  <Code lang="bash" code={`pip install openai
+
+OPENAI_BASE_URL=http://localhost:8080/v1 \\
+OPENAI_API_KEY=ignored \\
+python -c '
+import openai
+client = openai.OpenAI()
+stream = client.chat.completions.create(
+    model="claude-sonnet-4-5",
+    messages=[{"role": "user", "content": "hi"}],
+    stream=True,
+    max_tokens=200,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+'`} />
+
+  <h2>What to add next</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/guides/multi-provider-failover/">Multi-provider failover</a> —
+      automatically retry against a backup provider when the primary
+      returns 5xx or 429.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/runtime-provider-switch/">Switching providers at runtime</a> —
+      route by header, feature flag, or tenant id instead of model
+      prefix.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/custom-http-client/">Custom HTTP client &amp; retries</a> —
+      add OpenTelemetry tracing, exponential-backoff retries, or proxy
+      support.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/guides/byte-passthrough-proxy/">Byte-passthrough proxy</a> —
+      go even thinner: no decoding, no budget, just forward bytes.
+    </li>
+  </ul>
+</DocsLayout>

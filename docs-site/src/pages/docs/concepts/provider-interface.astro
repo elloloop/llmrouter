@@ -1,0 +1,427 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="The Provider Interface">
+  <h1>The Provider Interface</h1>
+  <p>
+    Every upstream LLM in <code>llmrouter</code> — OpenAI, Anthropic, Azure
+    OpenAI, AWS Bedrock, Vertex (planned), and any OpenAI-compatible
+    endpoint reached via <code>WithBaseURL</code> — implements a single
+    two-method interface. That interface is the seam the rest of the
+    library is built on: requests in, normalized chunks out, with the
+    OpenAI Chat Completions wire format as the lingua franca.
+  </p>
+
+  <h2>The interface</h2>
+  <p>
+    The contract lives in <a href="/llmrouter/docs/api/llmrouter/"><code>llmrouter.go</code></a>
+    and is intentionally tiny:
+  </p>
+  <Code lang="go" code={`type Provider interface {
+    // Name returns the provider's stable id (e.g. "openai", "anthropic").
+    Name() string
+
+    // CompletionStream issues a streaming chat completion request. The
+    // returned Stream yields normalized chunks until upstream finishes,
+    // the context cancels, or an error occurs. Callers must drain the
+    // stream (or cancel ctx) to release resources.
+    CompletionStream(ctx context.Context, req ChatRequest) (*Stream, error)
+}`} />
+
+  <p>
+    Two methods. No options bag on the call site, no synchronous
+    one-shot path, no model registry, no token counter. Everything else
+    — retries, fallback, fan-out, budgeting — is a wrapper you compose
+    around this surface. If you can satisfy these two methods, you can
+    plug into any code that takes a <code>Provider</code>.
+  </p>
+
+  <h2>Why streaming-only</h2>
+  <p>
+    The most common question people ask about this API is: "where's
+    the non-streaming version?" There isn't one, on purpose.
+  </p>
+  <ul>
+    <li>
+      Gateways always stream. If you're building a proxy, an
+      OpenAI-compatible aggregator, or a chat UI, you're streaming
+      already. A non-streaming path would just be a buffer-and-drop on
+      top of the streaming one.
+    </li>
+    <li>
+      A one-shot request is the degenerate case of streaming — open
+      the stream, drain it into a string, return the string. Two extra
+      lines of code, no extra concept to learn, no second code path in
+      the library to keep in sync.
+    </li>
+    <li>
+      Streaming is the surface that exposes cancellation,
+      backpressure, partial-result handling, and incremental UI
+      rendering. If we offered a synchronous API we'd quietly
+      encourage callers to give those things up.
+    </li>
+  </ul>
+  <p>
+    The shape of the buffer-and-collect helper you'd write looks like
+    this. It's small enough that it doesn't need to live in the
+    library:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "strings"
+
+    "github.com/elloloop/llmrouter"
+)
+
+// collect drains a Provider into a single string. Use this when you
+// don't actually need streaming and want a synchronous-style call.
+func collect(ctx context.Context, p llmrouter.Provider, req llmrouter.ChatRequest) (string, error) {
+    stream, err := p.CompletionStream(ctx, req)
+    if err != nil {
+        return "", err
+    }
+    var out strings.Builder
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            out.WriteString(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        return "", err
+    }
+    return out.String(), nil
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Tip.</strong> If you frequently buffer streams, write
+    <code>collect</code> once in your application's package and call it
+    everywhere. Keeping it out of the library means you stay in control of
+    cancellation, deadlines, and partial-result behavior.
+  </aside>
+
+  <h2>Polymorphism: code that takes any provider</h2>
+  <p>
+    Because <code>Provider</code> is an interface, any code that operates
+    on it works across every upstream. Here's a function that doesn't
+    care whether it's talking to OpenAI directly, OpenRouter, a
+    self-hosted vLLM instance, or Anthropic:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "strings"
+
+    "github.com/elloloop/llmrouter"
+)
+
+// chat asks the given provider one question and returns its answer.
+// Works with any Provider implementation — OpenAI, Anthropic, etc.
+func chat(ctx context.Context, p llmrouter.Provider, prompt string) (string, error) {
+    req := llmrouter.ChatRequest{
+        Model: defaultModel(p.Name()),
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", prompt),
+        },
+    }
+    stream, err := p.CompletionStream(ctx, req)
+    if err != nil {
+        return "", fmt.Errorf("%s: open stream: %w", p.Name(), err)
+    }
+    var out strings.Builder
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            out.WriteString(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        return "", fmt.Errorf("%s: stream: %w", p.Name(), err)
+    }
+    return out.String(), nil
+}
+
+// defaultModel picks a sensible default per provider. Real code would
+// take this from config; this is just illustration.
+func defaultModel(name string) string {
+    switch name {
+    case "anthropic":
+        return "claude-sonnet-4-5"
+    default:
+        return "gpt-4o-mini"
+    }
+}`} />
+
+  <p>
+    The same <code>chat</code> function plugs into both providers from
+    <a href="/llmrouter/docs/providers/openai/"><code>providers/openai</code></a>
+    and
+    <a href="/llmrouter/docs/providers/anthropic/"><code>providers/anthropic</code></a>:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    ctx := context.Background()
+
+    oa, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+    an, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, p := range []llmrouter.Provider{oa, an} {
+        ans, err := chat(ctx, p, "in one sentence, what is a goroutine?")
+        if err != nil {
+            log.Printf("%s: %v", p.Name(), err)
+            continue
+        }
+        fmt.Printf("%-10s %s\n", p.Name(), ans)
+    }
+}`} />
+
+  <h2>The <code>ChatRequest</code> shape</h2>
+  <p>
+    <code>ChatRequest</code> is the OpenAI Chat Completions payload,
+    transposed into Go:
+  </p>
+  <Code lang="go" code={`type ChatRequest struct {
+    Model       string          \`json:"model"\`
+    Messages    []Message       \`json:"messages"\`
+    MaxTokens   int             \`json:"max_tokens,omitempty"\`
+    Temperature *float64        \`json:"temperature,omitempty"\`
+    TopP        *float64        \`json:"top_p,omitempty"\`
+    Stop        []string        \`json:"stop,omitempty"\`
+    User        string          \`json:"user,omitempty"\`
+    Stream      bool            \`json:"stream,omitempty"\`
+    Raw         json.RawMessage \`json:"-"\`
+}`} />
+
+  <ul>
+    <li>
+      <strong><code>Model</code></strong> — the model id, passed through
+      to the upstream. Anthropic ids (<code>claude-sonnet-4-5</code>)
+      work with the Anthropic provider; OpenAI ids
+      (<code>gpt-4o-mini</code>) work with the OpenAI provider and with
+      OpenAI-compatible endpoints behind <code>WithBaseURL</code>.
+    </li>
+    <li>
+      <strong><code>Messages</code></strong> — the conversation. See
+      below for the message shape.
+    </li>
+    <li>
+      <strong><code>MaxTokens</code></strong> — upper bound on
+      completion length. Anthropic requires this (the provider defaults
+      to 4096 if you leave it zero); OpenAI treats it as optional.
+    </li>
+    <li>
+      <strong><code>Temperature</code></strong>,
+      <strong><code>TopP</code></strong> — sampling knobs. Pointer types
+      so zero values are distinguishable from "not set."
+    </li>
+    <li>
+      <strong><code>Stop</code></strong> — stop sequences. The
+      Anthropic provider maps these onto <code>stop_sequences</code>.
+    </li>
+    <li>
+      <strong><code>User</code></strong> — opaque end-user id forwarded
+      to OpenAI for abuse-detection.
+    </li>
+    <li>
+      <strong><code>Stream</code></strong> — ignored. Providers always
+      force <code>stream: true</code> on the wire.
+    </li>
+    <li>
+      <strong><code>Raw</code></strong> — original request bytes for
+      passthrough mode. See
+      <a href="/llmrouter/docs/concepts/byte-passthrough/">Byte Passthrough</a>.
+    </li>
+  </ul>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Why pointers for Temperature and TopP?</strong> OpenAI treats
+    <code>temperature: 0</code> as "be deterministic," not "field
+    omitted." A non-pointer <code>float64</code> with its zero value
+    would silently send <code>temperature: 0</code> on every request.
+    Pointers let you distinguish "I want 0" from "I don't care."
+  </aside>
+
+  <h2>The <code>Message</code> shape</h2>
+  <Code lang="go" code={`type Message struct {
+    Role    string          \`json:"role"\`
+    Content json.RawMessage \`json:"content"\`
+}`} />
+
+  <p>
+    The unusual part is <code>Content json.RawMessage</code>. OpenAI's
+    content field is a union — it's either a plain string (text
+    message) or an array of typed parts (multimodal: text + image_url +
+    audio + …). Modelling that as a Go union would force you into a
+    sum-type pattern with constructors and visitors. Using
+    <code>json.RawMessage</code> instead means the bytes pass through
+    untouched: plain strings stay strings, vision arrays stay arrays,
+    and any future content type is forward-compatible without a library
+    change.
+  </p>
+
+  <p>
+    For the common case of plain text, <code>TextMessage</code> hides
+    the JSON entirely:
+  </p>
+  <Code lang="go" code={`// TextMessage is a convenience constructor for plain-text messages.
+func TextMessage(role, text string) Message {
+    b, _ := json.Marshal(text)
+    return Message{Role: role, Content: b}
+}`} />
+
+  <p>And to read text out, <code>PlainText</code> handles both shapes:</p>
+  <Code lang="go" code={`// PlainText extracts text from a Message. For multimodal content arrays
+// it concatenates the "text" parts and ignores image bytes.
+func (m Message) PlainText() string { /* ... */ }`} />
+
+  <p>
+    A complete plain-text example:
+  </p>
+  <Code lang="go" code={`req := llmrouter.ChatRequest{
+    Model: "gpt-4o-mini",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "you are concise"),
+        llmrouter.TextMessage("user", "what is the capital of france?"),
+    },
+}`} />
+
+  <p>And a multimodal example — passed in as raw bytes:</p>
+  <Code lang="go" code={`vision := json.RawMessage(\`[
+    {"type":"text","text":"what is in this image?"},
+    {"type":"image_url","image_url":{"url":"https://example.com/cat.jpg"}}
+]\`)
+req := llmrouter.ChatRequest{
+    Model: "gpt-4o",
+    Messages: []llmrouter.Message{
+        {Role: "user", Content: vision},
+    },
+}`} />
+
+  <h2>Full example: provider-agnostic chat</h2>
+  <p>
+    Putting it all together — a small program that takes a provider
+    name on the command line and asks it a question:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "flag"
+    "fmt"
+    "log"
+    "os"
+    "strings"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    var (
+        provider = flag.String("provider", "openai", "openai|anthropic")
+        model    = flag.String("model", "", "model id (defaults per provider)")
+        prompt   = flag.String("prompt", "say hi in five words", "user prompt")
+    )
+    flag.Parse()
+
+    p, err := buildProvider(*provider)
+    if err != nil {
+        log.Fatal(err)
+    }
+    if *model == "" {
+        *model = defaultModel(p.Name())
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    answer, err := chat(ctx, p, *model, *prompt)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(answer)
+}
+
+func buildProvider(name string) (llmrouter.Provider, error) {
+    switch name {
+    case "openai":
+        return openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    case "anthropic":
+        return anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    default:
+        return nil, fmt.Errorf("unknown provider %q", name)
+    }
+}
+
+func defaultModel(name string) string {
+    switch name {
+    case "anthropic":
+        return "claude-sonnet-4-5"
+    default:
+        return "gpt-4o-mini"
+    }
+}
+
+// chat is provider-agnostic — it only depends on the Provider interface.
+func chat(ctx context.Context, p llmrouter.Provider, model, prompt string) (string, error) {
+    req := llmrouter.ChatRequest{
+        Model: model,
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", prompt),
+        },
+    }
+    stream, err := p.CompletionStream(ctx, req)
+    if err != nil {
+        return "", err
+    }
+    var out strings.Builder
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            out.WriteString(c.Delta.Content)
+        }
+    }
+    return out.String(), stream.Err()
+}`} />
+
+  <h2>Next steps</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/streaming/">The Streaming
+      Model</a> — how chunks flow from the producer goroutine to your
+      consumer.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/byte-passthrough/">Byte
+      Passthrough</a> — preserving original wire bytes through proxies.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/configuration/">Configuration &amp;
+      Options</a> — the functional-options pattern used by every
+      provider.
+    </li>
+  </ul>
+</DocsLayout>

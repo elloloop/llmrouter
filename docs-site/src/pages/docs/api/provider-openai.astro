@@ -1,0 +1,247 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package openai">
+  <h1>Package openai</h1>
+  <p>
+    The OpenAI provider, plus any OpenAI-API-compatible upstream
+    (Together, Groq, OpenRouter, Azure OpenAI, self-hosted vLLM, &hellip;)
+    reached via
+    <a href="/llmrouter/docs/api/options/#withbaseurl"><code>llmrouter.WithBaseURL</code></a>.
+    Streaming-only in v0.1. Chunks preserve the raw wire-format JSON so
+    passthrough proxies can forward bytes without re-marshaling.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/openai/openai.go"><code>providers/openai/openai.go</code></a>.
+  </p>
+
+  <p>
+    Import path:
+    <Code lang="go" code={`import "github.com/elloloop/llmrouter/providers/openai"`} />
+  </p>
+
+  <h2 id="constants">Constants</h2>
+  <Code lang="go" code={`const defaultBaseURL = "https://api.openai.com/v1"`} />
+  <p>
+    Unexported. Used when the caller does not supply
+    <code>WithBaseURL</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/openai/openai.go#L23">openai.go#L23</a>.
+  </p>
+
+  <h2 id="provider">Provider</h2>
+  <p>
+    Implements <a href="/llmrouter/docs/api/llmrouter/#provider"><code>llmrouter.Provider</code></a>
+    against the OpenAI Chat Completions wire format. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/openai/openai.go#L27">openai.go#L27</a>.
+  </p>
+
+  <Code lang="go" code={`type Provider struct {
+    // unexported: cfg *llmrouter.Config
+}`} />
+
+  <h2 id="new">New</h2>
+  <Code lang="go" code={`func New(opts ...llmrouter.Option) (*Provider, error)`} />
+  <p>
+    Constructs an OpenAI provider. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/openai/openai.go#L33">openai.go#L33</a>.
+  </p>
+  <p>Behavior:</p>
+  <ul>
+    <li>Calls <code>llmrouter.NewConfig(opts...)</code> and surfaces the first option error.</li>
+    <li><strong>Required:</strong> <a href="/llmrouter/docs/api/options/#withapikey"><code>WithAPIKey</code></a>. Returns <code>fmt.Errorf("%w: api key required", llmrouter.ErrInvalidConfig)</code> if not supplied.</li>
+    <li><strong>Default <code>BaseURL</code>:</strong> <code>https://api.openai.com/v1</code> when <a href="/llmrouter/docs/api/options/#withbaseurl"><code>WithBaseURL</code></a> is not supplied.</li>
+  </ul>
+
+  <h4>Example: stock OpenAI</h4>
+  <Code lang="go" code={`p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+if err != nil {
+    log.Fatal(err)
+}`} />
+
+  <h4>Example: OpenRouter via base URL</h4>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+    llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+)`} />
+
+  <h2 id="provider-name">Provider.Name</h2>
+  <Code lang="go" code={`func (p *Provider) Name() string`} />
+  <p>
+    Returns the literal string <code>"openai"</code>. The value does not
+    change when the base URL is overridden — Groq, Together, OpenRouter,
+    and self-hosted endpoints all still report <code>"openai"</code>.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/openai/openai.go#L48">openai.go#L48</a>.
+  </p>
+
+  <h2 id="provider-completion-stream">Provider.CompletionStream</h2>
+  <Code lang="go" code={`func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error)`} />
+  <p>
+    Opens a streaming chat completion against the configured base URL
+    and returns a <code>*llmrouter.Stream</code> yielding normalized
+    chunks. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/openai/openai.go#L53">openai.go#L53</a>.
+  </p>
+
+  <h3 id="request-body">Request body</h3>
+  <p>Assembled by <code>buildRequestBody</code>:</p>
+  <ul>
+    <li>
+      <strong>Raw passthrough.</strong> If <code>req.Raw</code> is
+      non-empty, the bytes are unmarshaled into a
+      <code>map[string]json.RawMessage</code>. Any field already present
+      is preserved (tools, vision, response_format, &hellip;). Returns
+      <code>fmt.Errorf("openai: invalid raw request: %w", err)</code> on
+      malformed JSON.
+    </li>
+    <li>
+      <strong>Typed marshaling.</strong> If <code>req.Raw</code> is
+      empty, the <code>ChatRequest</code> struct is marshaled (with
+      <code>Stream</code> pre-set to <code>true</code>) and then
+      unmarshaled back into a map so the same overlay logic can run.
+    </li>
+    <li>
+      <strong>Model overlay.</strong> If <code>req.Model</code> is
+      non-empty, the marshaled string overwrites any existing
+      <code>"model"</code> key. (So <code>Raw</code> bytes' model is
+      replaced whenever <code>req.Model</code> is set.)
+    </li>
+    <li><strong><code>stream</code></strong> is forced to <code>true</code>.</li>
+    <li><strong><code>stream_options</code></strong> is set to <code>{`{"include_usage": true}`}</code> unless already present in the raw map, ensuring the upstream emits a final usage block.</li>
+  </ul>
+
+  <h3 id="http-call">HTTP call</h3>
+  <ul>
+    <li><strong>Method:</strong> <code>POST</code></li>
+    <li><strong>URL:</strong> <code>&lt;BaseURL&gt;/chat/completions</code></li>
+    <li>
+      <strong>Headers:</strong>
+      <ul>
+        <li><code>Content-Type: application/json</code></li>
+        <li><code>Accept: text/event-stream</code></li>
+        <li><code>Authorization: Bearer &lt;api-key&gt;</code></li>
+      </ul>
+    </li>
+    <li>HTTP client is <code>p.cfg.HTTP()</code> (lazy default, 120 s timeout, unless <a href="/llmrouter/docs/api/options/#withhttpclient"><code>WithHTTPClient</code></a> supplied one).</li>
+    <li>
+      On HTTP <code>&ge; 400</code>, reads up to 1 KiB of the body
+      (trimmed), closes the response, and returns a
+      <code>*llmrouter.ErrUpstream</code> with
+      <code>Provider: "openai"</code>.
+    </li>
+  </ul>
+
+  <h3 id="sse-pump">SSE pump</h3>
+  <p>
+    On success, spawns <code>pumpSSE</code> in a goroutine and returns a
+    <code>*llmrouter.Stream</code> immediately. The pump:
+  </p>
+  <ul>
+    <li>Reads the response body line by line via <code>bufio.Scanner</code> (initial buffer 64 KiB, max 1 MiB).</li>
+    <li>
+      Accumulates <code>data:</code> and <code>data: </code> lines into
+      a <code>dataLines</code> slice. Other prefixes — <code>event:</code>,
+      <code>id:</code>, <code>retry:</code>, comments (<code>:</code>),
+      heartbeats — are silently dropped.
+    </li>
+    <li>
+      On a blank line, joins <code>dataLines</code> with <code>"\n"</code>
+      (multi-line <code>data:</code> support per the SSE spec) and
+      dispatches:
+      <ul>
+        <li><code>[DONE]</code> &rarr; <code>hooks.Finish(nil)</code>, return.</li>
+        <li>
+          Anything else &rarr; <code>decodeChunk</code>. <strong>Malformed
+          JSON does NOT abort the stream</strong> — the payload is
+          skipped and scanning continues. This protects against
+          OpenAI-compatible proxies that emit non-standard keepalive
+          payloads.
+        </li>
+      </ul>
+    </li>
+    <li>
+      Before each scan iteration, checks <code>ctx.Done()</code> and
+      calls <code>hooks.Finish(ctx.Err())</code> on cancel.
+    </li>
+    <li>
+      If <code>hooks.Send</code> returns <code>false</code> (consumer
+      cancelled), calls <code>hooks.Finish(ctx.Err())</code> and
+      returns.
+    </li>
+    <li>
+      On scanner error other than <code>io.EOF</code>, calls
+      <code>hooks.Finish(fmt.Errorf("openai: read stream: %w", err))</code>.
+    </li>
+    <li>On clean EOF without an explicit <code>[DONE]</code>, calls <code>hooks.Finish(nil)</code>.</li>
+    <li>The response body is closed via <code>defer</code> in every exit path.</li>
+  </ul>
+
+  <h3 id="chunk-decoding">Chunk decoding</h3>
+  <p>
+    <code>decodeChunk</code> unmarshals each payload into a typed wire
+    struct, copies the fields into <code>llmrouter.Chunk</code>, and
+    sets <code>Chunk.Raw</code> to <code>json.RawMessage(payload)</code> —
+    the original bytes from the SSE stream. <code>Usage</code> is
+    populated only when present in the payload (typically the final
+    chunk when <code>stream_options.include_usage</code> is honored).
+  </p>
+
+  <h4>Example: minimal completion</h4>
+  <Code lang="go" code={`p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+if err != nil {
+    log.Fatal(err)
+}
+
+stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+    Model: "gpt-4o-mini",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "List three primary colours."),
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}`} />
+
+  <h4>Example: forwarding raw bytes through a proxy</h4>
+  <Code lang="go" code={`// Inbound HTTP handler that re-emits OpenAI chunks verbatim downstream.
+func proxy(w http.ResponseWriter, r *http.Request) {
+    body, _ := io.ReadAll(r.Body)
+    stream, err := provider.CompletionStream(r.Context(), llmrouter.ChatRequest{Raw: body})
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadGateway)
+        return
+    }
+    w.Header().Set("Content-Type", "text/event-stream")
+    flusher := w.(http.Flusher)
+    for chunk := range stream.Chunks() {
+        fmt.Fprintf(w, "data: %s\\n\\n", chunk.Raw)
+        flusher.Flush()
+    }
+    fmt.Fprint(w, "data: [DONE]\\n\\n")
+}`} />
+
+  <h4>Example: tool-calls via raw passthrough</h4>
+  <Code lang="go" code={`raw := []byte(\`{
+  "model": "gpt-4o-mini",
+  "messages": [{"role":"user","content":"What is the weather in Paris?"}],
+  "tools": [{
+    "type":"function",
+    "function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}
+  }],
+  "tool_choice": "auto"
+}\`)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{Raw: raw})
+// stream.Chunks() yields delta chunks; tool calls arrive in the raw
+// bytes (Chunk.Raw) — inspect them directly if you need tool support.`} />
+</DocsLayout>

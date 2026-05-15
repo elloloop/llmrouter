@@ -1,0 +1,189 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Installation">
+  <h1>Installation</h1>
+  <p>
+    llmrouter is a regular Go module. There is no binary to download, no
+    daemon to run, and no toolchain beyond the Go SDK itself. Add the
+    module to your <code>go.mod</code>, import the root package plus at
+    least one provider subpackage, and you have a working LLM client.
+  </p>
+
+  <h2 id="prerequisites">Prerequisites</h2>
+  <ul>
+    <li>
+      <strong>Go 1.23 or newer.</strong> The module declares
+      <code>go 1.23</code> in <code>go.mod</code>. Older Go versions
+      will refuse the dependency. Check with <code>go version</code>.
+    </li>
+    <li>
+      <strong>An API key from at least one supported provider.</strong>
+      For the OpenAI provider that is an <code>sk-...</code> key from
+      <a href="https://platform.openai.com/api-keys">platform.openai.com</a>.
+      For the Anthropic provider that is a key from
+      <a href="https://console.anthropic.com/">console.anthropic.com</a>.
+      For any OpenAI-compatible endpoint (OpenRouter, Together, Groq,
+      self-hosted vLLM, Ollama) use whatever credential that endpoint
+      issues — llmrouter only forwards it as a bearer token.
+    </li>
+    <li>
+      <strong>Internet egress to the upstream's API host</strong> from
+      whatever environment runs your code. The library does not proxy,
+      cache, or batch — every <code>CompletionStream</code> call opens
+      a fresh HTTPS connection.
+    </li>
+  </ul>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Note.</strong> llmrouter has no transitive dependency on any
+    vendor SDK. The OpenAI provider uses the standard library. The
+    Anthropic provider pulls in <code>github.com/google/uuid</code> for
+    request ids and nothing else. The dependency hygiene is intentional:
+    a library that aggregates four official SDKs would inherit four
+    different release cadences and module trees.
+  </aside>
+
+  <h2 id="install">Install</h2>
+  <p>Add the module to your project:</p>
+  <Code lang="bash" code={`go get github.com/elloloop/llmrouter@v0.1.1`} />
+  <p>
+    That pulls in the root package and makes the provider subpackages
+    importable. If you prefer to track the latest tag instead of pinning,
+    use <code>@latest</code>; if you want to live on the
+    <code>main</code> branch, use a pseudo-version
+    (<code>go get github.com/elloloop/llmrouter@main</code>).
+  </p>
+  <p>To see the resulting <code>go.mod</code> entry:</p>
+  <Code lang="bash" code={`go list -m github.com/elloloop/llmrouter`} />
+  <p>You should see something like:</p>
+  <Code lang="text" code={`github.com/elloloop/llmrouter v0.1.1`} />
+
+  <h2 id="imports">Imports</h2>
+  <p>
+    Every program imports two things: the root package
+    (<code>github.com/elloloop/llmrouter</code>, which carries the shared
+    types and options) and at least one provider subpackage. The
+    provider subpackage owns the <code>New(opts ...llmrouter.Option)</code>
+    constructor for that backend.
+  </p>
+  <p>Root package — types, options, errors:</p>
+  <Code lang="go" code={`import "github.com/elloloop/llmrouter"`} />
+  <p>OpenAI provider (and any OpenAI-compatible endpoint via base URL):</p>
+  <Code lang="go" code={`import "github.com/elloloop/llmrouter/providers/openai"`} />
+  <p>Anthropic provider:</p>
+  <Code lang="go" code={`import "github.com/elloloop/llmrouter/providers/anthropic"`} />
+  <p>
+    Import only the providers you actually use. Each provider subpackage
+    is independent — importing one does not pull in the other, so
+    binaries stay small.
+  </p>
+
+  <h2 id="verify">Verify your install</h2>
+  <p>
+    To confirm the module resolves and the provider subpackages compile,
+    drop the following into a fresh directory and run it. It does not
+    issue any HTTP calls — it just constructs both providers and prints
+    their <code>Name()</code>.
+  </p>
+  <Code lang="bash" code={`mkdir llmrouter-verify && cd llmrouter-verify
+go mod init example.com/llmrouter-verify
+go get github.com/elloloop/llmrouter@v0.1.1`} />
+  <p>Save this as <code>main.go</code>:</p>
+  <Code lang="go" code={`package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/providers/anthropic"
+	"github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+	oai, err := openai.New(llmrouter.WithAPIKey("sk-test"))
+	if err != nil {
+		log.Fatalf("openai constructor failed: %v", err)
+	}
+	fmt.Printf("provider 1: %s\\n", oai.Name())
+
+	ant, err := anthropic.New(llmrouter.WithAPIKey("sk-ant-test"))
+	if err != nil {
+		log.Fatalf("anthropic constructor failed: %v", err)
+	}
+	fmt.Printf("provider 2: %s\\n", ant.Name())
+}
+`} />
+  <p>Run it:</p>
+  <Code lang="bash" code={`go run .`} />
+  <p>Expected output:</p>
+  <Code lang="text" code={`provider 1: openai
+provider 2: anthropic`} />
+  <p>
+    If you see both lines, your install is healthy. The API keys in this
+    snippet are placeholders — the constructors only validate that the
+    key is non-empty; they don't talk to the upstream until you call
+    <code>CompletionStream</code>.
+  </p>
+
+  <h2 id="module-path">Module path</h2>
+  <p>
+    The module path is <code>github.com/elloloop/llmrouter</code>. The
+    package layout looks like this:
+  </p>
+  <Code lang="text" code={`github.com/elloloop/llmrouter            // root package: types, options, errors
+github.com/elloloop/llmrouter/providers/openai     // OpenAI + OpenAI-compatible
+github.com/elloloop/llmrouter/providers/anthropic  // Anthropic full translator
+// v0.2:
+github.com/elloloop/llmrouter/providers/azure      // Azure OpenAI Service
+github.com/elloloop/llmrouter/providers/bedrock    // AWS Bedrock (SigV4)
+github.com/elloloop/llmrouter/providers/vertex     // Google Vertex AI (ADC)`} />
+  <p>
+    The split between the root package and the provider subpackages is
+    deliberate. The root package carries everything that is
+    provider-agnostic — <code>Provider</code>, <code>ChatRequest</code>,
+    <code>Message</code>, <code>Stream</code>, <code>Chunk</code>, the
+    <code>With*</code> options, and the <code>ErrUpstream</code> type.
+    Each provider subpackage carries exactly one
+    <code>New(opts ...llmrouter.Option) (llmrouter.Provider, error)</code>
+    constructor and the private translation logic.
+  </p>
+  <p>
+    This means you can write helper code that takes
+    <code>llmrouter.Provider</code> without importing any provider
+    subpackage, and the only place provider names appear is the
+    construction site.
+  </p>
+
+  <h2 id="versioning">Versioning</h2>
+  <p>
+    llmrouter follows semantic versioning, but the library is pre-1.0.
+    Until v1.0 is tagged, minor releases (v0.1 → v0.2) may include
+    breaking changes; patch releases (v0.1.0 → v0.1.1) are bug fixes
+    only. Pin a minor version in your <code>go.mod</code> and read the
+    release notes before bumping minors.
+  </p>
+  <p>Recommended pin style:</p>
+  <Code lang="text" code={`require github.com/elloloop/llmrouter v0.1.1`} />
+
+  <h2 id="license">License</h2>
+  <p>
+    llmrouter is released under the
+    <a href="https://github.com/elloloop/llmrouter/blob/main/LICENSE">Apache License, Version 2.0</a>.
+    Apache-2.0 grants the right to use, modify, and redistribute,
+    including in commercial and closed-source products, provided you
+    preserve the copyright + license notice and disclose modifications
+    in the NOTICE file when one is shipped alongside.
+  </p>
+
+  <h2 id="next">Next steps</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/quickstart">Quick start</a> — your first streaming completion against OpenAI and Anthropic.</li>
+    <li><a href="/llmrouter/docs/architecture">Architecture</a> — how the <code>Provider</code> interface, the <code>Stream</code> type, and the per-provider translators fit together.</li>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider reference</a> — base-URL override patterns for OpenRouter, Together, Groq, vLLM, Ollama.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider reference</a> — request and SSE translation in detail.</li>
+  </ul>
+</DocsLayout>

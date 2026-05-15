@@ -1,0 +1,474 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Architecture Overview">
+  <h1>Architecture Overview</h1>
+  <p>
+    llmrouter is built around one interface and three shared types. The
+    interface is <code>Provider</code>; the types are
+    <code>ChatRequest</code> (in), <code>Stream</code> (out), and
+    <code>Chunk</code> (the unit a stream yields). Everything else —
+    auth, base URLs, body translation, SSE parsing, error wrapping — is
+    a per-provider concern hidden behind that interface.
+  </p>
+  <p>
+    This page covers the big idea, the type wiring, the two translation
+    strategies (passthrough vs full translator), the streaming model,
+    and the byte-passthrough escape hatch. For per-provider behavior
+    see the
+    <a href="/llmrouter/docs/providers/openai/">OpenAI</a>
+    and <a href="/llmrouter/docs/providers/anthropic/">Anthropic</a>
+    reference pages.
+  </p>
+
+  <h2 id="big-idea">The big idea</h2>
+  <p>
+    One <code>Provider</code> interface, multiple backends, OpenAI-shaped
+    types as the lingua franca. Application code holds a
+    <code>llmrouter.Provider</code> and never knows which upstream it's
+    talking to. Provider subpackages translate between the shared types
+    and whatever the upstream API actually wants.
+  </p>
+  <p>The interface itself is two methods:</p>
+  <Code lang="go" code={`// Provider is the upstream-LLM contract. Each implementation
+// translates to/from the OpenAI /v1/chat/completions wire format
+// internally.
+type Provider interface {
+	// Name returns the provider's stable id (e.g. "openai", "anthropic").
+	Name() string
+
+	// CompletionStream issues a streaming chat completion request. The
+	// returned Stream yields normalized chunks until upstream finishes,
+	// the context cancels, or an error occurs. Callers must drain the
+	// stream (or cancel ctx) to release resources.
+	CompletionStream(ctx context.Context, req ChatRequest) (*Stream, error)
+}`} />
+  <p>That is the entire public surface a provider exposes. The implications:</p>
+  <ul>
+    <li>
+      <strong>One call shape for every provider.</strong> Application
+      code that takes <code>llmrouter.Provider</code> is provider-agnostic
+      by construction.
+    </li>
+    <li>
+      <strong>Streaming is the only mode.</strong> There is no
+      <code>Complete()</code> that returns a string. If you want the
+      full response as a single value, drain the stream and concatenate
+      the deltas — but doing so explicitly is the point: the library
+      doesn't pretend the upstream isn't streaming.
+    </li>
+    <li>
+      <strong>Construction is per-provider.</strong> Each provider
+      subpackage exposes <code>New(opts ...llmrouter.Option)</code>
+      which returns a value implementing the interface. The constructor
+      is where API keys, base URLs, and timeouts get baked in.
+    </li>
+  </ul>
+
+  <h2 id="diagram">How the pieces fit</h2>
+  <p>
+    The flow from your application code down to the upstream HTTPS
+    request looks like this:
+  </p>
+  <Code lang="text" code={`┌──────────────────────────────────────────────────────────┐
+│                  Your application code                   │
+│                                                          │
+│   p := /* one of the providers below */                  │
+│   stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{...})
+│   for chunk := range stream.Chunks() { ... }             │
+│   if err := stream.Err(); err != nil { ... }             │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+                         │  llmrouter.Provider interface
+                         │  (Name, CompletionStream)
+                         │
+   ┌─────────────────────┼─────────────────────────────────┐
+   │                     │                                 │
+   ▼                     ▼                                 ▼
+┌────────────┐    ┌────────────────┐         ┌──────────────────────────┐
+│  OpenAI    │    │   Anthropic    │         │  v0.2 roadmap:           │
+│ passthrough│    │ full translator│         │  Azure / Bedrock / Vertex│
+│            │    │                │         │  (full translators +     │
+│ - body:    │    │ - body:        │         │   SigV4 / ADC auth)      │
+│   verbatim │    │   OpenAI →     │         └──────────────────────────┘
+│   if Raw,  │    │   Anthropic    │
+│   else     │    │ - SSE:         │
+│   marshal  │    │   Anthropic →  │
+│ - SSE:     │    │   OpenAI       │
+│   parse    │    │ - headers:     │
+│   OpenAI   │    │   x-api-key,   │
+│   chunks   │    │   anthropic-   │
+│ - headers: │    │   version      │
+│   Bearer   │    │                │
+└─────┬──────┘    └────────┬───────┘
+      │                    │
+      ▼                    ▼
+┌───────────────────────────────────────────────────────────┐
+│              upstream HTTPS (api.openai.com,              │
+│              api.anthropic.com, your-vllm-host, …)        │
+└───────────────────────────────────────────────────────────┘`} />
+  <p>
+    The shape generalises cleanly. Every new provider is one more box
+    in the middle row; the interface above and the HTTP below are
+    invariant.
+  </p>
+
+  <h2 id="core-types">Three core types</h2>
+
+  <h3 id="core-provider">Provider</h3>
+  <p>
+    Already shown above. Two methods, both pure: <code>Name()</code>
+    is a stable string id used in error messages and metrics;
+    <code>CompletionStream</code> is the workhorse. The
+    <code>Stream</code> it returns is owned by the caller — the
+    provider's only obligation after returning is to keep the producer
+    goroutine fed until the upstream finishes or the context cancels.
+  </p>
+  <p>
+    See <a href="/llmrouter/docs/api/llmrouter/#provider">API reference: Provider</a>.
+  </p>
+
+  <h3 id="core-chatrequest">ChatRequest</h3>
+  <p>
+    OpenAI-shaped request. Required fields are <code>Model</code> and
+    <code>Messages</code>; everything else is optional. The
+    <code>Raw json.RawMessage</code> field is the byte-passthrough hook
+    discussed below.
+  </p>
+  <Code lang="go" code={`type ChatRequest struct {
+	Model       string          \`json:"model"\`
+	Messages    []Message       \`json:"messages"\`
+	MaxTokens   int             \`json:"max_tokens,omitempty"\`
+	Temperature *float64        \`json:"temperature,omitempty"\`
+	TopP        *float64        \`json:"top_p,omitempty"\`
+	Stop        []string        \`json:"stop,omitempty"\`
+	User        string          \`json:"user,omitempty"\`
+	Stream      bool            \`json:"stream,omitempty"\`
+	Raw         json.RawMessage \`json:"-"\`
+}
+
+type Message struct {
+	Role    string          \`json:"role"\`
+	Content json.RawMessage \`json:"content"\`
+}`} />
+  <p>
+    <code>Message.Content</code> is <code>json.RawMessage</code>, not
+    <code>string</code>, on purpose: OpenAI's multimodal content is an
+    array of typed parts, not a plain string. By leaving it as raw
+    JSON, the library lets passthrough providers forward multimodal
+    requests without modeling every content-part variant. For the
+    plain-text case use the
+    <code>llmrouter.TextMessage(role, text)</code> convenience.
+  </p>
+  <p>
+    See <a href="/llmrouter/docs/api/llmrouter/#chatrequest">API reference: ChatRequest</a>.
+  </p>
+
+  <h3 id="core-stream">Stream</h3>
+  <p>
+    The streaming-completion handle. Three operations:
+    <code>Chunks()</code> returns a receive-only channel that closes
+    when the upstream finishes or the context cancels;
+    <code>Err()</code> blocks until the producer finishes, then returns
+    the terminal error (nil on success); <code>Cancel()</code> asks
+    the producer to stop and is equivalent to cancelling the parent
+    context.
+  </p>
+  <Code lang="go" code={`type Stream struct {
+	chunks chan Chunk
+	cancel context.CancelFunc
+	errMu  chan struct{}
+	err    error
+}
+
+func (s *Stream) Chunks() <-chan Chunk
+func (s *Stream) Err() error
+func (s *Stream) Cancel()`} />
+  <p>
+    Single-consumer by contract. The internal channel is buffered at
+    16 chunks so a slow consumer can absorb short bursts without
+    backpressuring the upstream HTTP read.
+  </p>
+  <p>
+    See <a href="/llmrouter/docs/api/llmrouter/#stream">API reference: Stream</a>
+    and <a href="/llmrouter/docs/concepts/streaming">Streaming model</a>.
+  </p>
+
+  <h2 id="translation">Translation strategy</h2>
+  <p>
+    Each provider picks one of two strategies for the request body and
+    the response stream: <strong>byte passthrough</strong> or
+    <strong>full translator</strong>. The choice is determined by how
+    similar the upstream is to OpenAI's wire format.
+  </p>
+
+  <h3 id="translation-passthrough">Passthrough (OpenAI and OpenAI-compatibles)</h3>
+  <p>
+    The OpenAI upstream speaks <code>/v1/chat/completions</code>
+    natively. Any provider talking to that endpoint — OpenAI itself,
+    OpenRouter, Together, Groq, a self-hosted vLLM, Ollama — uses the
+    passthrough path:
+  </p>
+  <ul>
+    <li>
+      <strong>Request body.</strong> If
+      <code>ChatRequest.Raw</code> is non-nil, the provider forwards
+      those bytes verbatim. Otherwise it serializes the typed fields
+      directly. There is no intermediate Go struct that drops unknown
+      fields — fields the typed surface doesn't model (tools, vision,
+      <code>response_format</code>, structured outputs,
+      vendor-specific extensions) survive when sent via
+      <code>Raw</code>.
+    </li>
+    <li>
+      <strong>Response stream.</strong> The SSE event stream is
+      already OpenAI-shaped, so each event is parsed exactly once
+      into a <code>Chunk</code>, with the original wire JSON
+      preserved on <code>Chunk.Raw</code>. A gateway forwarding to a
+      downstream caller emits <code>Chunk.Raw</code> bytes directly
+      with no re-marshaling.
+    </li>
+    <li>
+      <strong>Headers.</strong>
+      <code>Authorization: Bearer &lt;apiKey&gt;</code>,
+      <code>Content-Type: application/json</code>,
+      <code>Accept: text/event-stream</code>.
+    </li>
+  </ul>
+
+  <h3 id="translation-translator">Full translator (Anthropic, future Bedrock/Vertex)</h3>
+  <p>
+    When the upstream wire format diverges meaningfully from OpenAI's
+    — different body shape, different SSE event types, different
+    auth — the provider runs a full translator on both sides.
+  </p>
+  <p>Anthropic specifically:</p>
+  <ul>
+    <li>
+      <strong>Request body.</strong> OpenAI <code>messages</code> →
+      Anthropic <code>/v1/messages</code> shape. The
+      <code>system</code> role is lifted out of the messages array
+      into Anthropic's top-level <code>system</code> field.
+      <code>max_tokens</code> is required by Anthropic and is always
+      included.
+    </li>
+    <li>
+      <strong>Response stream.</strong> Anthropic emits a richer SSE
+      event vocabulary (<code>message_start</code>,
+      <code>content_block_start</code>,
+      <code>content_block_delta</code>,
+      <code>content_block_stop</code>,
+      <code>message_delta</code>, <code>message_stop</code>). The
+      provider folds these into OpenAI delta chunks: text-delta
+      events become <code>Delta.Content</code>, the first chunk
+      carries <code>Delta.Role = "assistant"</code>, the
+      <code>message_stop</code> event becomes a final chunk with a
+      <code>FinishReason</code>.
+    </li>
+    <li>
+      <strong>Headers.</strong>
+      <code>x-api-key: &lt;apiKey&gt;</code>,
+      <code>anthropic-version: 2023-06-01</code>,
+      <code>Content-Type: application/json</code>,
+      <code>Accept: text/event-stream</code>.
+    </li>
+  </ul>
+  <p>
+    The future Bedrock and Vertex providers will follow the same
+    pattern: SigV4 / ADC for auth, per-model-family body shapes,
+    event-stream-framing → OpenAI chunk translation. The interface
+    above doesn't change.
+  </p>
+
+  <h2 id="streaming-model">Streaming model</h2>
+  <p>
+    The streaming machinery is owned by the root package, not by each
+    provider. <code>llmrouter.NewStream(parent context.Context)</code>
+    returns a <code>*Stream</code>, a derived <code>context.Context</code>
+    (with cancellation chained to the consumer's
+    <code>Cancel()</code>), and a <code>ProducerHooks</code> struct
+    with <code>Send</code> and <code>Finish</code> callbacks.
+  </p>
+  <Code lang="go" code={`type ProducerHooks struct {
+	// Send returns false if the consumer cancelled — the producer
+	// should then stop and call Finish(ctx.Err()).
+	Send   func(Chunk) bool
+
+	// Finish closes the stream and finalises the terminal error.
+	// Pass nil on a clean stream.
+	Finish func(error)
+}`} />
+  <p>The provider's <code>CompletionStream</code> implementation looks roughly like:</p>
+  <Code lang="go" code={`func (p *Provider) CompletionStream(parent context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error) {
+	httpReq, err := p.buildRequest(parent, req)
+	if err != nil {
+		return nil, err
+	}
+
+	stream, ctx, hooks := llmrouter.NewStream(parent)
+
+	go func() {
+		// HTTP request uses ctx so cancellation propagates to the wire.
+		httpReq = httpReq.WithContext(ctx)
+		resp, err := p.config.HTTP().Do(httpReq)
+		if err != nil {
+			hooks.Finish(err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			body, _ := io.ReadAll(resp.Body)
+			hooks.Finish(&llmrouter.ErrUpstream{
+				Provider:   p.Name(),
+				StatusCode: resp.StatusCode,
+				Body:       body,
+			})
+			return
+		}
+
+		// Parse SSE events; translate to Chunks; deliver via hooks.Send.
+		for evt := range parseSSE(resp.Body) {
+			chunk := translate(evt)
+			if !hooks.Send(chunk) {
+				return // consumer cancelled
+			}
+		}
+		hooks.Finish(nil)
+	}()
+
+	return stream, nil
+}`} />
+  <p>Key invariants:</p>
+  <ul>
+    <li>
+      <strong>The producer is a single goroutine.</strong> No
+      shared mutable state between the consumer and the producer
+      except the channel. The buffered channel (capacity 16) absorbs
+      short bursts.
+    </li>
+    <li>
+      <strong>Cancellation propagates downward.</strong>
+      <code>NewStream</code> derives <code>ctx</code> from the
+      caller's <code>parent</code> using
+      <code>context.WithCancel</code>. The producer attaches that
+      <code>ctx</code> to the HTTP request via <code>WithContext</code>,
+      so the standard library cancels the in-flight connection when
+      the consumer calls <code>Stream.Cancel()</code> or the parent
+      context expires.
+    </li>
+    <li>
+      <strong>Send is bounded.</strong>
+      <code>hooks.Send</code> uses <code>select</code> with
+      <code>ctx.Done()</code>, so a consumer that bails mid-stream
+      does not pin the producer. If <code>Send</code> returns false,
+      the producer returns immediately.
+    </li>
+    <li>
+      <strong>Finish is terminal.</strong> The producer must call
+      <code>Finish(nil)</code> on success or
+      <code>Finish(err)</code> on failure exactly once. After
+      <code>Finish</code>, the consumer's
+      <code>Chunks()</code> channel closes and
+      <code>Err()</code> unblocks.
+    </li>
+  </ul>
+
+  <h2 id="raw">The Raw byte field</h2>
+  <p>
+    <code>Chunk.Raw</code> is a deliberate design choice: every chunk
+    carries the original wire-format JSON, exactly as it arrived from
+    the upstream (or, for translating providers, exactly as the
+    translated event was serialized into the OpenAI shape). This makes
+    the proxy/gateway use case a one-liner.
+  </p>
+  <p>Concretely, a passthrough proxy looks like:</p>
+  <Code lang="go" code={`func proxyHandler(w http.ResponseWriter, r *http.Request) {
+	var req llmrouter.ChatRequest
+	// Preserve the original request body verbatim so the upstream
+	// sees fields we don't model (tools, vision, response_format).
+	body, _ := io.ReadAll(r.Body)
+	_ = json.Unmarshal(body, &req)
+	req.Raw = body
+
+	stream, err := provider.CompletionStream(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), 502)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher := w.(http.Flusher)
+
+	for chunk := range stream.Chunks() {
+		fmt.Fprintf(w, "data: %s\\n\\n", chunk.Raw)
+		flusher.Flush()
+	}
+	if err := stream.Err(); err == nil {
+		fmt.Fprint(w, "data: [DONE]\\n\\n")
+		flusher.Flush()
+	}
+}`} />
+  <p>
+    Note what is <em>not</em> happening: no re-marshaling, no field
+    enumeration, no risk of losing fields llmrouter doesn't model. The
+    upstream's bytes go out to the downstream caller verbatim.
+  </p>
+  <p>
+    Even with a translating provider (Anthropic), <code>Chunk.Raw</code>
+    still carries the translated-into-OpenAI-shape bytes, so the same
+    proxy code works against Anthropic with zero changes — the
+    downstream caller sees OpenAI SSE no matter which upstream you
+    chose.
+  </p>
+  <p>
+    See <a href="/llmrouter/docs/concepts/byte-passthrough">Byte passthrough</a>
+    for the deeper treatment.
+  </p>
+
+  <h2 id="dependencies">Dependency hygiene</h2>
+  <p>
+    llmrouter has exactly one third-party dependency:
+    <code>github.com/google/uuid</code> (used by the Anthropic provider
+    to mint request ids). The OpenAI provider uses nothing beyond the
+    standard library.
+  </p>
+  <p>The reasoning:</p>
+  <ul>
+    <li>
+      <strong>No vendor SDKs.</strong> A library that aggregates four
+      official SDKs inherits four module trees, four release cadences,
+      and four sets of breaking changes. llmrouter implements every
+      provider's HTTP transport directly so we own the surface end to
+      end.
+    </li>
+    <li>
+      <strong>v0.2 still keeps the bar low.</strong> Azure OpenAI is
+      pure standard library (HTTPS + headers). AWS Bedrock will add
+      <code>github.com/aws/aws-sdk-go-v2</code> only for SigV4 signing —
+      the request and response bodies are read/written directly. Google
+      Vertex will add <code>golang.org/x/oauth2</code> + ADC for auth;
+      the generative endpoints are HTTPS + JSON.
+    </li>
+    <li>
+      <strong>You don't pay for providers you don't import.</strong>
+      Provider subpackages are independent. Importing
+      <code>providers/openai</code> does not pull
+      <code>providers/anthropic</code>; importing
+      <code>providers/anthropic</code> does not pull the future
+      <code>providers/bedrock</code> with the AWS SDK.
+    </li>
+  </ul>
+
+  <h2 id="next">Next steps</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/streaming">Streaming model</a> — producer goroutine, buffered channel, cancellation propagation.</li>
+    <li><a href="/llmrouter/docs/concepts/byte-passthrough">Byte passthrough</a> — <code>Chunk.Raw</code> and <code>ChatRequest.Raw</code> in depth.</li>
+    <li><a href="/llmrouter/docs/concepts/errors">Error handling</a> — <code>ErrUpstream</code>, context errors, parse failures.</li>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> — passthrough behavior and base-URL override patterns.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a> — request + SSE translation in detail.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type and option.</li>
+  </ul>
+</DocsLayout>

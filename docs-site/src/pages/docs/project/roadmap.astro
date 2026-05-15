@@ -1,0 +1,315 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+---
+
+<DocsLayout title="Roadmap">
+  <h1>Roadmap</h1>
+  <p>
+    <code>llmrouter</code> is pre-1.0. This page is the public plan
+    for what is shipped, what is being built next, and — equally
+    important — what is intentionally <em>not</em> part of the
+    library. The roadmap is best-effort, not a contract; dates are
+    omitted on purpose because most of the work is driven by a small
+    team.
+  </p>
+  <p>
+    Versions follow <a href="https://semver.org/" target="_blank" rel="noopener noreferrer">semantic versioning</a>.
+    While we are pre-1.0, expect minor breakages between minor
+    versions (v0.1 → v0.2 → v0.3). Patch versions (v0.1.0 → v0.1.1)
+    will never break the API; only tests, docs, and internals change.
+  </p>
+
+  <h2 id="released">Released</h2>
+
+  <h3 id="v0-1-1">v0.1.1 — Test hardening</h3>
+  <p>
+    A pure quality release. No source changes, no API changes,
+    nothing for an application caller to do.
+  </p>
+  <ul>
+    <li>
+      <strong>330-subtest table-driven test suite</strong> covering
+      core types, options, the streaming producer, error wrapping,
+      and both providers.
+    </li>
+    <li>
+      <strong>100% statement coverage</strong> on the root package
+      (<code>llmrouter.go</code>, <code>options.go</code>,
+      <code>stream.go</code>, <code>errors.go</code>).
+    </li>
+    <li>
+      <strong>90.4% statement coverage</strong> on each provider
+      package — the uncovered branches are non-2xx error paths that
+      need a full HTTP fixture round-trip and will land in the
+      provider integration suite.
+    </li>
+    <li>
+      No public-API changes. v0.1.0 application code runs unchanged.
+    </li>
+  </ul>
+
+  <h3 id="v0-1-0">v0.1.0 — Initial public release</h3>
+  <p>The library&rsquo;s first tagged release. Includes the core surface and the first two providers.</p>
+  <ul>
+    <li>
+      <strong>Core API</strong>: the
+      <code>Provider</code> interface, <code>ChatRequest</code> /
+      <code>Message</code> / <code>Chunk</code> types, the
+      <code>Stream</code> handle, the option pattern
+      (<code>WithAPIKey</code>, <code>WithBaseURL</code>,
+      <code>WithHTTPClient</code>, <code>WithTimeout</code>,
+      <code>WithExtra</code>), and the <code>ErrUpstream</code>
+      error wrapper.
+    </li>
+    <li>
+      <strong>OpenAI provider</strong> with byte passthrough on
+      requests and chunks, plus the <code>WithBaseURL</code> override
+      that turns it into a universal OpenAI-compatible client
+      (OpenRouter, Together, Groq, vLLM, Ollama, LM Studio, anything
+      that speaks <code>/v1/chat/completions</code> SSE).
+    </li>
+    <li>
+      <strong>Anthropic provider</strong> with full bidirectional
+      translation: OpenAI <code>messages</code> →
+      Anthropic <code>/v1/messages</code> request body (including
+      lifting the <code>system</code> role into the top-level
+      <code>system</code> field), and Anthropic SSE events
+      (<code>message_start</code>, <code>content_block_delta</code>,
+      <code>message_delta</code>, <code>message_stop</code>) →
+      OpenAI-shaped delta chunks.
+    </li>
+    <li>
+      <strong>Stream API</strong> with a buffered chunks channel,
+      a producer goroutine, single-consumer semantics, and
+      <code>context.Context</code> cancellation that propagates all
+      the way to the in-flight HTTP request.
+    </li>
+  </ul>
+
+  <h2 id="v0-2">Planned for v0.2 — Cloud provider triple</h2>
+  <p>
+    Adds the three managed cloud LLM endpoints that most enterprise
+    deployments end up using. Each one is a real new provider with
+    its own auth scheme and its own body translation, not just a
+    base-URL flip.
+  </p>
+  <ul>
+    <li>
+      <strong>Azure OpenAI Service provider.</strong>
+      Deployment-URL-based endpoint
+      (<code>https://&lt;resource&gt;.openai.azure.com/openai/deployments/&lt;deployment&gt;/chat/completions</code>),
+      <code>api-key</code> header instead of
+      <code>Authorization: Bearer</code>, mandatory
+      <code>api-version</code> query parameter. Request and response
+      shapes are OpenAI-compatible; only the auth and URL change.
+    </li>
+    <li>
+      <strong>AWS Bedrock provider.</strong> SigV4 request signing
+      against
+      <code>bedrock-runtime.&lt;region&gt;.amazonaws.com</code>, plus
+      per-model-family body translation: Claude family
+      (Anthropic-shaped <code>messages</code>), Llama family
+      (Meta-shaped <code>prompt</code> + chat templating), Titan
+      family (Amazon-shaped <code>inputText</code>). The model
+      family is detected from the <code>Model</code> string in
+      <code>ChatRequest</code>.
+    </li>
+    <li>
+      <strong>Google Vertex AI provider.</strong> Application Default
+      Credentials (ADC) for auth, project + region in the endpoint
+      URL, Google&rsquo;s
+      <code>publishers/google/models/...:streamGenerateContent</code>
+      surface translated into OpenAI-shaped chunks.
+    </li>
+    <li>
+      <strong>More OpenAI-compatible endpoint examples</strong> in
+      the provider tests — verified round trips against the wire
+      format of OpenRouter, Together, Groq, vLLM, and Ollama, so
+      regressions get caught.
+    </li>
+  </ul>
+  <p>
+    v0.2 may also include small breaking changes to the
+    <code>WithExtra</code> option to accommodate the per-provider
+    metadata each cloud endpoint needs (Azure deployment name,
+    Vertex project ID and region). We will list any such breakages
+    in the changelog with migration notes.
+  </p>
+
+  <h2 id="v0-3">Planned for v0.3 — Beyond chat</h2>
+  <p>
+    Once the cloud triple lands, the next chunk of work is to round
+    out the request and response surface with the things people
+    already use via <code>Raw</code> passthrough — tools, multimodal
+    content, embeddings.
+  </p>
+  <ul>
+    <li>
+      <strong>Typed tool-call passthrough.</strong> Today, tool
+      definitions and tool-call responses flow through via
+      <code>ChatRequest.Raw</code> and <code>Chunk.Raw</code> — which
+      works, but is byte-string-typed. v0.3 adds
+      <code>ChatRequest.Tools []ToolDef</code> on the way out and
+      <code>Choice.Delta.ToolCalls []ToolCallDelta</code> on the way
+      back, normalised to OpenAI shape and translated to Anthropic
+      <code>tool_use</code> / <code>tool_result</code> blocks in the
+      Anthropic provider.
+    </li>
+    <li>
+      <strong>Multimodal content helpers.</strong> Constructors for
+      image URLs (<code>llmrouter.ImageURLContent</code>) and image
+      bytes (<code>llmrouter.ImageBytesContent</code>) that build
+      the right content-block shape for both OpenAI and Anthropic.
+      Removes the &ldquo;build the JSON yourself and stuff it in
+      <code>Raw</code>&rdquo; workaround.
+    </li>
+    <li>
+      <strong>First-class embeddings API.</strong> A separate
+      <code>Embed(ctx, EmbedRequest) (EmbedResponse, error)</code>
+      method on the <code>Provider</code> interface — kept distinct
+      from <code>CompletionStream</code> because the request shape,
+      response shape, and lifecycle are different (no streaming, no
+      <code>Stream</code> handle).
+    </li>
+  </ul>
+
+  <h2 id="v0-4">Planned for v0.4 — Audio and vision</h2>
+  <p>
+    Audio and vision are big enough that they deserve their own
+    minor version. The plan is to bundle them rather than
+    interleaving them with v0.3&rsquo;s work.
+  </p>
+  <ul>
+    <li>
+      <strong>Audio / TTS / STT.</strong> OpenAI Whisper (STT),
+      OpenAI GPT-4o audio (in &amp; out), Vertex audio. The shape
+      will be similar to the embeddings API — separate methods on
+      <code>Provider</code> with their own request and response
+      types, not shoehorned into <code>CompletionStream</code>.
+    </li>
+    <li>
+      <strong>Vision provider abstraction.</strong> Multimodal
+      <em>output</em> (e.g. image generation) handled with its own
+      typed surface. Multimodal <em>input</em> (image
+      understanding) is already covered by v0.3&rsquo;s multimodal
+      content helpers.
+    </li>
+  </ul>
+
+  <h2 id="v1-0">Planned for v1.0 — API freeze</h2>
+  <p>
+    Once v0.4 ships and the surface has been stable for a few
+    months, v1.0 freezes the public API. The contract from v1.0
+    onwards:
+  </p>
+  <ul>
+    <li>
+      No breaking changes to exported types, functions, or
+      interfaces within the v1.x series.
+    </li>
+    <li>
+      Backward-compatible additions (new options, new methods on
+      <code>Provider</code> with sensible defaults, new fields on
+      types) are minor bumps.
+    </li>
+    <li>
+      Bug fixes are patch bumps.
+    </li>
+    <li>
+      Breaking changes — if they ever happen — bump major.
+    </li>
+  </ul>
+  <p>
+    Until v1.0, we do <strong>not</strong> guarantee backward
+    compatibility between minor versions. Pin a minor in your
+    <code>go.mod</code> and read the changelog before bumping.
+  </p>
+
+  <h2 id="out-of-scope">Out of scope — and staying that way</h2>
+  <p>
+    The most important part of any roadmap is what it&rsquo;s
+    <em>not</em>. The following features are intentionally not in
+    <code>llmrouter</code>, will not be added, and would be rejected
+    in a PR. They are not bad ideas — they are the
+    <em>wrong layer</em>. They belong in the gateway you build
+    <em>on top of</em> a library like <code>llmrouter</code>, not
+    inside the library itself. Putting them in the library forces
+    them on every caller, contaminates the API surface, and traps
+    operational concerns (caching, budgets, multi-tenant policy)
+    inside a Go module that can never be the right home for them.
+  </p>
+  <ul>
+    <li>
+      <strong>Rate limiting.</strong> Token-bucket rate limiting
+      across vendors is a property of <em>your</em> deployment, not
+      of the library. Build it in the HTTP handler in front of
+      <code>llmrouter</code>.
+    </li>
+    <li>
+      <strong>Budget caps.</strong> Per-tenant or per-key cost
+      ceilings need persistent counters, an authorisation model, and
+      a billing source of truth. None of that belongs in a library.
+    </li>
+    <li>
+      <strong>Response caching.</strong> Caching needs a cache key
+      strategy (do you include the full message history? do you
+      ignore <code>user</code>? do you cache by hash or by content?),
+      an eviction policy, and a backing store. All of which are
+      deployment decisions.
+    </li>
+    <li>
+      <strong>Vector store / RAG.</strong> Vector databases,
+      retrievers, chunkers, rerankers, and prompt assembly are an
+      entire product category. <code>llmrouter</code> will give you
+      the embedding API in v0.3; the retrieval pipeline is yours to
+      build.
+    </li>
+    <li>
+      <strong>Persistent conversation state.</strong> Storing turns
+      across requests, summarising old context, paging history out
+      to disk — these are application concerns. The library&rsquo;s
+      <code>ChatRequest</code> is a single call; persistence lives
+      one layer up.
+    </li>
+    <li>
+      <strong>A bundled HTTP server.</strong> <code>llmrouter</code>
+      is a library, not a binary. Run it inside your own server.
+      The examples in
+      <a href="/llmrouter/docs/guides/chat-gateway">Build a chat
+      gateway</a> show how to wrap it in a few lines of
+      <code>net/http</code>.
+    </li>
+  </ul>
+  <p>
+    If you want all of these in one box, the answer in the Python
+    ecosystem is LiteLLM. There is no Go equivalent today, and
+    <code>llmrouter</code> is deliberately not trying to become
+    one. We&rsquo;d rather be the boring, byte-exact, single-purpose
+    library that a gateway is built on top of.
+  </p>
+
+  <h2 id="influence">How to influence the roadmap</h2>
+  <p>
+    The plan above is a plan, not a promise. The most effective way
+    to move something earlier is to file an issue at
+    <a href="https://github.com/elloloop/llmrouter/issues" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/issues</a>
+    with:
+  </p>
+  <ul>
+    <li>The <code>type:feature</code> label.</li>
+    <li>
+      A concrete use case — &ldquo;we need Vertex auth because our
+      compliance team requires Google&rsquo;s key management,&rdquo;
+      not &ldquo;please add more providers.&rdquo;
+    </li>
+    <li>The shape of the API you&rsquo;d want, if you&rsquo;ve thought about it.</li>
+    <li>Whether you&rsquo;d be willing to send the PR yourself.</li>
+  </ul>
+  <p>
+    Issues with a real use case attached almost always move ahead
+    of speculative ones, and issues with a willing contributor
+    behind them move fastest of all. See
+    <a href="/llmrouter/docs/project/contributing">Contributing</a>
+    for how to send the PR once the issue is agreed.
+  </p>
+</DocsLayout>

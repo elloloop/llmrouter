@@ -3,28 +3,67 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs-site/**'
+      - 'docs/**'
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - 'docs-site/**'
+      - 'docs/**'
+      - '**.md'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    name: Build + Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: '1.23'
           cache: true
-      - run: go vet ./...
-      - run: go test -race -count=1 ./...
-      - run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test (race)
+        run: go test -race -count=1 ./...
+      - name: go build
+        run: go build ./...
 
   staticcheck:
+    name: Staticcheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: '1.23'
           cache: true
-      - run: go install honnef.co/go/tools/cmd/staticcheck@latest
-      - run: staticcheck ./...
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      - name: staticcheck
+        run: staticcheck ./...
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: go test (coverage)
+        run: go test -coverprofile=cover.out ./...
+      - name: Coverage summary
+        run: go tool cover -func=cover.out | tail -1

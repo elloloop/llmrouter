@@ -1,0 +1,479 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Byte-passthrough Proxy">
+  <h1>Byte-passthrough Proxy</h1>
+  <p>
+    "Byte-passthrough" is the property that the bytes leaving your proxy
+    are bit-identical to the bytes the upstream produced. That's the
+    feature that lets any OpenAI SDK — Python, Node, Go, Ruby — point
+    its <code>OPENAI_BASE_URL</code> at your proxy and see no
+    difference from talking to <code>api.openai.com</code> directly.
+    This page shows how <code>llmrouter</code> supports this, why it
+    matters, and where the property does and doesn't hold.
+  </p>
+
+  <h2>The use case</h2>
+  <p>
+    You're running an OpenAI-shaped proxy in front of one or more
+    upstreams. Maybe it's a gateway for billing, abuse, or governance.
+    Maybe it's an internal multi-tenant router. Whatever the reason,
+    your clients are existing OpenAI SDKs — and you want them to "just
+    work."
+  </p>
+
+  <p>
+    The OpenAI SDKs vary in how strict they are about response shape:
+  </p>
+  <ul>
+    <li>
+      <strong>Python <code>openai</code> 1.x</strong> — permissive,
+      tolerates unknown fields, parses what it recognises.
+    </li>
+    <li>
+      <strong>Some Go SDKs</strong> — strict structs that fail
+      <code>json.Unmarshal</code> if a field is missing, or panic on
+      type mismatches.
+    </li>
+    <li>
+      <strong>Older Node SDKs</strong> — variable; some warn on unknown
+      fields, some throw.
+    </li>
+    <li>
+      <strong>Community SDKs</strong> — even more variable.</li>
+  </ul>
+
+  <p>
+    Re-marshaling the response through your own JSON encoder loses
+    fields, reorders keys, omits zero values, and otherwise mutates the
+    wire format. Each mutation is a chance to break some client.
+    Byte-passthrough sidesteps the entire problem by never decoding the
+    payload in the first place.
+  </p>
+
+  <h2>How the mechanic works</h2>
+  <p>
+    Two pieces:
+  </p>
+  <ol>
+    <li>
+      <strong>Outbound:</strong> set
+      <code>ChatRequest.Raw = requestBytes</code> instead of (or in
+      addition to) the typed fields. The OpenAI provider re-uses those
+      bytes as the upstream POST body, rewriting only the
+      <code>model</code> and <code>stream</code> fields. Vision arrays,
+      tool definitions, response_format directives — anything OpenAI
+      accepts that the typed <code>ChatRequest</code> doesn't model —
+      pass through unchanged.
+    </li>
+    <li>
+      <strong>Inbound:</strong> for each chunk you receive, write
+      <code>chunk.Raw</code> to the response with the
+      <code>data: </code> prefix and <code>\\n\\n</code> separator. The
+      OpenAI provider populates <code>Raw</code> with the exact payload
+      it received from the upstream — never re-marshaled.
+    </li>
+  </ol>
+
+  <Code lang="go" code={`// Outbound — preserve the original request body.
+req := llmrouter.ChatRequest{
+    Model: peek.Model,
+    Raw:   requestBytes,
+}
+
+// Inbound — write chunk.Raw bytes verbatim.
+for chunk := range stream.Chunks() {
+    w.Write([]byte("data: "))
+    w.Write(chunk.Raw)
+    w.Write([]byte("\\n\\n"))
+    flusher.Flush()
+}`} />
+
+  <h2>Why this matters: the strict-parser problem</h2>
+  <p>
+    Consider a tool-call response. OpenAI returns:
+  </p>
+  <Code lang="json" code={`{
+  "id": "chatcmpl-abc",
+  "object": "chat.completion.chunk",
+  "created": 1717000000,
+  "model": "gpt-4o-mini",
+  "choices": [{
+    "index": 0,
+    "delta": {
+      "tool_calls": [{
+        "index": 0,
+        "id": "call_xyz",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{\\"city"}
+      }]
+    },
+    "finish_reason": null
+  }],
+  "system_fingerprint": "fp_a1b2c3"
+}`} />
+
+  <p>
+    The <code>llmrouter.Chunk</code> struct doesn't model
+    <code>tool_calls</code> or <code>system_fingerprint</code>. If you
+    decode this chunk and re-encode it from the typed fields, both go
+    missing — and the client SDK either silently loses tool calls or
+    explicitly rejects the response for a missing field. By forwarding
+    <code>chunk.Raw</code> verbatim, those fields survive.
+  </p>
+
+  <h2>Where byte-passthrough doesn't apply</h2>
+  <p>
+    The OpenAI provider preserves bytes exactly. The Anthropic provider
+    cannot — the upstream wire format is different:
+  </p>
+
+  <Code lang="text" code={`Anthropic upstream emits:        OpenAI provider would emit:
+  event: message_start             {"id":"chatcmpl-..","object":"chat.completion.chunk", ...}
+  data: {"type":"message_start",   {"id":"chatcmpl-..","object":"chat.completion.chunk", ...}
+        "message":{...}}            {"id":"chatcmpl-..","object":"chat.completion.chunk", ...}
+                                    ...
+  event: content_block_delta
+  data: {"type":"content_block_delta",
+        "delta":{"text":"hi"}}`} />
+
+  <p>
+    The Anthropic provider <em>does</em> populate <code>Chunk.Raw</code>
+    — but with synthesized OpenAI-shape JSON, not the original
+    Anthropic event. So clients still see valid OpenAI-shape SSE; they
+    just don't see Anthropic's native events. The byte-passthrough
+    property is preserved <strong>relative to a notional OpenAI-shape
+    response</strong>, not byte-identical to what Anthropic itself
+    would send.
+  </p>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>The rule of thumb.</strong> Byte-identical to the upstream
+    only works when the upstream <em>is</em> OpenAI. For everything
+    else (Anthropic, Bedrock, Vertex, …), the provider translates to
+    OpenAI shape — your clients see consistent OpenAI-shape responses
+    regardless of which upstream is behind the proxy, but those
+    responses are synthesized, not forwarded.
+  </aside>
+
+  <h2>Required response headers</h2>
+  <p>
+    Three headers matter for SSE through a typical reverse-proxy stack:
+  </p>
+  <ul>
+    <li>
+      <code>Content-Type: text/event-stream; charset=utf-8</code> —
+      tells clients to parse the body as SSE.
+    </li>
+    <li>
+      <code>Cache-Control: no-cache, no-transform</code> — keeps CDNs
+      and reverse proxies from buffering or mutating the stream.
+    </li>
+    <li>
+      <code>X-Accel-Buffering: no</code> — disables nginx response
+      buffering. Without this nginx waits for the response to finish
+      before forwarding any bytes, which defeats streaming entirely.
+    </li>
+  </ul>
+
+  <h2>The complete program</h2>
+
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    "net/http"
+    "os"
+    "os/signal"
+    "strings"
+    "syscall"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// PassthroughProxy is the simplest useful llmrouter proxy:
+//   - decode only the model field
+//   - forward the original request body via ChatRequest.Raw
+//   - forward each chunk's Raw bytes back to the client verbatim
+//   - never re-marshal typed structs
+type PassthroughProxy struct {
+    providers map[string]llmrouter.Provider
+}
+
+func NewPassthroughProxy() (*PassthroughProxy, error) {
+    oa, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        return nil, fmt.Errorf("openai: %w", err)
+    }
+    an, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+    if err != nil {
+        return nil, fmt.Errorf("anthropic: %w", err)
+    }
+    return &PassthroughProxy{
+        providers: map[string]llmrouter.Provider{
+            "openai":    oa,
+            "anthropic": an,
+        },
+    }, nil
+}
+
+func (p *PassthroughProxy) pick(model string) llmrouter.Provider {
+    switch {
+    case strings.HasPrefix(model, "gpt-"),
+        strings.HasPrefix(model, "o1-"),
+        strings.HasPrefix(model, "o3-"):
+        return p.providers["openai"]
+    case strings.HasPrefix(model, "claude-"):
+        return p.providers["anthropic"]
+    }
+    return nil
+}
+
+type peekModel struct {
+    Model string \`json:"model"\`
+}
+
+func (p *PassthroughProxy) handle(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
+    if err != nil {
+        http.Error(w, "could not read body", http.StatusBadRequest)
+        return
+    }
+
+    var peek peekModel
+    if err := json.Unmarshal(body, &peek); err != nil {
+        http.Error(w, "invalid json", http.StatusBadRequest)
+        return
+    }
+
+    provider := p.pick(peek.Model)
+    if provider == nil {
+        http.Error(w,
+            fmt.Sprintf("no provider configured for model %q", peek.Model),
+            http.StatusBadRequest)
+        return
+    }
+
+    // CRITICAL: pass r.Context() so client disconnects propagate.
+    stream, err := provider.CompletionStream(r.Context(), llmrouter.ChatRequest{
+        Model: peek.Model,
+        Raw:   body, // <-- the entire incoming body, byte-for-byte
+    })
+    if err != nil {
+        var upstream *llmrouter.ErrUpstream
+        if errors.As(err, &upstream) {
+            // Mirror the upstream status code.
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(upstream.StatusCode)
+            _, _ = w.Write([]byte(upstream.Body))
+            return
+        }
+        log.Printf("provider error: %v", err)
+        http.Error(w, "upstream unavailable", http.StatusBadGateway)
+        return
+    }
+
+    writeSSEHeaders(w)
+    flusher, _ := w.(http.Flusher)
+
+    for chunk := range stream.Chunks() {
+        if _, err := w.Write([]byte("data: ")); err != nil {
+            return
+        }
+        if _, err := w.Write(chunk.Raw); err != nil {
+            return
+        }
+        if _, err := w.Write([]byte("\\n\\n")); err != nil {
+            return
+        }
+        if flusher != nil {
+            flusher.Flush()
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Printf("stream finished with error: %v", err)
+        return
+    }
+    _, _ = w.Write([]byte("data: [DONE]\\n\\n"))
+    if flusher != nil {
+        flusher.Flush()
+    }
+}
+
+func writeSSEHeaders(w http.ResponseWriter) {
+    h := w.Header()
+    h.Set("Content-Type", "text/event-stream; charset=utf-8")
+    h.Set("Cache-Control", "no-cache, no-transform")
+    h.Set("Connection", "keep-alive")
+    h.Set("X-Accel-Buffering", "no")
+    w.WriteHeader(http.StatusOK)
+}
+
+func main() {
+    p, err := NewPassthroughProxy()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    mux := http.NewServeMux()
+    mux.HandleFunc("/v1/chat/completions", p.handle)
+    mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+        _, _ = w.Write([]byte("ok"))
+    })
+
+    srv := &http.Server{
+        Addr:              ":8080",
+        Handler:           mux,
+        ReadHeaderTimeout: 10 * time.Second,
+        // No WriteTimeout — streams.
+    }
+
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    go func() {
+        log.Printf("listening on %s", srv.Addr)
+        if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Fatal(err)
+        }
+    }()
+
+    <-ctx.Done()
+    log.Println("shutting down")
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    _ = srv.Shutdown(shutdownCtx)
+}`} />
+
+  <h2>Test it from the Python OpenAI SDK</h2>
+  <p>
+    The whole point of byte-passthrough is to be invisible to the
+    client. The fastest way to validate that is to run an off-the-shelf
+    OpenAI SDK against the proxy.
+  </p>
+
+  <Code lang="bash" code={`pip install openai
+
+OPENAI_BASE_URL=http://localhost:8080/v1 \\
+OPENAI_API_KEY=ignored \\
+python3 - <<'PY'
+import openai
+client = openai.OpenAI()
+
+stream = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "count to 5"}],
+    stream=True,
+)
+for event in stream:
+    delta = event.choices[0].delta.content or ""
+    print(delta, end="", flush=True)
+print()
+
+# Same SDK, same code, different upstream — just change the model:
+stream = client.chat.completions.create(
+    model="claude-sonnet-4-5",
+    messages=[{"role": "user", "content": "count to 5"}],
+    stream=True,
+    max_tokens=200,
+)
+for event in stream:
+    delta = event.choices[0].delta.content or ""
+    print(delta, end="", flush=True)
+print()
+PY`} />
+
+  <p>
+    The Python SDK doesn't know — and doesn't need to — whether it's
+    talking to OpenAI directly, to your proxy, or (transitively) to
+    Anthropic. It just sees OpenAI-shape SSE on the wire.
+  </p>
+
+  <h2>Test it with curl</h2>
+  <p>
+    For a smoke test that doesn't depend on the Python ecosystem:
+  </p>
+  <Code lang="bash" code={`curl -N http://localhost:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role":"user","content":"hi"}],
+    "stream": true,
+    "stream_options": {"include_usage": true}
+  }'`} />
+
+  <p>
+    The <code>-N</code> flag tells curl not to buffer the response.
+    You'll see chunks arrive as soon as the upstream emits them.
+  </p>
+
+  <h2>What you give up</h2>
+  <p>
+    Byte-passthrough is great for transparency but it's not the right
+    choice for every proxy:
+  </p>
+  <ul>
+    <li>
+      <strong>You can't easily inspect or modify the content.</strong>
+      If you want to redact PII, append a system message, or strip
+      forbidden fields, you have to parse the body (and the response
+      chunks) — which means you're no longer in passthrough mode.
+    </li>
+    <li>
+      <strong>You can't enforce schema constraints.</strong> If the
+      client sends an unsupported parameter, the upstream rejects it,
+      not your proxy. Sometimes that's the goal; sometimes you'd rather
+      fail-fast at the proxy.
+    </li>
+    <li>
+      <strong>Token counting is post-hoc.</strong> You can read
+      <code>chunk.Usage</code> from the final chunk to track usage,
+      but you can't estimate cost before the request runs.
+    </li>
+  </ul>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>When passthrough wins.</strong> When you're building
+    infrastructure — a gateway, a quota layer, a billing wedge —
+    passthrough lets you stay invisible. When you're building a product
+    on top of the API — a chatbot, an agent, a code helper — you'll
+    want to decode and reason about the content. The two design points
+    are different.
+  </aside>
+
+  <h2>Related</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/guides/build-a-chat-gateway/">Build a chat gateway</a>
+      — the full feature-rich gateway, building on the same byte-pass
+      mechanic but adding routing, budgets, and error translation.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/byte-passthrough/">Concept: byte passthrough</a>
+      — the design rationale and what
+      <code>ChatRequest.Raw</code> / <code>Chunk.Raw</code> guarantee.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/openai/">The OpenAI provider</a>
+      — including how
+      <a href="/llmrouter/docs/concepts/configuration/"><code>WithBaseURL</code></a>
+      lets you point at OpenRouter, Groq, Together, or self-hosted
+      OpenAI-compatible endpoints with full passthrough.
+    </li>
+  </ul>
+</DocsLayout>

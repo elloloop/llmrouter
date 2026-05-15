@@ -1,0 +1,427 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Context & Cancellation">
+  <h1>Context &amp; Cancellation</h1>
+  <p>
+    Every <code>llmrouter</code> call takes a
+    <code>context.Context</code>, and that context is the master switch
+    for everything downstream of the call. Cancel it and the entire
+    pipeline — HTTP request, streaming response, internal producer
+    goroutine — winds down deterministically. This page covers the
+    contract, the propagation rules, and the patterns for gateways and
+    deadline-driven workloads.
+  </p>
+
+  <h2>The contract</h2>
+  <p>
+    The signature is:
+  </p>
+  <Code lang="go" code={`func (p *Provider) CompletionStream(
+    ctx context.Context,
+    req ChatRequest,
+) (*Stream, error)`} />
+  <p>
+    The <code>ctx</code> you pass in is wired into three places at once:
+  </p>
+  <ol>
+    <li>
+      The outgoing HTTP request, via
+      <code>http.NewRequestWithContext</code>. Cancellation cancels
+      connect, TLS handshake, headers, and body read.
+    </li>
+    <li>
+      The internal producer goroutine, via a child context that
+      <code>llmrouter.NewStream</code> derives.
+    </li>
+    <li>
+      The buffered channel send inside the producer, via a
+      <code>{`select { case s.chunks <- c: case <-ctx.Done(): }`}</code>.
+    </li>
+  </ol>
+  <p>
+    All three observe the same cancellation signal. That means there is
+    exactly one place to "pull the plug" and it cleans up everything.
+  </p>
+
+  <h2>Cancellation propagation, end to end</h2>
+  <p>What happens, in order, when you cancel the parent context:</p>
+  <ol>
+    <li>The <code>http.Client</code>'s in-flight read returns an error
+      (typically wrapping <code>context.Canceled</code>).</li>
+    <li>
+      The producer goroutine's SSE scanner loop notices either via
+      <code>ctx.Err()</code> on its next iteration or via the underlying
+      read failure.
+    </li>
+    <li>The producer calls <code>hooks.Finish(ctx.Err())</code>, which
+      stores the error and closes the chunks channel.</li>
+    <li>The consumer's <code>range stream.Chunks()</code> exits.</li>
+    <li>
+      <code>stream.Err()</code> returns
+      <code>context.Canceled</code> (or
+      <code>context.DeadlineExceeded</code>).
+    </li>
+    <li>The underlying TCP socket closes. No orphan goroutine, no
+      orphan connection.</li>
+  </ol>
+
+  <p>Or in code, from <code>stream.go</code>:</p>
+  <Code lang="go" code={`func (s *Stream) sendChunk(ctx context.Context, c Chunk) bool {
+    select {
+    case s.chunks <- c:
+        return true
+    case <-ctx.Done():
+        return false
+    }
+}`} />
+  <p>
+    When <code>sendChunk</code> returns <code>false</code>, the
+    producer immediately calls <code>hooks.Finish(ctx.Err())</code> and
+    exits the goroutine. There's no "drain and retry" path — once the
+    context is cancelled, the producer is done.
+  </p>
+
+  <h2><code>Stream.Cancel()</code></h2>
+  <p>
+    <code>Stream.Cancel()</code> cancels an internal child context
+    that <code>NewStream</code> derived from the parent:
+  </p>
+  <Code lang="go" code={`func NewStream(parent context.Context) (*Stream, context.Context, ProducerHooks) {
+    ctx, cancel := context.WithCancel(parent)
+    s := newStream(cancel)
+    return s, ctx, ProducerHooks{ /* ... */ }
+}`} />
+  <p>
+    Calling <code>stream.Cancel()</code> is equivalent to cancelling
+    the parent context, but only for this one stream. Use it when:
+  </p>
+  <ul>
+    <li>You want to abort one stream without affecting siblings
+      sharing the same parent context (for example, in a fan-out
+      pattern where you keep the fastest response and discard the
+      others).</li>
+    <li>You want a clean "stop here" inside a consumer loop without
+      needing access to the parent <code>cancel</code> closure.</li>
+  </ul>
+  <p>The method is idempotent; multiple calls are safe.</p>
+
+  <h2>Why this matters for gateways</h2>
+  <p>
+    If you're building a gateway, the most expensive bug you can ship
+    is: a client disconnects, the gateway doesn't notice, the upstream
+    HTTP call keeps streaming, and you pay for tokens nobody sees.
+    Multiply by every disconnect on every long completion, every day.
+  </p>
+  <p>
+    The fix is one line: pass <code>r.Context()</code> into
+    <code>CompletionStream</code>. Go's <code>net/http</code> cancels
+    <code>r.Context()</code> when the client disconnects, and that
+    cancellation propagates straight through:
+  </p>
+  <Code lang="go" code={`func handler(p llmrouter.Provider) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        // r.Context() is cancelled when the client TCP connection
+        // closes. Wiring it into CompletionStream means the upstream
+        // OpenAI request also closes — no orphan tokens billed.
+        stream, err := p.CompletionStream(r.Context(), buildRequest(r))
+        // ...
+    }
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>The orphan-tokens test.</strong> Start a long completion,
+    kill the client mid-stream (Ctrl-C the curl), and watch your
+    upstream provider's billing dashboard. If usage keeps climbing,
+    you're not wiring <code>r.Context()</code> through. If it stops
+    within a couple of seconds, you are.
+  </aside>
+
+  <h2>Timeouts</h2>
+  <p>
+    Use <code>context.WithTimeout</code> (or
+    <code>context.WithDeadline</code>) to put a hard ceiling on a
+    request:
+  </p>
+  <Code lang="go" code={`ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+defer cancel()
+
+stream, err := p.CompletionStream(ctx, req)
+// If 30s elapse, ctx is cancelled with DeadlineExceeded.`} />
+  <p>
+    Always <code>defer cancel()</code>. Without it, the context's
+    timer goroutine doesn't release until the deadline fires, which
+    matters if your function returns early.
+  </p>
+  <p>
+    See <a href="/llmrouter/docs/concepts/configuration/">Configuration
+    &amp; Options</a> for the relationship between
+    <code>context.WithTimeout</code> and <code>WithTimeout</code>: the
+    former is per-call; the latter is a per-provider HTTP-client
+    setting and a defense-in-depth backstop. Use both.
+  </p>
+
+  <h2>Deadlines propagate naturally</h2>
+  <p>
+    A deadline in a parent context applies to every child. If you set
+    a 10-second deadline at your HTTP handler entry and call multiple
+    providers in sequence, <em>all</em> of them share that budget:
+  </p>
+  <Code lang="go" code={`ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+defer cancel()
+
+// All three calls compete for the same 10-second budget.
+fast, _   := callProvider(ctx, primary, req)
+medium, _ := callProvider(ctx, fallback, req)
+slow, _   := callProvider(ctx, archive, req)`} />
+  <p>
+    Use <code>context.WithDeadline</code> when you have an absolute
+    time rather than a duration — e.g., a request-id-bound SLO:
+  </p>
+  <Code lang="go" code={`deadline := requestStartedAt.Add(15 * time.Second)
+ctx, cancel := context.WithDeadline(r.Context(), deadline)
+defer cancel()`} />
+
+  <h2>Example: client-disconnect-aware HTTP handler</h2>
+  <p>
+    A minimal SSE forwarder that respects client disconnect end-to-end.
+    Note three things: <code>r.Context()</code> goes into
+    <code>CompletionStream</code>; the loop checks
+    <code>r.Context().Done()</code> for an aborted client; and
+    <code>stream.Err()</code> is logged but not surfaced once we've
+    started writing SSE (the headers are gone).
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    "net/http"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+    http.HandleFunc("/chat", makeHandler(p))
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func makeHandler(p llmrouter.Provider) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        body, err := io.ReadAll(r.Body)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
+        var head struct{ Model string \`json:"model"\` }
+        _ = json.Unmarshal(body, &head)
+
+        // r.Context() is the master switch. If the client closes the
+        // connection, the upstream HTTP call cancels automatically.
+        stream, err := p.CompletionStream(r.Context(), llmrouter.ChatRequest{
+            Model: head.Model,
+            Raw:   body,
+        })
+        if err != nil {
+            var ue *llmrouter.ErrUpstream
+            if errors.As(err, &ue) {
+                http.Error(w, ue.Body, ue.StatusCode)
+                return
+            }
+            http.Error(w, err.Error(), http.StatusBadGateway)
+            return
+        }
+
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.Header().Set("Cache-Control", "no-cache")
+        flusher, _ := w.(http.Flusher)
+
+        for chunk := range stream.Chunks() {
+            // If the client is already gone, stop writing. The
+            // upstream stream is already cancelling via r.Context();
+            // this just avoids one extra Write to a dead socket.
+            select {
+            case <-r.Context().Done():
+                log.Printf("client disconnected mid-stream")
+                return
+            default:
+            }
+            fmt.Fprintf(w, "data: %s\\n\\n", chunk.Raw)
+            if flusher != nil {
+                flusher.Flush()
+            }
+        }
+        fmt.Fprint(w, "data: [DONE]\\n\\n")
+        if flusher != nil {
+            flusher.Flush()
+        }
+
+        if err := stream.Err(); err != nil {
+            // Already wrote 200 OK headers; can't change status now.
+            // Just log.
+            if !errors.Is(err, r.Context().Err()) {
+                log.Printf("stream error: %v", err)
+            }
+        }
+    }
+}`} />
+
+  <h2>Example: a budget-aware streamer</h2>
+  <p>
+    Counting tokens (or characters as a stand-in) and cancelling when
+    a per-request cap is exceeded. The pattern uses
+    <code>stream.Cancel()</code> so the parent context stays usable
+    for other work in the same handler:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    "os"
+    "strings"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// ErrBudgetExceeded is returned by streamWithBudget when the consumer
+// stops the stream early because it ran out of budget.
+var ErrBudgetExceeded = errors.New("budget exceeded")
+
+// streamWithBudget writes chunks to w until the cumulative byte count
+// exceeds maxBytes, then cancels the stream and returns
+// ErrBudgetExceeded. Any text already written stays written.
+func streamWithBudget(
+    ctx context.Context,
+    p llmrouter.Provider,
+    req llmrouter.ChatRequest,
+    w io.Writer,
+    maxBytes int,
+) error {
+    stream, err := p.CompletionStream(ctx, req)
+    if err != nil {
+        return err
+    }
+
+    var (
+        written int
+        capped  bool
+    )
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            if _, werr := io.WriteString(w, c.Delta.Content); werr != nil {
+                stream.Cancel()
+                // Keep draining so the goroutine exits cleanly.
+                continue
+            }
+            written += len(c.Delta.Content)
+        }
+        if written >= maxBytes && !capped {
+            capped = true
+            stream.Cancel()
+            // Don't break — drain until close so Err() unblocks.
+        }
+    }
+
+    if serr := stream.Err(); serr != nil {
+        if capped && errors.Is(serr, context.Canceled) {
+            return ErrBudgetExceeded
+        }
+        return serr
+    }
+    return nil
+}
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    req := llmrouter.ChatRequest{
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "write a paragraph about goroutines"),
+        },
+    }
+    var buf strings.Builder
+    err = streamWithBudget(ctx, p, req, &buf, 200)
+    fmt.Println(buf.String())
+    if errors.Is(err, ErrBudgetExceeded) {
+        fmt.Println("\\n[truncated at budget]")
+    } else if err != nil {
+        log.Fatal(err)
+    }
+}`} />
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Drain after Cancel.</strong> The pattern above doesn't
+    <code>break</code> out of the range loop after calling
+    <code>stream.Cancel()</code>. The producer goroutine might be
+    blocked on a buffered send; letting the loop continue until the
+    channel closes guarantees the goroutine exits promptly and
+    <code>stream.Err()</code> doesn't deadlock.
+  </aside>
+
+  <h2>Common pitfalls</h2>
+  <ul>
+    <li>
+      <strong>Using <code>context.Background()</code> in an HTTP
+      handler.</strong> Always use <code>r.Context()</code>. Otherwise,
+      client disconnects are invisible to your upstream call.
+    </li>
+    <li>
+      <strong>Forgetting <code>defer cancel()</code>.</strong> The
+      cancel function returned by <code>WithTimeout</code> /
+      <code>WithCancel</code> must be called or you leak the context's
+      goroutine until the deadline fires.
+    </li>
+    <li>
+      <strong>Calling <code>Err()</code> before draining
+      <code>Chunks()</code>.</strong> <code>Err()</code> blocks until
+      the producer finishes. If you haven't been reading chunks, the
+      producer is blocked on a buffered send and you'll deadlock.
+    </li>
+    <li>
+      <strong>Treating <code>context.Canceled</code> as an error.</strong>
+      It's typically an intentional caller action — log at debug, not
+      error.
+    </li>
+  </ul>
+
+  <h2>Next steps</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/concepts/streaming/">The Streaming
+      Model</a> — for the broader picture of how the producer goroutine
+      interacts with the consumer.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/errors/">Error Handling</a> —
+      how cancellation surfaces alongside upstream and network errors.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/concepts/byte-passthrough/">Byte
+      Passthrough</a> — the proxy example shows the recommended pattern
+      for wiring <code>r.Context()</code> end-to-end.
+    </li>
+  </ul>
+</DocsLayout>

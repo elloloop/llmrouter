@@ -1,0 +1,485 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="OpenAI-compatible Endpoints">
+  <h1>OpenAI-compatible Endpoints</h1>
+  <p>
+    Many providers and self-hosted runtimes implement the OpenAI Chat
+    Completions API on the wire — <code>POST /chat/completions</code>
+    that takes an OpenAI-shaped JSON body and returns an OpenAI-shaped
+    SSE event stream. The <a
+    href="/llmrouter/docs/providers/openai/">OpenAI provider</a> is
+    byte-passthrough at both ends, so pointing it at any of these
+    endpoints Just Works: switch the base URL, switch the API key,
+    keep everything else.
+  </p>
+
+  <h2 id="the-pattern">The pattern</h2>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+    llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+)`} />
+  <p>
+    That's it. The provider issues
+    <code>{`POST {BaseURL}/chat/completions`}</code> with
+    <code>Authorization: Bearer {`<key>`}</code>. If the upstream is
+    OpenAI-compatible, no further translation is needed.
+  </p>
+  <p>
+    The rest of this page is a directory of known-compatible endpoints
+    with their base URLs and any per-endpoint quirks. For the
+    application-side semantics — streaming, error handling, multimodal
+    content, token counting — see the
+    <a href="/llmrouter/docs/providers/openai/">OpenAI provider</a>
+    page; everything there applies here.
+  </p>
+
+  <h2 id="hosted">Hosted endpoints</h2>
+
+  <h3 id="openrouter">OpenRouter</h3>
+  <p>
+    OpenRouter is a meta-provider — one base URL, one API key, hundreds
+    of upstream models from dozens of vendors.
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+    llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "anthropic/claude-3.5-sonnet",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+  <p>
+    OpenRouter recommends sending <code>HTTP-Referer</code> and
+    <code>X-Title</code> headers so your traffic shows up in their
+    dashboard with a friendly name. Both are optional. Add them via a
+    custom HTTP transport — see <a href="#example-openrouter">the full
+    OpenRouter example</a> below.
+  </p>
+
+  <h3 id="together">Together AI</h3>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("TOGETHER_API_KEY")),
+    llmrouter.WithBaseURL("https://api.together.xyz/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+  <p>
+    Models are listed at <code>together.ai/models</code>. The full
+    model id (with vendor prefix) is what goes in
+    <code>ChatRequest.Model</code>.
+  </p>
+
+  <h3 id="groq">Groq</h3>
+  <p>
+    Groq runs open-weight models on custom LPU silicon for very low
+    latency. The endpoint URL has an <code>/openai/v1</code> suffix
+    that's easy to forget:
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("GROQ_API_KEY")),
+    llmrouter.WithBaseURL("https://api.groq.com/openai/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "llama-3.3-70b-versatile",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+
+  <h3 id="deepseek">DeepSeek</h3>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
+    llmrouter.WithBaseURL("https://api.deepseek.com/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "deepseek-chat",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+
+  <h3 id="fireworks">Fireworks</h3>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("FIREWORKS_API_KEY")),
+    llmrouter.WithBaseURL("https://api.fireworks.ai/inference/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+
+  <h3 id="perplexity">Perplexity</h3>
+  <p>
+    Perplexity's chat completions endpoint sits at the bare
+    <code>/api.perplexity.ai</code> host with no version suffix:
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("PERPLEXITY_API_KEY")),
+    llmrouter.WithBaseURL("https://api.perplexity.ai"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "llama-3.1-sonar-large-128k-online",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "What happened in tech today?"),
+    },
+})`} />
+
+  <h2 id="self-hosted">Self-hosted runtimes</h2>
+
+  <h3 id="vllm">vLLM</h3>
+  <p>
+    <a href="https://github.com/vllm-project/vllm">vLLM</a> serves any
+    Hugging Face model with an OpenAI-compatible HTTP API. Start the
+    server with <code>vllm serve {`<model>`}</code> and point the
+    provider at port 8000:
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey("none"),  // vLLM doesn't require auth by default
+    llmrouter.WithBaseURL("http://your-host:8000/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "meta-llama/Llama-3.1-8B-Instruct",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+  <p>
+    The <code>Model</code> string is the same HF model id you passed to
+    <code>vllm serve</code>. <code>WithAPIKey</code> rejects an empty
+    string, so pass any non-empty placeholder when the server doesn't
+    require auth.
+  </p>
+
+  <h3 id="ollama">Ollama</h3>
+  <p>
+    Ollama runs quantized open models locally with a tiny memory
+    footprint. It exposes an OpenAI-compatibility layer at
+    <code>localhost:11434/v1</code>:
+  </p>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey("ollama"),  // any non-empty placeholder
+    llmrouter.WithBaseURL("http://localhost:11434/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "llama3.2",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Ollama compatibility is partial.</strong> The compatibility
+    layer covers chat completions but not every OpenAI feature.
+    Notably: <code>logprobs</code> is not supported, tool support is
+    limited (recent versions added basic function calling but it's not
+    on parity), and <code>response_format: json_schema</code> behaves
+    as plain JSON mode. Stick to the basic chat shape and you'll be
+    fine.
+  </aside>
+
+  <h3 id="lm-studio">LM Studio</h3>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey("lm-studio"),
+    llmrouter.WithBaseURL("http://localhost:1234/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+  <p>
+    LM Studio's GUI shows the loaded model identifier; copy that string
+    into <code>ChatRequest.Model</code>.
+  </p>
+
+  <h3 id="localai">LocalAI</h3>
+  <Code lang="go" code={`p, err := openai.New(
+    llmrouter.WithAPIKey("localai"),
+    llmrouter.WithBaseURL("http://localhost:8080/v1"),
+)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model: "gpt-4",  // LocalAI aliases configured in your models.yaml
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("user", "Hello!"),
+    },
+})`} />
+
+  <h2 id="compatibility-notes">Self-hosted compatibility notes</h2>
+  <p>
+    Any HTTP server that implements <code>POST /chat/completions</code>
+    with OpenAI-shaped request and SSE response bodies works. The
+    minimum the server has to honour is:
+  </p>
+  <ul>
+    <li>
+      <strong>Request body.</strong> An OpenAI Chat Completions JSON
+      object on <code>POST</code>. The provider always sets
+      <code>{`"stream": true`}</code> and (unless a caller overrides)
+      <code>{`"stream_options": {"include_usage": true}`}</code>.
+    </li>
+    <li>
+      <strong>Response framing.</strong> <code>Content-Type:
+      text/event-stream</code> with <code>data:</code> lines, each
+      carrying an OpenAI <code>chat.completion.chunk</code> JSON
+      payload, ending with a literal <code>data: [DONE]</code> line
+      to terminate.
+    </li>
+    <li>
+      <strong>Error responses.</strong> Anything ≥ 400 surfaces as
+      <code>*llmrouter.ErrUpstream</code>; the response body is
+      captured (up to 1 KiB).
+    </li>
+  </ul>
+  <p>
+    A server that supports the basic shape but doesn't emit a usage
+    block on the final chunk will simply leave <code>Chunk.Usage</code>
+    nil — everything else still works.
+  </p>
+
+  <h2 id="endpoint-table">Endpoint reference</h2>
+  <div class="not-prose my-6 overflow-x-auto">
+    <table class="w-full border-collapse text-sm">
+      <thead>
+        <tr class="border-b border-border">
+          <th class="px-3 py-2 text-left">Provider</th>
+          <th class="px-3 py-2 text-left">Base URL</th>
+          <th class="px-3 py-2 text-left">Auth</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">OpenAI</td><td class="px-3 py-2"><code>https://api.openai.com/v1</code></td><td class="px-3 py-2">Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">OpenRouter</td><td class="px-3 py-2"><code>https://openrouter.ai/api/v1</code></td><td class="px-3 py-2">Bearer + optional <code>HTTP-Referer</code> / <code>X-Title</code></td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">Together AI</td><td class="px-3 py-2"><code>https://api.together.xyz/v1</code></td><td class="px-3 py-2">Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">Groq</td><td class="px-3 py-2"><code>https://api.groq.com/openai/v1</code></td><td class="px-3 py-2">Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">DeepSeek</td><td class="px-3 py-2"><code>https://api.deepseek.com/v1</code></td><td class="px-3 py-2">Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">Fireworks</td><td class="px-3 py-2"><code>https://api.fireworks.ai/inference/v1</code></td><td class="px-3 py-2">Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">Perplexity</td><td class="px-3 py-2"><code>https://api.perplexity.ai</code></td><td class="px-3 py-2">Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">vLLM</td><td class="px-3 py-2"><code>http://your-host:8000/v1</code></td><td class="px-3 py-2">None / Bearer</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">Ollama</td><td class="px-3 py-2"><code>http://localhost:11434/v1</code></td><td class="px-3 py-2">None</td></tr>
+        <tr class="border-b border-border/40"><td class="px-3 py-2">LM Studio</td><td class="px-3 py-2"><code>http://localhost:1234/v1</code></td><td class="px-3 py-2">None</td></tr>
+        <tr><td class="px-3 py-2">LocalAI</td><td class="px-3 py-2"><code>http://localhost:8080/v1</code></td><td class="px-3 py-2">None / Bearer</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="example-openrouter">Example: OpenRouter with custom headers</h2>
+  <p>
+    OpenRouter accepts two optional headers that improve their
+    dashboard analytics: <code>HTTP-Referer</code> (your app URL) and
+    <code>X-Title</code> (a human-readable app name). Wrap the HTTP
+    client with a <code>RoundTripper</code>:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+type openrouterHeaders struct {
+    base    http.RoundTripper
+    referer string
+    title   string
+}
+
+func (t *openrouterHeaders) RoundTrip(req *http.Request) (*http.Response, error) {
+    if t.referer != "" {
+        req.Header.Set("HTTP-Referer", t.referer)
+    }
+    if t.title != "" {
+        req.Header.Set("X-Title", t.title)
+    }
+    return t.base.RoundTrip(req)
+}
+
+func main() {
+    httpClient := &http.Client{
+        Timeout: 120 * time.Second,
+        Transport: &openrouterHeaders{
+            base:    http.DefaultTransport,
+            referer: "https://my-app.example.com",
+            title:   "My Demo App",
+        },
+    }
+
+    p, err := openai.New(
+        llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+        llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+        llmrouter.WithHTTPClient(httpClient),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model: "anthropic/claude-3.5-sonnet",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "What's the capital of France?"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="example-ollama">Example: Ollama for local dev</h2>
+  <p>
+    For local development you typically don't want a real API key in
+    code paths under test. Point at Ollama, pass a placeholder key, and
+    your code is unchanged from the production OpenAI path:
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+func main() {
+    // Pick the upstream from env. Default to OpenAI; override with
+    // OLLAMA_HOST=http://localhost:11434/v1 when developing offline.
+    baseURL := "https://api.openai.com/v1"
+    apiKey := os.Getenv("OPENAI_API_KEY")
+    model := "gpt-4o-mini"
+
+    if host := os.Getenv("OLLAMA_HOST"); host != "" {
+        baseURL = host
+        apiKey = "ollama"     // non-empty placeholder
+        model = "llama3.2"
+    }
+
+    p, err := openai.New(
+        llmrouter.WithAPIKey(apiKey),
+        llmrouter.WithBaseURL(baseURL),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model: model,
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "One-line summary of CRDTs?"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="provider-agnostic">Provider-agnostic factory</h2>
+  <p>
+    For code that swaps providers based on configuration, a tiny
+    factory keeps the call sites clean. Both providers satisfy the
+    <code>llmrouter.Provider</code> interface:
+  </p>
+  <Code lang="go" code={`package router
+
+import (
+    "fmt"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// Build returns a Provider keyed by a short label. Add cases as you
+// adopt more endpoints; the call site never branches on provider.
+func Build(label string) (llmrouter.Provider, error) {
+    switch label {
+    case "openai":
+        return openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+
+    case "anthropic":
+        return anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+
+    case "openrouter":
+        return openai.New(
+            llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
+            llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+        )
+
+    case "groq":
+        return openai.New(
+            llmrouter.WithAPIKey(os.Getenv("GROQ_API_KEY")),
+            llmrouter.WithBaseURL("https://api.groq.com/openai/v1"),
+        )
+
+    case "ollama":
+        return openai.New(
+            llmrouter.WithAPIKey("ollama"),
+            llmrouter.WithBaseURL("http://localhost:11434/v1"),
+        )
+
+    default:
+        return nil, fmt.Errorf("unknown provider: %q", label)
+    }
+}`} />
+  <p>
+    Call sites pass <code>llmrouter.Provider</code> around and use only
+    its two methods (<code>Name</code> and
+    <code>CompletionStream</code>). Swapping the upstream is a config
+    change, not a code change.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> — the implementation that powers every endpoint on this page.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a> — the translating sibling.</li>
+    <li><a href="/llmrouter/docs/providers/adding-a-provider/">Adding a new provider</a> — for endpoints that aren't OpenAI-compatible.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type.</li>
+  </ul>
+</DocsLayout>

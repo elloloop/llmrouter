@@ -1,0 +1,225 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+---
+
+<DocsLayout title="Changelog">
+  <h1>Changelog</h1>
+  <p>
+    User-visible changes to <code>llmrouter</code>, newest first.
+    Internal refactors that don&rsquo;t affect callers are omitted
+    here — read
+    <a href="https://github.com/elloloop/llmrouter/commits/main" target="_blank" rel="noopener noreferrer">the commit log</a>
+    if you want the full history.
+  </p>
+  <p>
+    Versions follow <a href="https://semver.org/" target="_blank" rel="noopener noreferrer">semantic versioning</a>.
+    While we are pre-1.0, expect minor breakages between minor
+    versions; patch releases never change the public API.
+  </p>
+  <p>
+    The
+    <a href="https://github.com/elloloop/llmrouter/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>
+    has the auto-generated commit-level notes for every tag. This
+    page is the curated, human-written summary.
+  </p>
+
+  <h2 id="v0-1-1">v0.1.1 — 2026-05-15</h2>
+  <p><strong>Tests / coverage. No source or API changes.</strong></p>
+  <p>
+    A pure-quality release. v0.1.0 application code runs unchanged
+    on v0.1.1 — there is no migration to do, and you can bump
+    safely.
+  </p>
+  <ul>
+    <li>
+      Added a <strong>330-subtest table-driven test suite</strong>
+      spanning the root package, both providers, the option
+      pattern, the streaming producer, and the error wrapper.
+    </li>
+    <li>
+      <strong>100% statement coverage</strong> on the root package
+      (<code>llmrouter.go</code>, <code>options.go</code>,
+      <code>stream.go</code>, <code>errors.go</code>).
+    </li>
+    <li>
+      <strong>90.4% statement coverage</strong> on each provider
+      package. The uncovered branches are non-2xx-with-fixture HTTP
+      error paths that need full upstream HTTP fixtures — those land
+      in a separate provider integration suite later.
+    </li>
+    <li>
+      All tests run race-clean
+      (<code>go test -race -count=1 ./...</code>).
+    </li>
+    <li>
+      No public-API changes. No new dependencies. No behaviour
+      changes.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.1.1" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.1.1</a>
+  </p>
+
+  <h2 id="v0-1-0">v0.1.0 — 2026-05-15</h2>
+  <p><strong>Initial public release.</strong></p>
+  <p>
+    First tagged release of the library. Establishes the core
+    surface (the <code>Provider</code> interface, the
+    <code>ChatRequest</code>/<code>Chunk</code> types, the
+    <code>Stream</code> handle, the option pattern, the
+    <code>ErrUpstream</code> wrapper) and ships the first two
+    providers.
+  </p>
+
+  <h3>Core API</h3>
+  <ul>
+    <li>
+      <code>llmrouter.Provider</code> interface — minimal surface
+      of <code>Name()</code> and
+      <code>CompletionStream(ctx, ChatRequest) (*Stream, error)</code>.
+      One method, one shape; everything else lives on the request
+      and response types.
+    </li>
+    <li>
+      <code>llmrouter.ChatRequest</code> — OpenAI-shaped request
+      body with a <code>Raw json.RawMessage</code> escape hatch for
+      byte passthrough.
+    </li>
+    <li>
+      <code>llmrouter.Message</code> with
+      <code>llmrouter.TextMessage</code> constructor; multimodal
+      content is sent via the raw <code>Content</code>
+      <code>json.RawMessage</code> field.
+    </li>
+    <li>
+      <code>llmrouter.Stream</code> handle with <code>Chunks()</code>
+      receive channel, <code>Err()</code> terminal error, and
+      <code>Cancel()</code> convenience cancel.
+    </li>
+    <li>
+      <code>llmrouter.Chunk</code> with normalised OpenAI-shaped
+      <code>Choices</code>, optional <code>Usage</code>, and a
+      <code>Raw json.RawMessage</code> with the original
+      wire-format event for byte-level passthrough.
+    </li>
+    <li>
+      Option pattern: <code>WithAPIKey</code>,
+      <code>WithBaseURL</code>, <code>WithHTTPClient</code>,
+      <code>WithTimeout</code>, <code>WithExtra</code>.
+    </li>
+    <li>
+      <code>llmrouter.ErrUpstream</code> error wrapping non-2xx
+      responses with <code>Provider</code>, <code>StatusCode</code>,
+      and the raw response <code>Body</code>.
+    </li>
+  </ul>
+
+  <h3>OpenAI provider</h3>
+  <ul>
+    <li>
+      Streaming chat completions against
+      <code>/v1/chat/completions</code> with SSE.
+    </li>
+    <li>
+      <code>WithBaseURL</code> override that turns the OpenAI
+      provider into a universal OpenAI-compatible client — works
+      out of the box with OpenRouter, Together, Groq, vLLM, Ollama,
+      LM Studio, and any other endpoint that speaks the OpenAI SSE
+      shape.
+    </li>
+    <li>
+      Byte passthrough on requests
+      (<code>ChatRequest.Raw</code>) and on chunks
+      (<code>Chunk.Raw</code>) so a proxy can forward bytes
+      unchanged.
+    </li>
+  </ul>
+
+  <h3>Anthropic provider</h3>
+  <ul>
+    <li>
+      Full <strong>request translation</strong>: OpenAI
+      <code>messages</code> array → Anthropic
+      <code>/v1/messages</code> body, including lifting the
+      <code>system</code> role into Anthropic&rsquo;s top-level
+      <code>system</code> field and translating the content block
+      shape.
+    </li>
+    <li>
+      Full <strong>SSE event translation</strong>: Anthropic&rsquo;s
+      <code>message_start</code>, <code>content_block_delta</code>,
+      <code>message_delta</code>, and <code>message_stop</code>
+      events → OpenAI-shaped delta <code>Chunk</code>s. Your
+      consumer loop sees the same structure regardless of which
+      provider is upstream.
+    </li>
+    <li>
+      <code>MaxTokens</code> is required on the request (Anthropic
+      rejects requests without it); see the
+      <a href="/llmrouter/docs/quickstart#anthropic">quickstart</a>
+      for the canonical example.
+    </li>
+  </ul>
+
+  <h3>Streaming semantics</h3>
+  <ul>
+    <li>
+      Producer goroutine pushes <code>Chunk</code> values into a
+      buffered channel; the single consumer reads with
+      <code>range stream.Chunks()</code> until close.
+    </li>
+    <li>
+      <code>context.Context</code> cancellation propagates from the
+      caller all the way to the in-flight HTTP request — cancelling
+      the context closes the upstream connection and unwinds the
+      producer.
+    </li>
+    <li>
+      <code>stream.Cancel()</code> is equivalent to cancelling the
+      context: safe to call multiple times, safe to call before or
+      after the consumer drains.
+    </li>
+    <li>
+      <code>stream.Err()</code> returns the terminal error after
+      the channel closes; blocks until the producer finishes;
+      returns <code>nil</code> on a clean stream.
+    </li>
+  </ul>
+
+  <h3>Known limitations</h3>
+  <p>
+    These are intentional and documented elsewhere; listed here so
+    early adopters know what to expect:
+  </p>
+  <ul>
+    <li>
+      No Azure / Bedrock / Vertex provider — planned for v0.2. See
+      <a href="/llmrouter/docs/project/roadmap#v0-2">roadmap</a>.
+    </li>
+    <li>
+      No typed tool-call surface yet — works today via
+      <code>Raw</code> passthrough; typed surface lands in v0.3.
+    </li>
+    <li>No embeddings API yet — v0.3.</li>
+    <li>No audio / vision API yet — v0.4.</li>
+    <li>Pre-1.0 — expect minor breakages between minor versions.</li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.1.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.1.0</a>
+  </p>
+
+  <h2 id="future-versions">Future versions</h2>
+  <p>
+    Future versions are appended at the top of this page as they
+    ship. The
+    <a href="/llmrouter/docs/project/roadmap">roadmap</a> describes
+    what is planned for v0.2, v0.3, v0.4, and v1.0.
+  </p>
+  <p>
+    For commit-by-commit detail and signed release artifacts, see
+    the full
+    <a href="https://github.com/elloloop/llmrouter/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>.
+  </p>
+</DocsLayout>

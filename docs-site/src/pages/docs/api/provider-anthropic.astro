@@ -1,0 +1,363 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package anthropic">
+  <h1>Package anthropic</h1>
+  <p>
+    The Anthropic provider. Accepts OpenAI-shaped requests
+    (<a href="/llmrouter/docs/api/llmrouter/#chatrequest"><code>llmrouter.ChatRequest</code></a>),
+    translates them to the Anthropic <code>/v1/messages</code> JSON
+    shape, then re-encodes Anthropic SSE events back as OpenAI-shaped
+    streaming chunks
+    (<a href="/llmrouter/docs/api/llmrouter/#chunk"><code>llmrouter.Chunk</code></a>).
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go"><code>providers/anthropic/anthropic.go</code></a>.
+  </p>
+
+  <p>
+    Import path:
+    <Code lang="go" code={`import "github.com/elloloop/llmrouter/providers/anthropic"`} />
+  </p>
+
+  <h2 id="constants">Constants</h2>
+  <Code lang="go" code={`const (
+    defaultBaseURL    = "https://api.anthropic.com/v1"
+    anthropicVersion  = "2023-06-01"
+    defaultMaxTokens  = 4096
+    scannerBufferSize = 1024 * 1024 // 1 MiB
+    providerName      = "anthropic"
+)`} />
+  <p>
+    All unexported. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go#L24">anthropic.go#L24</a>.
+  </p>
+  <dl>
+    <dt><code>defaultBaseURL</code></dt>
+    <dd>Used when <a href="/llmrouter/docs/api/options/#withbaseurl"><code>WithBaseURL</code></a> is not supplied.</dd>
+    <dt><code>anthropicVersion</code></dt>
+    <dd>Sent verbatim as the <code>anthropic-version</code> request header.</dd>
+    <dt><code>defaultMaxTokens</code></dt>
+    <dd>Used when <code>req.MaxTokens &lt;= 0</code>. Anthropic requires <code>max_tokens</code>, so this prevents 400 responses for callers who leave the field unset.</dd>
+    <dt><code>scannerBufferSize</code></dt>
+    <dd>1 MiB maximum SSE line length for <code>bufio.Scanner.Buffer</code>.</dd>
+  </dl>
+
+  <h2 id="provider">Provider</h2>
+  <p>
+    Talks to Anthropic <code>/v1/messages</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go#L33">anthropic.go#L33</a>.
+  </p>
+
+  <Code lang="go" code={`type Provider struct {
+    // unexported: cfg *llmrouter.Config
+}`} />
+
+  <h2 id="new">New</h2>
+  <Code lang="go" code={`func New(opts ...llmrouter.Option) (*Provider, error)`} />
+  <p>
+    Builds a Provider from llmrouter options. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go#L38">anthropic.go#L38</a>.
+  </p>
+  <p>Behavior:</p>
+  <ul>
+    <li>Calls <code>llmrouter.NewConfig(opts...)</code>; surfaces the first option error.</li>
+    <li><strong>Required:</strong> <a href="/llmrouter/docs/api/options/#withapikey"><code>WithAPIKey</code></a>. Returns <code>fmt.Errorf("%w: anthropic requires an api key", llmrouter.ErrInvalidConfig)</code> if missing.</li>
+    <li><strong>Default <code>BaseURL</code>:</strong> <code>https://api.anthropic.com/v1</code>.</li>
+  </ul>
+
+  <h4>Example</h4>
+  <Code lang="go" code={`p, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+if err != nil {
+    log.Fatal(err)
+}`} />
+
+  <h2 id="provider-name">Provider.Name</h2>
+  <Code lang="go" code={`func (p *Provider) Name() string`} />
+  <p>
+    Returns the literal string <code>"anthropic"</code>. Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go#L53">anthropic.go#L53</a>.
+  </p>
+
+  <h2 id="provider-completion-stream">Provider.CompletionStream</h2>
+  <Code lang="go" code={`func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error)`} />
+  <p>
+    Issues a streaming <code>/v1/messages</code> request and returns a
+    <code>*llmrouter.Stream</code> that yields OpenAI-shaped chunks.
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go#L57">anthropic.go#L57</a>.
+  </p>
+
+  <h3 id="request-translation">Request translation</h3>
+  <p>
+    Performed by <code>buildAnthropicBody</code>. The output is the
+    Anthropic <code>/v1/messages</code> JSON body.
+  </p>
+  <ul>
+    <li>
+      <strong>System lifting.</strong> Iterates <code>req.Messages</code>.
+      Any message with <code>Role == "system"</code> is removed from the
+      array and its
+      <a href="/llmrouter/docs/api/llmrouter/#message-plaintext"><code>PlainText()</code></a>
+      appended to a top-level <code>system</code> string (multiple
+      system messages are joined with <code>"\n\n"</code>). All other
+      messages are kept in order with <code>Role</code> and raw
+      <code>Content</code> bytes preserved.
+    </li>
+    <li>
+      <strong><code>max_tokens</code>.</strong> Uses
+      <code>req.MaxTokens</code> directly when positive; otherwise
+      defaults to <code>4096</code> (<code>defaultMaxTokens</code>).
+      Anthropic requires this field.
+    </li>
+    <li>
+      <strong><code>stream</code>.</strong> Always set to
+      <code>true</code>.
+    </li>
+    <li>
+      <strong><code>model</code>.</strong> Passed through from
+      <code>req.Model</code>.
+    </li>
+    <li>
+      <strong>Raw passthrough for tuning knobs.</strong> When
+      <code>req.Raw</code> is non-empty, it is unmarshaled into a
+      <code>map[string]json.RawMessage</code> and the keys
+      <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+      <code>stop</code> are lifted out. The <code>stop</code> key is
+      renamed to <code>stop_sequences</code> on the way through. (If
+      <code>req.Raw</code> is invalid JSON, the lift is silently
+      skipped.)
+    </li>
+    <li>
+      <strong>Typed fallback.</strong> When <code>req.Raw</code> is
+      empty, the typed fields are used instead:
+      <code>req.Temperature</code> (when non-nil),
+      <code>req.TopP</code> (when non-nil), <code>req.Stop</code>
+      (when non-empty, written as <code>stop_sequences</code>).
+    </li>
+  </ul>
+
+  <h3 id="http-call">HTTP call</h3>
+  <ul>
+    <li><strong>Method:</strong> <code>POST</code></li>
+    <li><strong>URL:</strong> <code>&lt;BaseURL&gt;/messages</code></li>
+    <li>
+      <strong>Headers:</strong>
+      <ul>
+        <li><code>Content-Type: application/json</code></li>
+        <li><code>Accept: text/event-stream</code></li>
+        <li><code>x-api-key: &lt;api-key&gt;</code></li>
+        <li><code>anthropic-version: 2023-06-01</code></li>
+      </ul>
+    </li>
+    <li>HTTP client is <code>p.cfg.HTTP()</code> (lazy default, 120 s timeout).</li>
+    <li>
+      Network errors are wrapped:
+      <code>fmt.Errorf("anthropic: http: %w", err)</code>.
+    </li>
+    <li>
+      On HTTP <code>&ge; 400</code>, reads <strong>up to 8 KiB</strong> of
+      the body verbatim (no whitespace trim), closes the response, and
+      returns a <code>*llmrouter.ErrUpstream</code> with
+      <code>Provider: "anthropic"</code>.
+    </li>
+  </ul>
+
+  <h3 id="sse-pump">SSE pump</h3>
+  <p>
+    On success, spawns <code>pump</code> in a goroutine and returns a
+    <code>*llmrouter.Stream</code> immediately. The pump:
+  </p>
+  <ul>
+    <li>
+      Generates a chat id once:
+      <code>chatID := "chatcmpl-" + uuid.NewString()</code>. This is
+      reused as <code>Chunk.ID</code> on every emitted chunk so
+      downstream consumers see a stable id across the whole stream.
+    </li>
+    <li>Captures <code>created := time.Now().Unix()</code> once.</li>
+    <li>Reads the response body line by line via <code>bufio.Scanner</code> (initial buffer 64 KiB, max 1 MiB).</li>
+    <li>
+      Tracks the current <code>event:</code> type and accumulates
+      <code>data:</code> lines. On a blank line, dispatches the
+      accumulated payload to <code>handleEvent</code>.
+    </li>
+    <li>
+      Before each scan iteration, checks <code>ctx.Err()</code> and
+      calls <code>hooks.Finish(ctx.Err())</code> on cancel.
+    </li>
+    <li>
+      On scanner error other than <code>io.EOF</code>, calls
+      <code>hooks.Finish(fmt.Errorf("anthropic: read stream: %w", err))</code>.
+    </li>
+    <li>On clean EOF without an explicit <code>message_stop</code>, calls <code>hooks.Finish(nil)</code>.</li>
+    <li>The response body is closed via <code>defer</code>.</li>
+  </ul>
+
+  <h3 id="event-handling">Event handling</h3>
+  <p>
+    Each event type is dispatched in <code>handleEvent</code>. Events
+    not listed below — <code>ping</code>, <code>content_block_start</code>,
+    <code>content_block_stop</code>, <code>thinking_delta</code>, and
+    anything unrecognised — are dropped silently. Malformed JSON on any
+    single event is tolerated and does not abort the stream.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Event</th>
+        <th>What gets emitted</th>
+        <th>Side effects</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>message_start</code></td>
+        <td>
+          A <strong>role primer</strong> chunk:
+          <code>{`Delta{Role: "assistant", Content: ""}`}</code>, no
+          finish reason.
+        </td>
+        <td>
+          Captures <code>message.usage.input_tokens</code> into
+          <code>state.inputTokens</code> if &gt; 0. Captures
+          <code>message.model</code> into <code>state.model</code> if
+          non-empty (overriding <code>req.Model</code> with the upstream's
+          canonical name).
+        </td>
+      </tr>
+      <tr>
+        <td><code>content_block_delta</code></td>
+        <td>
+          Only when <code>delta.type == "text_delta"</code> and
+          <code>delta.text != ""</code>: a content chunk with
+          <code>{`Delta{Content: delta.text}`}</code>. Other delta
+          types (e.g. tool input deltas) are dropped.
+        </td>
+        <td>None.</td>
+      </tr>
+      <tr>
+        <td><code>message_delta</code></td>
+        <td>
+          When <code>delta.stop_reason</code> is non-empty: a final
+          chunk with empty <code>Delta</code>, the mapped
+          <code>FinishReason</code>, and the accumulated
+          <code>Usage</code> attached. <code>Chunk.Raw</code> is
+          re-marshaled after attaching usage so it reflects the
+          published chunk.
+        </td>
+        <td>
+          Captures <code>usage.output_tokens</code> into
+          <code>state.outputTokens</code> if &gt; 0.
+        </td>
+      </tr>
+      <tr>
+        <td><code>message_stop</code></td>
+        <td>Nothing.</td>
+        <td>Sets <code>done = true</code>; the pump calls <code>hooks.Finish(nil)</code> and returns.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    All emitted chunks have:
+    <code>Object: "chat.completion.chunk"</code>,
+    <code>ID: chatID</code> (the per-stream UUID),
+    <code>Created: created</code>,
+    <code>Model: state.model</code>,
+    <code>Choices: [{`{Index: 0, Delta: ..., FinishReason: ...}`}]</code>,
+    and a pre-populated <code>Raw</code> field (the JSON marshaling of
+    the chunk itself).
+  </p>
+
+  <h3 id="stop-reason-mapping">Stop-reason mapping</h3>
+  <p>
+    Anthropic <code>stop_reason</code> &rarr; OpenAI
+    <code>finish_reason</code>:
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Anthropic <code>stop_reason</code></th>
+        <th>OpenAI <code>finish_reason</code></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>end_turn</code></td><td><code>stop</code></td></tr>
+      <tr><td><code>stop_sequence</code></td><td><code>stop</code></td></tr>
+      <tr><td><code>max_tokens</code></td><td><code>length</code></td></tr>
+      <tr><td><code>tool_use</code></td><td><code>tool_calls</code></td></tr>
+      <tr><td><em>anything else</em></td><td><code>stop</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="usage-accounting">Usage accounting</h3>
+  <p>
+    Anthropic reports <code>input_tokens</code> on
+    <code>message_start</code> and <code>output_tokens</code> on
+    <code>message_delta</code>. The provider accumulates both onto an
+    internal <code>pumpState</code> and emits them as
+    <a href="/llmrouter/docs/api/llmrouter/#usage"><code>Usage</code></a>
+    on the final chunk:
+  </p>
+  <Code lang="go" code={`Usage{
+    PromptTokens:     state.inputTokens,
+    CompletionTokens: state.outputTokens,
+    TotalTokens:      state.inputTokens + state.outputTokens,
+}`} />
+  <p>
+    If both are zero (no <code>message_start</code> ever seen,
+    Anthropic-compatible relay that strips usage, etc.),
+    <code>Chunk.Usage</code> is left nil rather than reporting a fake
+    zero.
+  </p>
+
+  <h4>Example: minimal completion</h4>
+  <Code lang="go" code={`p, err := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+if err != nil {
+    log.Fatal(err)
+}
+
+stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+    Model: "claude-3-5-sonnet-20241022",
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are a concise assistant."),
+        llmrouter.TextMessage("user", "What is the Liskov substitution principle?"),
+    },
+    MaxTokens: 500,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        fmt.Print(c.Delta.Content)
+    }
+    if chunk.Usage != nil {
+        fmt.Printf("\\n[usage] in=%d out=%d total=%d\\n",
+            chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
+    }
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}`} />
+
+  <h4>Example: lifting tuning knobs via raw</h4>
+  <Code lang="go" code={`raw := []byte(\`{
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "top_k": 40,
+    "stop": ["\\n\\nUser:"]
+}\`)
+
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:    "claude-3-5-sonnet-20241022",
+    Messages: []llmrouter.Message{llmrouter.TextMessage("user", "Tell me a joke.")},
+    Raw:      raw,
+})
+// buildAnthropicBody extracts temperature, top_p, top_k, and renames
+// stop -> stop_sequences in the outbound /v1/messages body.`} />
+</DocsLayout>

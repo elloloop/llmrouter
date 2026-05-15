@@ -1,0 +1,557 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Adding a New Provider">
+  <h1>Adding a New Provider</h1>
+  <p>
+    Every backend in llmrouter — OpenAI, Anthropic, the planned Azure /
+    Bedrock / Vertex implementations — is a small Go package that
+    implements one interface. If you need to target an upstream the
+    library doesn't ship with yet (or you want to fork the Anthropic
+    provider to fix one of its <a
+    href="/llmrouter/docs/providers/anthropic/#caveats">caveats</a>),
+    this page is the recipe.
+  </p>
+
+  <h2 id="contract">The contract</h2>
+  <p>
+    A provider is anything that satisfies
+    <a href="/llmrouter/docs/api/llmrouter/#provider"><code>llmrouter.Provider</code></a>:
+  </p>
+  <Code lang="go" code={`type Provider interface {
+    Name() string
+    CompletionStream(ctx context.Context, req ChatRequest) (*Stream, error)
+}`} />
+  <p>
+    <code>Name()</code> returns a stable string id (the same value used
+    in <code>ErrUpstream.Provider</code>) and
+    <code>CompletionStream</code> opens a streaming chat completion
+    that yields normalized <a
+    href="/llmrouter/docs/api/llmrouter/#chunk"><code>Chunk</code></a>
+    values until the upstream finishes, the context cancels, or an
+    error occurs.
+  </p>
+  <p>That's the whole surface. Everything else is convention.</p>
+
+  <h2 id="skeleton">Skeleton</h2>
+  <p>Start with this layout under <code>providers/myprovider/</code>:</p>
+  <Code lang="go" code={`// Package myprovider implements llmrouter.Provider for MyProvider.
+package myprovider
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/elloloop/llmrouter"
+)
+
+const defaultBaseURL = "https://api.myprovider.example/v1"
+
+// Provider implements llmrouter.Provider against MyProvider's wire format.
+type Provider struct {
+    cfg *llmrouter.Config
+}
+
+// New constructs a MyProvider client.
+func New(opts ...llmrouter.Option) (*Provider, error) {
+    cfg, err := llmrouter.NewConfig(opts...)
+    if err != nil {
+        return nil, err
+    }
+    if cfg.APIKey == "" {
+        return nil, fmt.Errorf("%w: myprovider requires an api key",
+            llmrouter.ErrInvalidConfig)
+    }
+    if cfg.BaseURL == "" {
+        cfg.BaseURL = defaultBaseURL
+    }
+    return &Provider{cfg: cfg}, nil
+}
+
+// Name returns the provider id.
+func (p *Provider) Name() string { return "myprovider" }
+
+// CompletionStream issues a streaming chat completion request.
+func (p *Provider) CompletionStream(
+    ctx context.Context, req llmrouter.ChatRequest,
+) (*llmrouter.Stream, error) {
+    // ... see "HTTP + streaming" below
+    return nil, nil
+}`} />
+
+  <h2 id="validation">Validation in <code>New</code></h2>
+  <p>Two rules every provider follows:</p>
+  <ul>
+    <li>
+      <strong>Build the <code>Config</code> via
+      <code>llmrouter.NewConfig(opts...)</code>.</strong> Don't
+      construct it by hand — the options validate things like
+      <code>WithAPIKey("")</code> being rejected, and the
+      <code>Timeout</code> default is set there.
+    </li>
+    <li>
+      <strong>Wrap config errors in
+      <code>llmrouter.ErrInvalidConfig</code>.</strong> Use
+      <code>fmt.Errorf("%w: ...", llmrouter.ErrInvalidConfig)</code>
+      so callers can use <code>errors.Is(err,
+      llmrouter.ErrInvalidConfig)</code>.
+    </li>
+  </ul>
+  <p>
+    Default the <code>BaseURL</code> only after validating the API key,
+    so the error from "missing API key" arrives even when no
+    <code>WithBaseURL</code> was passed.
+  </p>
+
+  <h2 id="http">HTTP client</h2>
+  <p>
+    Use <code>p.cfg.HTTP()</code> to get the HTTP client. It lazily
+    constructs an <code>http.Client</code> with the configured
+    <code>Timeout</code> if the caller didn't supply one via
+    <code>WithHTTPClient</code>. Don't construct your own —
+    <code>WithHTTPClient</code> is how callers inject retry middleware,
+    tracing, and custom transports, and bypassing
+    <code>p.cfg.HTTP()</code> breaks that.
+  </p>
+
+  <h2 id="stream-construction">Stream construction</h2>
+  <p>
+    A streaming completion fans out into two goroutines: the caller's
+    consumer drains the <code>chunks</code> channel, and your
+    provider's producer pushes chunks into it. The
+    <code>llmrouter</code> package provides the plumbing — you just
+    need to drive it.
+  </p>
+  <Code lang="go" code={`stream, sctx, hooks := llmrouter.NewStream(ctx)
+go p.pump(sctx, resp, hooks)
+return stream, nil`} />
+  <p>
+    <code>llmrouter.NewStream</code> returns three values: the
+    <code>*Stream</code> to hand back to the caller, a child
+    <code>context.Context</code> the producer must check for
+    cancellation, and a <code>ProducerHooks</code> struct with two
+    callbacks:
+  </p>
+  <ul>
+    <li>
+      <code>hooks.Send(chunk)</code> — delivers one chunk. Returns
+      <code>false</code> if the consumer cancelled; on
+      <code>false</code> the producer should stop and call
+      <code>hooks.Finish(sctx.Err())</code>.
+    </li>
+    <li>
+      <code>hooks.Finish(err)</code> — terminates the stream. Pass
+      <code>nil</code> on clean completion or an error on failure.
+      <strong>Must be called exactly once.</strong> The producer
+      goroutine should <code>defer</code> a single call (or use a
+      sentinel) to guarantee this.
+    </li>
+  </ul>
+  <p>Inside the pump goroutine, check <code>sctx.Done()</code> in your read loop:</p>
+  <Code lang="go" code={`func (p *Provider) pump(ctx context.Context, resp *http.Response, hooks llmrouter.ProducerHooks) {
+    defer resp.Body.Close()
+
+    scanner := bufio.NewScanner(resp.Body)
+    scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1 MiB max line
+
+    var dataLines []string
+    for scanner.Scan() {
+        select {
+        case <-ctx.Done():
+            hooks.Finish(ctx.Err())
+            return
+        default:
+        }
+
+        line := scanner.Text()
+        if line == "" {
+            // event boundary: parse and emit
+            if len(dataLines) == 0 {
+                continue
+            }
+            payload := strings.Join(dataLines, "\\n")
+            dataLines = dataLines[:0]
+
+            if payload == "[DONE]" {
+                hooks.Finish(nil)
+                return
+            }
+            chunk, ok := decodeChunk(payload)
+            if !ok {
+                continue // tolerate malformed payloads
+            }
+            if !hooks.Send(chunk) {
+                hooks.Finish(ctx.Err())
+                return
+            }
+            continue
+        }
+        switch {
+        case strings.HasPrefix(line, "data: "):
+            dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
+        case strings.HasPrefix(line, "data:"):
+            dataLines = append(dataLines, strings.TrimPrefix(line, "data:"))
+        }
+    }
+
+    if err := scanner.Err(); err != nil && err != io.EOF {
+        hooks.Finish(fmt.Errorf("myprovider: read stream: %w", err))
+        return
+    }
+    hooks.Finish(nil)
+}`} />
+  <p>
+    The 1 MiB scanner buffer is the convention both shipping providers
+    use; an SSE payload over 1 MiB is almost always pathological.
+  </p>
+
+  <h2 id="sse">SSE parsing rules</h2>
+  <p>The Server-Sent Events grammar the providers care about:</p>
+  <ul>
+    <li>
+      Lines starting with <code>data:</code> are payload. Leading
+      space after the colon is optional in the spec; strip both
+      <code>"data: "</code> and <code>"data:"</code>.
+    </li>
+    <li>
+      Multi-line data: each <code>data:</code> line is one payload
+      line, joined with <code>{`"\\n"`}</code> when the event
+      terminates.
+    </li>
+    <li>
+      An <strong>empty line</strong> terminates an event — that's when
+      you parse and emit.
+    </li>
+    <li>
+      Lines starting with <code>event:</code> set the event type
+      (Anthropic uses this; OpenAI does not).
+    </li>
+    <li>
+      Lines starting with <code>:</code> are comments — heartbeats from
+      the server. Ignore them.
+    </li>
+    <li>
+      <code>data: [DONE]</code> terminates OpenAI-shaped streams.
+      Translating providers (like Anthropic) use a typed event
+      (<code>message_stop</code>) instead.
+    </li>
+  </ul>
+
+  <h2 id="chunk-normalization">Chunk normalization</h2>
+  <p>Each emitted <code>llmrouter.Chunk</code> should have:</p>
+  <ul>
+    <li>
+      <code>ID</code> — a stable id for the whole stream. OpenAI
+      passes the upstream's id through; Anthropic generates one
+      (<code>chatcmpl-{`<uuid>`}</code>) per stream and reuses it.
+    </li>
+    <li>
+      <code>Object</code> — always <code>"chat.completion.chunk"</code>
+      for streaming. Hard-code it.
+    </li>
+    <li>
+      <code>Created</code> — Unix timestamp captured once at stream
+      start (Anthropic) or copied from the upstream chunk (OpenAI).
+    </li>
+    <li>
+      <code>Model</code> — the model id, ideally from the upstream's
+      reply since some upstreams normalize it (e.g.
+      <code>claude-3-5-sonnet-latest</code> → a concrete dated id).
+    </li>
+    <li>
+      <code>Choices</code> — at least one <code>Choice</code> for any
+      chunk carrying a delta. The first chunk of a stream should set
+      <code>Delta.Role = "assistant"</code>; subsequent chunks set
+      <code>Delta.Content</code>; the final chunk sets
+      <code>FinishReason</code>.
+    </li>
+    <li>
+      <code>Usage</code> — populated on the final chunk if the
+      upstream reports it. Leave <code>nil</code> on intermediate
+      chunks.
+    </li>
+    <li>
+      <strong><code>Raw</code> — always populate.</strong> Set
+      <code>Chunk.Raw</code> to the original wire bytes of the chunk
+      (or, for translating providers, the bytes of the OpenAI-shaped
+      chunk after re-marshaling). Gateway / proxy use cases depend on
+      this. Treat the <code>Raw</code> contract as part of the
+      provider's API.
+    </li>
+  </ul>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx HTTP responses become
+    <a href="/llmrouter/docs/api/llmrouter/#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with the provider's name, the status code, and a snippet of the
+    response body:
+  </p>
+  <Code lang="go" code={`if resp.StatusCode >= 400 {
+    defer resp.Body.Close()
+    body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+    return nil, &llmrouter.ErrUpstream{
+        Provider:   p.Name(),
+        StatusCode: resp.StatusCode,
+        Body:       strings.TrimSpace(string(body)),
+    }
+}`} />
+  <p>
+    Cap the body read so a misbehaving upstream can't OOM your process.
+    The OpenAI provider caps at 1 KiB; Anthropic at 8 KiB. Pick what
+    matches your upstream's typical error envelope size.
+  </p>
+  <p>
+    Errors that occur <em>during</em> streaming (IO error,
+    unparseable framing, malformed JSON the consumer needs to know
+    about) flow through <code>hooks.Finish(err)</code>, surfacing on
+    <code>Stream.Err()</code> after the chunks channel closes. Errors
+    that occur <em>before</em> the stream starts (HTTP 4xx/5xx, network
+    refused) return directly from <code>CompletionStream</code>.
+  </p>
+
+  <h2 id="full-skeleton">Putting it together</h2>
+  <p>The full <code>CompletionStream</code>:</p>
+  <Code lang="go" code={`func (p *Provider) CompletionStream(
+    ctx context.Context, req llmrouter.ChatRequest,
+) (*llmrouter.Stream, error) {
+    body, err := buildRequestBody(req)
+    if err != nil {
+        return nil, fmt.Errorf("myprovider: build request: %w", err)
+    }
+
+    hreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+        p.cfg.BaseURL+"/chat/completions", bytes.NewReader(body))
+    if err != nil {
+        return nil, err
+    }
+    hreq.Header.Set("Content-Type", "application/json")
+    hreq.Header.Set("Accept", "text/event-stream")
+    hreq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+
+    resp, err := p.cfg.HTTP().Do(hreq)
+    if err != nil {
+        return nil, fmt.Errorf("myprovider: http: %w", err)
+    }
+    if resp.StatusCode >= 400 {
+        defer resp.Body.Close()
+        body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+        return nil, &llmrouter.ErrUpstream{
+            Provider:   p.Name(),
+            StatusCode: resp.StatusCode,
+            Body:       strings.TrimSpace(string(body)),
+        }
+    }
+
+    stream, sctx, hooks := llmrouter.NewStream(ctx)
+    go p.pump(sctx, resp, hooks)
+    return stream, nil
+}`} />
+
+  <h2 id="testing">Testing</h2>
+  <p>
+    The pattern both shipping providers use:
+    <code>httptest.NewServer</code> with a handler that emits a fixed
+    SSE script, point the provider at the test server's URL via
+    <code>WithBaseURL</code>, drain the stream, assert on
+    <code>chunk.Choices[0].Delta.Content</code>, the final
+    <code>FinishReason</code>, and <code>Stream.Err() == nil</code>.
+  </p>
+  <Code lang="go" code={`package myprovider_test
+
+import (
+    "context"
+    "fmt"
+    "io"
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "testing"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/myprovider"
+)
+
+const sseScript = ` + "`" + `data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"}}]}
+
+data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" world"}}]}
+
+data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}
+
+data: [DONE]
+
+` + "`" + `
+
+func TestCompletionStream(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        io.WriteString(w, sseScript)
+    }))
+    t.Cleanup(srv.Close)
+
+    p, err := myprovider.New(
+        llmrouter.WithAPIKey("test-key"),
+        llmrouter.WithBaseURL(srv.URL),
+    )
+    if err != nil {
+        t.Fatalf("New: %v", err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model: "test-model",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "hi"),
+        },
+    })
+    if err != nil {
+        t.Fatalf("CompletionStream: %v", err)
+    }
+
+    var (
+        body   strings.Builder
+        finish string
+        usage  *llmrouter.Usage
+        count  int
+    )
+    for chunk := range stream.Chunks() {
+        count++
+        for _, c := range chunk.Choices {
+            body.WriteString(c.Delta.Content)
+            if c.FinishReason != "" {
+                finish = c.FinishReason
+            }
+        }
+        if chunk.Usage != nil {
+            usage = chunk.Usage
+        }
+    }
+    if err := stream.Err(); err != nil {
+        t.Fatalf("Stream.Err: %v", err)
+    }
+
+    if got, want := body.String(), "Hello world"; got != want {
+        t.Errorf("body = %q, want %q", got, want)
+    }
+    if finish != "stop" {
+        t.Errorf("finish_reason = %q, want %q", finish, "stop")
+    }
+    if usage == nil || usage.TotalTokens != 6 {
+        t.Errorf("usage = %+v, want total=6", usage)
+    }
+    if count < 4 {
+        t.Errorf("got %d chunks, want >= 4", count)
+    }
+    fmt.Println("ok")
+}`} />
+  <p>
+    Add cases for: upstream 4xx returning <code>ErrUpstream</code>;
+    context cancellation closing the chunks channel cleanly;
+    malformed-payload tolerance (a bad chunk in the middle of a good
+    stream shouldn't abort the whole stream).
+  </p>
+
+  <h2 id="v02">The v0.2 candidates</h2>
+  <p>Three cloud-vendor providers are on the v0.2 roadmap:</p>
+  <ul>
+    <li>
+      <strong>Azure OpenAI Service</strong> — deployment-scoped URL of
+      the form <code>https://{`{resource}`}.openai.azure.com/openai/deployments/{`{deployment}`}/chat/completions</code>
+      with an <code>api-key</code> header (not bearer) and an
+      <code>api-version</code> query parameter passed via
+      <code>WithExtra("api-version", "2024-10-21")</code>. Request
+      and response shapes are OpenAI's, so this is closer to a fork of
+      the OpenAI provider than a fresh implementation. Upstream docs:
+      <a href="https://learn.microsoft.com/azure/ai-services/openai/reference">Azure
+      OpenAI reference</a>.
+    </li>
+    <li>
+      <strong>AWS Bedrock</strong> — SigV4-signed requests to
+      <code>https://bedrock-runtime.{`{region}`}.amazonaws.com/model/{`{model-id}`}/invoke-with-response-stream</code>
+      with per-model-family body shapes (Anthropic on Bedrock uses
+      Anthropic's body; Cohere uses Cohere's; Meta Llama uses its
+      own). The provider negotiates the body shape from the model id
+      and streams Bedrock's event-stream framing (binary, not SSE)
+      into OpenAI-shaped chunks. Upstream docs:
+      <a href="https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModelWithResponseStream.html">InvokeModelWithResponseStream</a>.
+    </li>
+    <li>
+      <strong>Google Vertex AI</strong> — Application Default
+      Credentials for auth (<code>google.golang.org/api/option</code>)
+      with <code>WithExtra("project", ...)</code> and
+      <code>WithExtra("region", ...)</code>. Targets the
+      <code>streamGenerateContent</code> endpoint for Gemini and the
+      partner-model passthrough endpoints for Anthropic / Meta on
+      Vertex. Upstream docs:
+      <a href="https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference">Vertex
+      AI inference</a>.
+    </li>
+  </ul>
+  <p>
+    If you're interested in contributing one of these, file an issue
+    on <a href="https://github.com/elloloop/llmrouter">elloloop/llmrouter</a>
+    first so we can align on the shape before you spend a weekend on
+    it.
+  </p>
+
+  <h2 id="pr-checklist">PR checklist</h2>
+  <p>
+    A new provider PR should land with the following (CONTRIBUTING.md
+    expands on each — that file is in flight, this list is the
+    summary):
+  </p>
+  <ul>
+    <li>
+      Provider lives at <code>providers/{`<name>`}/</code> with the
+      same file layout as the existing two
+      (<code>{`<name>`}.go</code> + <code>{`<name>`}_test.go</code>).
+    </li>
+    <li>
+      <code>New</code> calls <code>llmrouter.NewConfig</code>, requires
+      an API key (or documents why it doesn't), defaults the base
+      URL, and wraps config errors in
+      <code>llmrouter.ErrInvalidConfig</code>.
+    </li>
+    <li>
+      <code>Name()</code> returns a stable lowercase id used in
+      <code>ErrUpstream.Provider</code>.
+    </li>
+    <li>
+      <code>CompletionStream</code> returns
+      <code>*llmrouter.ErrUpstream</code> for non-2xx, drives a
+      goroutine via <code>llmrouter.NewStream</code>, calls
+      <code>hooks.Finish</code> exactly once, and respects
+      <code>sctx.Done()</code> in its read loop.
+    </li>
+    <li>
+      Every emitted <code>Chunk</code> populates <code>Raw</code>.
+      Either the original upstream bytes (passthrough providers) or
+      the re-marshaled OpenAI-shape bytes (translating providers).
+    </li>
+    <li>
+      Tests cover: happy path, upstream 4xx → <code>ErrUpstream</code>,
+      context cancellation, malformed payload tolerance, final
+      <code>Usage</code> when the upstream reports it.
+    </li>
+    <li>
+      <code>go vet ./...</code> clean, <code>golangci-lint run</code>
+      clean, <code>go test ./...</code> passing.
+    </li>
+    <li>
+      A docs page under
+      <code>docs-site/src/pages/docs/providers/{`<name>`}.astro</code>
+      following the structure of the OpenAI and Anthropic pages.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/openai/">OpenAI provider</a> — reference implementation of a passthrough provider.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic/">Anthropic provider</a> — reference implementation of a translating provider.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming">Streaming model</a> — the <code>Stream</code> + <code>ProducerHooks</code> contract.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter/">API reference</a> — every exported type and option.</li>
+  </ul>
+</DocsLayout>
