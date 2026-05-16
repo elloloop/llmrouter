@@ -57,9 +57,27 @@ type ChatRequest struct {
 	Stop        []string        `json:"stop,omitempty"`
 	User        string          `json:"user,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
-	Tools       []Tool          `json:"tools,omitempty"`
-	ToolChoice  *ToolChoice     `json:"tool_choice,omitempty"`
-	Raw         json.RawMessage `json:"-"`
+
+	// ResponseSchema asks the model to produce output that strictly matches
+	// a JSON Schema. OpenAI maps to response_format={"type":"json_schema",
+	// "json_schema":{...}}. Anthropic translates to forced tool-use with a
+	// synthetic tool matching the schema. Providers that don't support
+	// schema-coerced output ignore this field.
+	ResponseSchema *ResponseSchema `json:"response_schema,omitempty"`
+
+	Tools      []Tool          `json:"tools,omitempty"`
+	ToolChoice *ToolChoice     `json:"tool_choice,omitempty"`
+	Raw        json.RawMessage `json:"-"`
+}
+
+// ResponseSchema constrains the model's output to a JSON Schema. The
+// Name is sent to providers that require a schema identifier (OpenAI);
+// providers that don't need it ignore it.
+type ResponseSchema struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Strict      bool            `json:"strict,omitempty"`
+	Schema      json.RawMessage `json:"schema"`
 }
 
 // Tool describes a callable function/tool. OpenAI-shaped (the Anthropic

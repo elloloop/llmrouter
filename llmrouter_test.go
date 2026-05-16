@@ -2,6 +2,7 @@ package llmrouter_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -961,6 +962,210 @@ func TestMessage_OmitemptyForToolFields(t *testing.T) {
 				t.Errorf("name should be omitted: %s", s)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResponseSchema (structured output)
+// ---------------------------------------------------------------------------
+
+func TestResponseSchema_MarshalAllFields(t *testing.T) {
+	rs := llmrouter.ResponseSchema{
+		Name:        "user_profile",
+		Description: "extract a user profile",
+		Strict:      true,
+		Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}}}`),
+	}
+	b, err := json.Marshal(rs)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		`"name":"user_profile"`,
+		`"description":"extract a user profile"`,
+		`"strict":true`,
+		`"schema":{"type":"object"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("want %q in %s", want, s)
+		}
+	}
+}
+
+func TestResponseSchema_OmitsZeroOptionalFields(t *testing.T) {
+	rs := llmrouter.ResponseSchema{
+		Name:   "x",
+		Schema: json.RawMessage(`{}`),
+	}
+	b, _ := json.Marshal(rs)
+	s := string(b)
+	if strings.Contains(s, "description") {
+		t.Errorf("empty Description should be omitted: %s", s)
+	}
+	if strings.Contains(s, "strict") {
+		t.Errorf("Strict=false should be omitted: %s", s)
+	}
+}
+
+func TestResponseSchema_NameAlwaysSerialised(t *testing.T) {
+	cases := []string{"x", "user_profile", "Schema-1", ""}
+	for _, n := range cases {
+		t.Run("name="+n, func(t *testing.T) {
+			rs := llmrouter.ResponseSchema{Name: n, Schema: json.RawMessage(`{}`)}
+			b, _ := json.Marshal(rs)
+			if !strings.Contains(string(b), `"name":`) {
+				t.Fatalf("name field always present, got: %s", b)
+			}
+		})
+	}
+}
+
+func TestResponseSchema_SchemaAlwaysSerialised(t *testing.T) {
+	// Schema has no omitempty — it's required.
+	rs := llmrouter.ResponseSchema{Name: "x", Schema: json.RawMessage(`{"type":"string"}`)}
+	b, _ := json.Marshal(rs)
+	if !strings.Contains(string(b), `"schema":{"type":"string"}`) {
+		t.Fatalf("schema missing: %s", b)
+	}
+}
+
+func TestResponseSchema_StrictTrueIncluded(t *testing.T) {
+	rs := llmrouter.ResponseSchema{Name: "x", Strict: true, Schema: json.RawMessage(`{}`)}
+	b, _ := json.Marshal(rs)
+	if !strings.Contains(string(b), `"strict":true`) {
+		t.Fatalf("strict=true missing: %s", b)
+	}
+}
+
+func TestResponseSchema_DescriptionIncluded(t *testing.T) {
+	cases := []string{"a", "Extract a user profile from text", "héllo"}
+	for _, d := range cases {
+		t.Run(d, func(t *testing.T) {
+			rs := llmrouter.ResponseSchema{
+				Name: "x", Description: d, Schema: json.RawMessage(`{}`),
+			}
+			b, _ := json.Marshal(rs)
+			var round llmrouter.ResponseSchema
+			if err := json.Unmarshal(b, &round); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if round.Description != d {
+				t.Fatalf("Description round-trip: %q vs %q", round.Description, d)
+			}
+		})
+	}
+}
+
+func TestChatRequest_ResponseSchemaOmittedWhenNil(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+	}
+	b, _ := json.Marshal(req)
+	if strings.Contains(string(b), "response_schema") {
+		t.Fatalf("nil ResponseSchema should be omitted: %s", b)
+	}
+}
+
+func TestChatRequest_ResponseSchemaMarshaled(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+		ResponseSchema: &llmrouter.ResponseSchema{
+			Name:   "result",
+			Strict: true,
+			Schema: json.RawMessage(`{"type":"object","required":["a","b"],"properties":{"a":{"type":"string"},"b":{"type":"integer"}}}`),
+		},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `"response_schema":`) {
+		t.Errorf("response_schema missing: %s", s)
+	}
+	if !strings.Contains(s, `"name":"result"`) {
+		t.Errorf("schema name missing: %s", s)
+	}
+	if !strings.Contains(s, `"strict":true`) {
+		t.Errorf("strict missing: %s", s)
+	}
+	if !strings.Contains(s, `"required":["a","b"]`) {
+		t.Errorf("schema body missing: %s", s)
+	}
+}
+
+func TestResponseSchema_ComplexSchemaRoundTrip(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type":"object",
+		"required":["name","age","tags"],
+		"properties":{
+			"name":{"type":"string"},
+			"age":{"type":"integer","minimum":0},
+			"tags":{"type":"array","items":{"type":"string"}},
+			"address":{
+				"type":"object",
+				"properties":{
+					"city":{"type":"string"},
+					"zip":{"type":"string"}
+				}
+			}
+		}
+	}`)
+	orig := llmrouter.ResponseSchema{
+		Name:        "person",
+		Description: "a person record",
+		Strict:      true,
+		Schema:      schema,
+	}
+	b, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var round llmrouter.ResponseSchema
+	if err := json.Unmarshal(b, &round); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if round.Name != orig.Name || round.Description != orig.Description || round.Strict != orig.Strict {
+		t.Fatalf("scalar fields mismatch: %+v vs %+v", round, orig)
+	}
+	// Schema is json.RawMessage — compare via re-decode to ignore whitespace.
+	var a, b2 any
+	if err := json.Unmarshal(round.Schema, &a); err != nil {
+		t.Fatalf("decode round schema: %v", err)
+	}
+	if err := json.Unmarshal(orig.Schema, &b2); err != nil {
+		t.Fatalf("decode orig schema: %v", err)
+	}
+	if !reflect.DeepEqual(a, b2) {
+		t.Fatalf("schema body mismatch: %v vs %v", a, b2)
+	}
+}
+
+func TestChatRequest_ResponseSchemaRoundTrip(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+		ResponseSchema: &llmrouter.ResponseSchema{
+			Name:   "x",
+			Schema: json.RawMessage(`{"type":"string"}`),
+		},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var round llmrouter.ChatRequest
+	if err := json.Unmarshal(b, &round); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if round.ResponseSchema == nil {
+		t.Fatal("ResponseSchema nil after round-trip")
+	}
+	if round.ResponseSchema.Name != "x" {
+		t.Errorf("Name mismatch: %q", round.ResponseSchema.Name)
 	}
 }
 

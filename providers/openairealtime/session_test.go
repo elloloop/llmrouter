@@ -779,6 +779,509 @@ func TestSessionConfig_RawMergesAndOverrides(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Tools + ToolChoice on session.update
+// ---------------------------------------------------------------------------
+
+func TestSessionConfig_ToolsEmittedAsFlatArray(t *testing.T) {
+	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+		Tools: []llmrouter.Tool{
+			{
+				Type: "function",
+				Function: llmrouter.ToolFunction{
+					Name:        "get_weather",
+					Description: "Get weather",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		_ = sess.Close()
+		<-done
+	}()
+
+	frames := waitForFrames(t, cap, 1, 2*time.Second)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(frames[0]), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	inner, _ := env["session"].(map[string]any)
+	tools, ok := inner["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools missing or wrong type: %v", inner["tools"])
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+	tool0, _ := tools[0].(map[string]any)
+	if tool0["type"] != "function" {
+		t.Errorf("tools[0].type = %v, want function", tool0["type"])
+	}
+	if tool0["name"] != "get_weather" {
+		t.Errorf("tools[0].name = %v, want get_weather", tool0["name"])
+	}
+	if tool0["description"] != "Get weather" {
+		t.Errorf("tools[0].description = %v", tool0["description"])
+	}
+	if _, present := tool0["function"]; present {
+		t.Errorf("tools[0] must be flat — no nested 'function' wrapper; got %v", tool0)
+	}
+	params, _ := tool0["parameters"].(map[string]any)
+	if params["type"] != "object" {
+		t.Errorf("tools[0].parameters not nested object: %v", tool0["parameters"])
+	}
+}
+
+func TestSessionConfig_ToolsOmittedWhenEmpty(t *testing.T) {
+	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		_ = sess.Close()
+		<-done
+	}()
+
+	frames := waitForFrames(t, cap, 1, 2*time.Second)
+	var env map[string]any
+	_ = json.Unmarshal([]byte(frames[0]), &env)
+	inner, _ := env["session"].(map[string]any)
+	if _, present := inner["tools"]; present {
+		t.Errorf("tools should be omitted when none: %v", inner["tools"])
+	}
+	if _, present := inner["tool_choice"]; present {
+		t.Errorf("tool_choice should be omitted when nil: %v", inner["tool_choice"])
+	}
+}
+
+func TestSessionConfig_MultipleToolsFlattened(t *testing.T) {
+	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+		Tools: []llmrouter.Tool{
+			{Type: "function", Function: llmrouter.ToolFunction{Name: "a"}},
+			{Type: "function", Function: llmrouter.ToolFunction{Name: "b"}},
+			{Type: "function", Function: llmrouter.ToolFunction{Name: "c"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		_ = sess.Close()
+		<-done
+	}()
+
+	frames := waitForFrames(t, cap, 1, 2*time.Second)
+	var env map[string]any
+	_ = json.Unmarshal([]byte(frames[0]), &env)
+	inner, _ := env["session"].(map[string]any)
+	tools, _ := inner["tools"].([]any)
+	if len(tools) != 3 {
+		t.Fatalf("tools len = %d, want 3", len(tools))
+	}
+	for i, want := range []string{"a", "b", "c"} {
+		ti, _ := tools[i].(map[string]any)
+		if ti["name"] != want {
+			t.Errorf("tools[%d].name = %v, want %v", i, ti["name"], want)
+		}
+	}
+}
+
+func TestSessionConfig_ToolDescriptionAndParamsOmitemptyHonoured(t *testing.T) {
+	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+		Tools: []llmrouter.Tool{
+			{Type: "function", Function: llmrouter.ToolFunction{Name: "ping"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		_ = sess.Close()
+		<-done
+	}()
+
+	frames := waitForFrames(t, cap, 1, 2*time.Second)
+	if strings.Contains(frames[0], `"description"`) {
+		t.Errorf("description should be omitted when empty: %s", frames[0])
+	}
+	if strings.Contains(frames[0], `"parameters"`) {
+		t.Errorf("parameters should be omitted when nil: %s", frames[0])
+	}
+}
+
+func TestSessionConfig_ToolChoiceAutoMarshals(t *testing.T) {
+	cases := []struct {
+		name string
+		tc   *llmrouter.ToolChoice
+		want string
+	}{
+		{"auto", &llmrouter.ToolChoice{Mode: "auto"}, `"tool_choice":"auto"`},
+		{"none", &llmrouter.ToolChoice{Mode: "none"}, `"tool_choice":"none"`},
+		{"required", &llmrouter.ToolChoice{Mode: "required"}, `"tool_choice":"required"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+				Tools: []llmrouter.Tool{
+					{Type: "function", Function: llmrouter.ToolFunction{Name: "f"}},
+				},
+				ToolChoice: tc.tc,
+			})
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			defer func() {
+				_ = sess.Close()
+				<-done
+			}()
+
+			frames := waitForFrames(t, cap, 1, 2*time.Second)
+			if !strings.Contains(frames[0], tc.want) {
+				t.Fatalf("want %q in frame: %s", tc.want, frames[0])
+			}
+		})
+	}
+}
+
+func TestSessionConfig_ToolChoiceSpecificMarshals(t *testing.T) {
+	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+		Tools: []llmrouter.Tool{
+			{Type: "function", Function: llmrouter.ToolFunction{Name: "get_weather"}},
+		},
+		ToolChoice: &llmrouter.ToolChoice{Mode: "specific", Function: "get_weather"},
+	})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		_ = sess.Close()
+		<-done
+	}()
+
+	frames := waitForFrames(t, cap, 1, 2*time.Second)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(frames[0]), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	inner, _ := env["session"].(map[string]any)
+	tc, ok := inner["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice not an object: %v", inner["tool_choice"])
+	}
+	if tc["type"] != "function" {
+		t.Errorf("tool_choice.type = %v, want function", tc["type"])
+	}
+	fn, _ := tc["function"].(map[string]any)
+	if fn["name"] != "get_weather" {
+		t.Errorf("tool_choice.function.name = %v, want get_weather", fn["name"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// translateFrame for tool-call streaming
+// ---------------------------------------------------------------------------
+
+func TestPump_TranslatesFunctionCallArgumentsDelta(t *testing.T) {
+	script := []scriptedFrame{
+		{payload: `{"type":"response.function_call_arguments.delta","response_id":"resp_1","call_id":"call_abc","name":"get_weather","delta":"{\"loc"}`},
+		{payload: `{"type":"response.function_call_arguments.delta","response_id":"resp_1","call_id":"call_abc","name":"get_weather","delta":"\":\"NYC"}`},
+	}
+	p, _, _, done := newFakeServer(t, serverOpts{}, script)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	events := drainEvents(t, sess, 3*time.Second)
+	<-done
+
+	var deltaCount int
+	var assembled strings.Builder
+	for _, ev := range events {
+		if ev.Type == "response.function_call_arguments.delta" {
+			deltaCount++
+			if ev.ToolCallID != "call_abc" {
+				t.Errorf("ToolCallID = %q, want call_abc", ev.ToolCallID)
+			}
+			if ev.ToolName != "get_weather" {
+				t.Errorf("ToolName = %q, want get_weather", ev.ToolName)
+			}
+			if ev.ResponseID != "resp_1" {
+				t.Errorf("ResponseID = %q, want resp_1", ev.ResponseID)
+			}
+			assembled.WriteString(ev.ToolArgumentsDelta)
+			if ev.ToolArguments != "" {
+				t.Errorf("ToolArguments should be empty on delta event: %q", ev.ToolArguments)
+			}
+			if len(ev.Raw) == 0 {
+				t.Error("Raw missing on delta event")
+			}
+		}
+	}
+	if deltaCount != 2 {
+		t.Errorf("delta count = %d, want 2", deltaCount)
+	}
+	if assembled.String() != `{"loc":"NYC` {
+		t.Errorf("assembled args = %q, want %q", assembled.String(), `{"loc":"NYC`)
+	}
+}
+
+func TestPump_TranslatesFunctionCallArgumentsDone(t *testing.T) {
+	script := []scriptedFrame{
+		{payload: `{"type":"response.function_call_arguments.done","response_id":"resp_1","call_id":"call_xyz","name":"get_time","arguments":"{\"tz\":\"UTC\"}"}`},
+	}
+	p, _, _, done := newFakeServer(t, serverOpts{}, script)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	events := drainEvents(t, sess, 3*time.Second)
+	<-done
+
+	var found bool
+	for _, ev := range events {
+		if ev.Type == "response.function_call_arguments.done" {
+			found = true
+			if ev.ToolCallID != "call_xyz" {
+				t.Errorf("ToolCallID = %q, want call_xyz", ev.ToolCallID)
+			}
+			if ev.ToolName != "get_time" {
+				t.Errorf("ToolName = %q, want get_time", ev.ToolName)
+			}
+			if ev.ToolArguments != `{"tz":"UTC"}` {
+				t.Errorf("ToolArguments = %q", ev.ToolArguments)
+			}
+			if ev.ToolArgumentsDelta != "" {
+				t.Errorf("ToolArgumentsDelta should be empty on done event: %q", ev.ToolArgumentsDelta)
+			}
+			if ev.ResponseID != "resp_1" {
+				t.Errorf("ResponseID = %q, want resp_1", ev.ResponseID)
+			}
+			if len(ev.Raw) == 0 {
+				t.Error("Raw missing on done event")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("done event not delivered")
+	}
+}
+
+func TestPump_FunctionCallEventTypePassesThrough(t *testing.T) {
+	// Confirm the Type string is preserved verbatim so consumers can
+	// switch on the upstream event name.
+	script := []scriptedFrame{
+		{payload: `{"type":"response.function_call_arguments.delta","call_id":"c1","delta":"x"}`},
+		{payload: `{"type":"response.function_call_arguments.done","call_id":"c1","arguments":"x"}`},
+	}
+	p, _, _, done := newFakeServer(t, serverOpts{}, script)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	events := drainEvents(t, sess, 3*time.Second)
+	<-done
+
+	gotTypes := map[string]bool{}
+	for _, ev := range events {
+		gotTypes[ev.Type] = true
+	}
+	for _, want := range []string{
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+	} {
+		if !gotTypes[want] {
+			t.Errorf("missing %q in delivered types: %v", want, gotTypes)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendToolResult
+// ---------------------------------------------------------------------------
+
+func TestSendToolResult_EmitsItemThenResponseCreate(t *testing.T) {
+	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		_ = sess.Close()
+		<-done
+	}()
+
+	if err := sess.SendToolResult(ctx, "call_abc", `{"weather":"sunny"}`); err != nil {
+		t.Fatalf("SendToolResult: %v", err)
+	}
+
+	// 3 frames: session.update + conversation.item.create + response.create
+	frames := waitForFrames(t, cap, 3, 2*time.Second)
+	if len(frames) < 3 {
+		t.Fatalf("expected 3 frames, got %d: %v", len(frames), frames)
+	}
+
+	var second, third map[string]any
+	if err := json.Unmarshal([]byte(frames[1]), &second); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	if err := json.Unmarshal([]byte(frames[2]), &third); err != nil {
+		t.Fatalf("decode third: %v", err)
+	}
+	if second["type"] != "conversation.item.create" {
+		t.Errorf("second frame type = %v, want conversation.item.create", second["type"])
+	}
+	if third["type"] != "response.create" {
+		t.Errorf("third frame type = %v, want response.create", third["type"])
+	}
+
+	item, _ := second["item"].(map[string]any)
+	if item["type"] != "function_call_output" {
+		t.Errorf("item.type = %v, want function_call_output", item["type"])
+	}
+	if item["call_id"] != "call_abc" {
+		t.Errorf("item.call_id = %v, want call_abc", item["call_id"])
+	}
+	if item["output"] != `{"weather":"sunny"}` {
+		t.Errorf("item.output = %v", item["output"])
+	}
+	// Role and content should NOT be present on function_call_output items.
+	if _, present := item["role"]; present {
+		t.Errorf("item.role must be omitted on function_call_output: %v", item["role"])
+	}
+	if _, present := item["content"]; present {
+		t.Errorf("item.content must be omitted on function_call_output: %v", item["content"])
+	}
+}
+
+func TestPump_FunctionCallArgumentsDoneEmptyArgs(t *testing.T) {
+	// A done event with empty arguments string is valid — the model
+	// declared an arg-less tool call.
+	script := []scriptedFrame{
+		{payload: `{"type":"response.function_call_arguments.done","call_id":"c1","name":"ping","arguments":""}`},
+	}
+	p, _, _, done := newFakeServer(t, serverOpts{}, script)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	events := drainEvents(t, sess, 3*time.Second)
+	<-done
+
+	var found bool
+	for _, ev := range events {
+		if ev.Type == "response.function_call_arguments.done" {
+			found = true
+			if ev.ToolCallID != "c1" {
+				t.Errorf("ToolCallID = %q", ev.ToolCallID)
+			}
+			if ev.ToolName != "ping" {
+				t.Errorf("ToolName = %q", ev.ToolName)
+			}
+			if ev.ToolArguments != "" {
+				t.Errorf("ToolArguments should be empty: %q", ev.ToolArguments)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("done event not delivered")
+	}
+}
+
+func TestSendToolResult_VariedPayloads(t *testing.T) {
+	cases := []struct {
+		name       string
+		toolCallID string
+		output     string
+	}{
+		{"empty-output", "call_1", ""},
+		{"json-output", "call_2", `{"ok":true}`},
+		{"plain-text", "call_3", "sunny"},
+		{"unicode", "call_4", "結果: ok"},
+		{"long-id", "call_" + strings.Repeat("x", 100), "ok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			sess, err := p.Connect(ctx, openairealtime.SessionConfig{})
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			defer func() {
+				_ = sess.Close()
+				<-done
+			}()
+
+			if err := sess.SendToolResult(ctx, tc.toolCallID, tc.output); err != nil {
+				t.Fatalf("SendToolResult: %v", err)
+			}
+
+			frames := waitForFrames(t, cap, 3, 2*time.Second)
+			var second map[string]any
+			_ = json.Unmarshal([]byte(frames[1]), &second)
+			item, _ := second["item"].(map[string]any)
+			if item["call_id"] != tc.toolCallID {
+				t.Errorf("call_id = %v, want %v", item["call_id"], tc.toolCallID)
+			}
+			// Empty output should be omitted by the omitempty tag.
+			if tc.output == "" {
+				if _, present := item["output"]; present {
+					t.Errorf("empty output should be omitted; got %v", item["output"])
+				}
+			} else {
+				if item["output"] != tc.output {
+					t.Errorf("output = %v, want %v", item["output"], tc.output)
+				}
+			}
+		})
+	}
+}
+
 func TestSessionConfig_DefaultsModalitiesOmitted(t *testing.T) {
 	p, cap, _, done := newFakeServer(t, serverOpts{holdOpen: true}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

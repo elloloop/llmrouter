@@ -60,6 +60,13 @@ type SessionConfig struct {
 	// Forwarded only when non-nil.
 	Temperature *float64
 
+	// Tools advertised to the model for function calling. Mirror the
+	// root llmrouter.Tool shape. Realtime sessions support tool calls.
+	Tools []llmrouter.Tool
+
+	// ToolChoice constrains tool selection (auto/none/required/specific).
+	ToolChoice *llmrouter.ToolChoice
+
 	// Raw, when non-empty, is merged into the session.update payload
 	// AFTER the typed fields. Use it for forward-compat fields the
 	// typed API does not yet expose (e.g. turn_detection,
@@ -92,6 +99,20 @@ type SessionEvent struct {
 	// Error is populated when Type == "error". The session terminates
 	// shortly after this event is delivered.
 	Error *llmrouter.ErrUpstream
+
+	// ToolCallID is set on response.function_call_arguments.* events.
+	ToolCallID string
+
+	// ToolName is set on response.function_call_arguments.* events.
+	ToolName string
+
+	// ToolArgumentsDelta is the streaming JSON fragment on
+	// response.function_call_arguments.delta.
+	ToolArgumentsDelta string
+
+	// ToolArguments is the final complete arguments JSON on
+	// response.function_call_arguments.done.
+	ToolArguments string
 
 	// Raw is the original upstream JSON frame, untouched.
 	Raw json.RawMessage
@@ -192,6 +213,24 @@ func (s *Session) Commit(ctx context.Context) error {
 // Commit to drive audio-in / audio-out turns; SendText already emits
 // this implicitly.
 func (s *Session) CreateResponse(ctx context.Context) error {
+	return s.writeJSON(ctx, simpleEvent{Type: "response.create"})
+}
+
+// SendToolResult delivers a function-call result back to the model.
+// Pair toolCallID with the call_id from a prior
+// response.function_call_arguments.done event.
+func (s *Session) SendToolResult(ctx context.Context, toolCallID, output string) error {
+	item := conversationItemCreate{
+		Type: "conversation.item.create",
+		Item: conversationItem{
+			Type:   "function_call_output",
+			CallID: toolCallID,
+			Output: output,
+		},
+	}
+	if err := s.writeJSON(ctx, item); err != nil {
+		return err
+	}
 	return s.writeJSON(ctx, simpleEvent{Type: "response.create"})
 }
 
@@ -361,8 +400,10 @@ type conversationItemCreate struct {
 // conversationItem describes a single conversation entry.
 type conversationItem struct {
 	Type    string                `json:"type"`
-	Role    string                `json:"role"`
-	Content []conversationContent `json:"content"`
+	Role    string                `json:"role,omitempty"`
+	Content []conversationContent `json:"content,omitempty"`
+	CallID  string                `json:"call_id,omitempty"`
+	Output  string                `json:"output,omitempty"`
 }
 
 // conversationContent is one content fragment within an item.
@@ -380,12 +421,23 @@ type sessionUpdateEnvelope struct {
 
 // sessionPayload is the inner "session" object of session.update.
 type sessionPayload struct {
-	Modalities        []string `json:"modalities,omitempty"`
-	Voice             string   `json:"voice,omitempty"`
-	Instructions      string   `json:"instructions,omitempty"`
-	InputAudioFormat  string   `json:"input_audio_format,omitempty"`
-	OutputAudioFormat string   `json:"output_audio_format,omitempty"`
-	Temperature       *float64 `json:"temperature,omitempty"`
+	Modalities        []string             `json:"modalities,omitempty"`
+	Voice             string               `json:"voice,omitempty"`
+	Instructions      string               `json:"instructions,omitempty"`
+	InputAudioFormat  string               `json:"input_audio_format,omitempty"`
+	OutputAudioFormat string               `json:"output_audio_format,omitempty"`
+	Temperature       *float64             `json:"temperature,omitempty"`
+	Tools             []realtimeTool       `json:"tools,omitempty"`
+	ToolChoice        *llmrouter.ToolChoice `json:"tool_choice,omitempty"`
+}
+
+// realtimeTool is the flat tool descriptor the Realtime API expects:
+// {type, name, description, parameters} — no nested "function" wrapper.
+type realtimeTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // serverFrame is the minimum shape needed to dispatch inbound events.
@@ -395,6 +447,9 @@ type serverFrame struct {
 	Type       string          `json:"type"`
 	Delta      string          `json:"delta"`
 	ResponseID string          `json:"response_id"`
+	CallID     string          `json:"call_id"`
+	Name       string          `json:"name"`
+	Arguments  string          `json:"arguments"`
 	Error      *serverErrField `json:"error"`
 }
 
@@ -421,6 +476,8 @@ func buildSessionUpdate(cfg SessionConfig) ([]byte, error) {
 			InputAudioFormat:  cfg.InputAudioFormat,
 			OutputAudioFormat: cfg.OutputAudioFormat,
 			Temperature:       cfg.Temperature,
+			Tools:             flattenTools(cfg.Tools),
+			ToolChoice:        cfg.ToolChoice,
 		},
 	}
 	if len(cfg.Raw) == 0 {
@@ -456,6 +513,25 @@ func buildSessionUpdate(cfg SessionConfig) ([]byte, error) {
 		return nil, fmt.Errorf("openairealtime: marshal merged session.update: %w", err)
 	}
 	return buf, nil
+}
+
+// flattenTools converts root llmrouter.Tool values into the flat
+// {type, name, description, parameters} shape the Realtime API expects.
+// Returns nil when tools is empty so the caller's omitempty kicks in.
+func flattenTools(tools []llmrouter.Tool) []realtimeTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]realtimeTool, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, realtimeTool{
+			Type:        t.Type,
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  t.Function.Parameters,
+		})
+	}
+	return out
 }
 
 // buildRealtimeURL composes the wss:// URL for the /realtime endpoint
@@ -557,6 +633,26 @@ func translateFrame(data []byte) (SessionEvent, bool, error) {
 			Type:       frame.Type,
 			ResponseID: frame.ResponseID,
 			Raw:        rawCopy,
+		}, false, nil
+
+	case "response.function_call_arguments.delta":
+		return SessionEvent{
+			Type:               frame.Type,
+			ResponseID:         frame.ResponseID,
+			ToolCallID:         frame.CallID,
+			ToolName:           frame.Name,
+			ToolArgumentsDelta: frame.Delta,
+			Raw:                rawCopy,
+		}, false, nil
+
+	case "response.function_call_arguments.done":
+		return SessionEvent{
+			Type:          frame.Type,
+			ResponseID:    frame.ResponseID,
+			ToolCallID:    frame.CallID,
+			ToolName:      frame.Name,
+			ToolArguments: frame.Arguments,
+			Raw:           rawCopy,
 		}, false, nil
 
 	case "error":
