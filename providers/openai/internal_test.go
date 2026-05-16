@@ -1146,3 +1146,116 @@ func TestDecodeChunk_ToolCalls_FinishReasonToolCalls(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// buildRequestBody — tool result messages (typed path)
+// ---------------------------------------------------------------------------
+
+func TestBuildRequestBody_ToolResultMessageEmitsToolCallID(t *testing.T) {
+	cases := []struct {
+		name       string
+		toolCallID string
+		content    string
+	}{
+		{"basic", "call_abc", `{"weather":"sunny"}`},
+		{"empty-content", "call_empty", ""},
+		{"unicode-content", "call_u", "結果: ok"},
+		{"long-id", "call_long_" + strings.Repeat("z", 64), "ok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := llmrouter.ChatRequest{
+				Model: "gpt-4o-mini",
+				Messages: []llmrouter.Message{
+					llmrouter.TextMessage("user", "what's the weather?"),
+					llmrouter.ToolResultMessage(tc.toolCallID, tc.content),
+				},
+			}
+			b, err := buildRequestBody(req)
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			var body struct {
+				Messages []struct {
+					Role       string `json:"role"`
+					Content    string `json:"content"`
+					ToolCallID string `json:"tool_call_id"`
+					Name       string `json:"name"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(b, &body); err != nil {
+				t.Fatalf("invalid json: %v\nbody=%s", err, b)
+			}
+			if len(body.Messages) != 2 {
+				t.Fatalf("messages len = %d, want 2", len(body.Messages))
+			}
+			toolMsg := body.Messages[1]
+			if toolMsg.Role != "tool" {
+				t.Errorf("Role = %q, want tool", toolMsg.Role)
+			}
+			if toolMsg.ToolCallID != tc.toolCallID {
+				t.Errorf("ToolCallID = %q, want %q", toolMsg.ToolCallID, tc.toolCallID)
+			}
+			if toolMsg.Content != tc.content {
+				t.Errorf("Content = %q, want %q", toolMsg.Content, tc.content)
+			}
+			if toolMsg.Name != "" {
+				t.Errorf("Name should be empty, got %q", toolMsg.Name)
+			}
+		})
+	}
+}
+
+func TestBuildRequestBody_NonToolMessageOmitsToolCallID(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("user", "hi"),
+			llmrouter.TextMessage("assistant", "hello"),
+		},
+	}
+	b, err := buildRequestBody(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(string(b), "tool_call_id") {
+		t.Errorf("non-tool messages should not emit tool_call_id: %s", b)
+	}
+}
+
+func TestBuildRequestBody_MixedToolAndTextMessages(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("system", "be precise"),
+			llmrouter.TextMessage("user", "weather?"),
+			llmrouter.ToolResultMessage("call_1", "sunny"),
+			llmrouter.ToolResultMessage("call_2", "75F"),
+		},
+	}
+	b, err := buildRequestBody(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	var body struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(body.Messages) != 4 {
+		t.Fatalf("len = %d, want 4", len(body.Messages))
+	}
+	if body.Messages[2].ToolCallID != "call_1" {
+		t.Errorf("msg[2].ToolCallID = %q", body.Messages[2].ToolCallID)
+	}
+	if body.Messages[3].ToolCallID != "call_2" {
+		t.Errorf("msg[3].ToolCallID = %q", body.Messages[3].ToolCallID)
+	}
+	if body.Messages[0].ToolCallID != "" || body.Messages[1].ToolCallID != "" {
+		t.Errorf("non-tool messages leaked tool_call_id")
+	}
+}
+

@@ -897,3 +897,97 @@ func TestMultipartMessage_UnknownPartTypeSkipped(t *testing.T) {
 		t.Errorf("kept block missing: %+v", blocks[0])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ToolResultMessage
+// ---------------------------------------------------------------------------
+
+func TestToolResultMessage_Constructs(t *testing.T) {
+	cases := []struct {
+		name       string
+		toolCallID string
+		content    string
+	}{
+		{"basic", "call_abc", "sunny"},
+		{"json-content", "call_1", `{"weather":"sunny"}`},
+		{"empty-content", "call_2", ""},
+		{"unicode", "call_unicode", "結果: ok"},
+		{"long-id", "call_" + strings.Repeat("x", 200), "ok"},
+		{"with-quotes", "call_q", `she said "hi"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := llmrouter.ToolResultMessage(tc.toolCallID, tc.content)
+			if m.Role != "tool" {
+				t.Errorf("Role = %q, want tool", m.Role)
+			}
+			if m.ToolCallID != tc.toolCallID {
+				t.Errorf("ToolCallID = %q, want %q", m.ToolCallID, tc.toolCallID)
+			}
+			var got string
+			if err := json.Unmarshal(m.Content, &got); err != nil {
+				t.Fatalf("content not a JSON string: %v (raw=%s)", err, string(m.Content))
+			}
+			if got != tc.content {
+				t.Errorf("content mismatch: got=%q want=%q", got, tc.content)
+			}
+			if m.Name != "" {
+				t.Errorf("Name should be empty, got %q", m.Name)
+			}
+		})
+	}
+}
+
+func TestMessage_OmitemptyForToolFields(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  llmrouter.Message
+	}{
+		{"text-message", llmrouter.TextMessage("user", "hi")},
+		{"assistant-empty", llmrouter.TextMessage("assistant", "")},
+		{"system-message", llmrouter.TextMessage("system", "be terse")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.msg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(b)
+			if strings.Contains(s, "tool_call_id") {
+				t.Errorf("tool_call_id should be omitted: %s", s)
+			}
+			if strings.Contains(s, `"name"`) {
+				t.Errorf("name should be omitted: %s", s)
+			}
+		})
+	}
+}
+
+func TestMessage_WithToolCallID_Marshals(t *testing.T) {
+	cases := []struct {
+		name       string
+		toolCallID string
+		content    string
+		wantSub    string
+	}{
+		{"basic", "call_abc", "sunny", `"tool_call_id":"call_abc"`},
+		{"numeric-id", "12345", "ok", `"tool_call_id":"12345"`},
+		{"hyphenated", "call-id-1", "ok", `"tool_call_id":"call-id-1"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := llmrouter.ToolResultMessage(tc.toolCallID, tc.content)
+			b, err := json.Marshal(m)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(b), tc.wantSub) {
+				t.Errorf("missing %q in %s", tc.wantSub, b)
+			}
+			if !strings.Contains(string(b), `"role":"tool"`) {
+				t.Errorf("missing role=tool in %s", b)
+			}
+		})
+	}
+}

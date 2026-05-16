@@ -626,3 +626,217 @@ func boolStr(b bool) string {
 	}
 	return "false"
 }
+
+// ---------------------------------------------------------------------------
+// buildAnthropicBody — tool result translation
+// ---------------------------------------------------------------------------
+
+func TestBuildAnthropicBody_ToolResultTranslation(t *testing.T) {
+	cases := []struct {
+		name       string
+		toolCallID string
+		content    string
+	}{
+		{"basic", "toolu_abc", "sunny"},
+		{"json-content", "toolu_1", `{"temp":75}`},
+		{"empty-content", "toolu_empty", ""},
+		{"unicode", "toolu_u", "結果 ✓"},
+		{"long-id", "toolu_" + strings.Repeat("z", 100), "ok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := llmrouter.ChatRequest{
+				Model: "claude-3-5-sonnet-20241022",
+				Messages: []llmrouter.Message{
+					llmrouter.TextMessage("user", "weather?"),
+					llmrouter.ToolResultMessage(tc.toolCallID, tc.content),
+				},
+			}
+			b, err := buildAnthropicBody(req)
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			var body struct {
+				Messages []struct {
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(b, &body); err != nil {
+				t.Fatalf("invalid json: %v\nbody=%s", err, b)
+			}
+			if len(body.Messages) != 2 {
+				t.Fatalf("messages len = %d, want 2", len(body.Messages))
+			}
+			toolMsg := body.Messages[1]
+			if toolMsg.Role != "user" {
+				t.Errorf("Role = %q, want user", toolMsg.Role)
+			}
+			var blocks []json.RawMessage
+			if err := json.Unmarshal(toolMsg.Content, &blocks); err != nil {
+				t.Fatalf("blocks parse: %v", err)
+			}
+			if len(blocks) != 1 {
+				t.Fatalf("blocks = %d, want 1", len(blocks))
+			}
+			var block struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+				Content   string `json:"content"`
+			}
+			if err := json.Unmarshal(blocks[0], &block); err != nil {
+				t.Fatalf("block parse: %v", err)
+			}
+			if block.Type != "tool_result" {
+				t.Errorf("Type = %q, want tool_result", block.Type)
+			}
+			if block.ToolUseID != tc.toolCallID {
+				t.Errorf("ToolUseID = %q, want %q", block.ToolUseID, tc.toolCallID)
+			}
+			if block.Content != tc.content {
+				t.Errorf("Content = %q, want %q", block.Content, tc.content)
+			}
+		})
+	}
+}
+
+func TestBuildAnthropicBody_MultipleToolResults(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model: "claude-3-5-sonnet-20241022",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("user", "info?"),
+			llmrouter.ToolResultMessage("toolu_a", "first"),
+			llmrouter.ToolResultMessage("toolu_b", "second"),
+		},
+	}
+	b, err := buildAnthropicBody(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	var body struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(body.Messages) != 3 {
+		t.Fatalf("messages len = %d, want 3", len(body.Messages))
+	}
+	for i, want := range []string{"toolu_a", "toolu_b"} {
+		var blocks []json.RawMessage
+		if err := json.Unmarshal(body.Messages[i+1].Content, &blocks); err != nil {
+			t.Fatalf("msg %d blocks parse: %v", i+1, err)
+		}
+		var block struct {
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if err := json.Unmarshal(blocks[0], &block); err != nil {
+			t.Fatalf("block %d parse: %v", i, err)
+		}
+		if block.ToolUseID != want {
+			t.Errorf("msg %d tool_use_id = %q, want %q", i+1, block.ToolUseID, want)
+		}
+		if body.Messages[i+1].Role != "user" {
+			t.Errorf("msg %d role = %q, want user", i+1, body.Messages[i+1].Role)
+		}
+	}
+}
+
+func TestBuildAnthropicBody_ToolResultDoesNotLeakIntoSystem(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model: "claude-3-5-sonnet-20241022",
+		Messages: []llmrouter.Message{
+			llmrouter.TextMessage("system", "be terse"),
+			llmrouter.TextMessage("user", "?"),
+			llmrouter.ToolResultMessage("toolu_x", "answer-text"),
+		},
+	}
+	b, err := buildAnthropicBody(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	var body struct {
+		System   string `json:"system"`
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if body.System != "be terse" {
+		t.Errorf("system = %q, want 'be terse'", body.System)
+	}
+	if strings.Contains(string(b), "answer-text") == false {
+		t.Errorf("tool result content missing from body: %s", b)
+	}
+	if len(body.Messages) != 2 {
+		t.Fatalf("messages len = %d, want 2 (user + tool-as-user)", len(body.Messages))
+	}
+	for _, m := range body.Messages {
+		if m.Role == "tool" {
+			t.Errorf("anthropic body should never contain role=tool: %s", b)
+		}
+	}
+}
+
+func TestBuildAnthropicBody_ToolResult_PlainTextLiftedFromMultipart(t *testing.T) {
+	// Even when content arrives as a JSON string (the constructor path),
+	// PlainText must extract it correctly into the Anthropic block.
+	m := llmrouter.ToolResultMessage("toolu_p", "lifted-text")
+	req := llmrouter.ChatRequest{
+		Model:    "claude-3-5-sonnet-20241022",
+		Messages: []llmrouter.Message{m},
+	}
+	b, err := buildAnthropicBody(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(string(b), `"content":"lifted-text"`) {
+		t.Errorf("content not lifted via PlainText: %s", b)
+	}
+	if !strings.Contains(string(b), `"tool_use_id":"toolu_p"`) {
+		t.Errorf("tool_use_id missing: %s", b)
+	}
+	if !strings.Contains(string(b), `"type":"tool_result"`) {
+		t.Errorf("type missing: %s", b)
+	}
+}
+
+func TestBuildAnthropicBody_ToolResult_BlockShapeExact(t *testing.T) {
+	req := llmrouter.ChatRequest{
+		Model: "claude-3-5-sonnet-20241022",
+		Messages: []llmrouter.Message{
+			llmrouter.ToolResultMessage("toolu_exact", "data"),
+		},
+	}
+	b, err := buildAnthropicBody(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	var body struct {
+		Messages []struct {
+			Role    string                   `json:"role"`
+			Content []map[string]interface{} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	block := body.Messages[0].Content[0]
+	// Block must have exactly: type, tool_use_id, content.
+	wantKeys := map[string]bool{"type": true, "tool_use_id": true, "content": true}
+	for k := range block {
+		if !wantKeys[k] {
+			t.Errorf("unexpected key in block: %q", k)
+		}
+	}
+	for k := range wantKeys {
+		if _, ok := block[k]; !ok {
+			t.Errorf("missing key in block: %q", k)
+		}
+	}
+}

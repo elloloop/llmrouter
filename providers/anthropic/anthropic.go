@@ -99,6 +99,17 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 	var system string
 	msgs := make([]anMsg, 0, len(req.Messages))
 	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			// Translate to Anthropic tool_result block on a user message.
+			block := map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": m.ToolCallID,
+				"content":     m.PlainText(),
+			}
+			raw, _ := json.Marshal([]any{block})
+			msgs = append(msgs, anMsg{Role: "user", Content: raw})
+			continue
+		}
 		if m.Role == "system" {
 			if system != "" {
 				system += "\n\n"

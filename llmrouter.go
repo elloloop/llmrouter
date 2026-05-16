@@ -101,15 +101,37 @@ func (tc ToolChoice) MarshalJSON() ([]byte, error) {
 
 // Message is one item in a chat completion request. Content is
 // json.RawMessage so multimodal content arrays pass through unchanged.
+//
+// ToolCallID is set on Messages with Role == "tool" to correlate the
+// result back to the model's earlier tool_call (OpenAI semantics).
+// Anthropic uses tool_use_id in its content-block shape; the anthropic
+// provider translates ToolCallID -> tool_use_id.
+//
+// Name is the OpenAI legacy "function name on tool result" field; it is
+// preserved as a passthrough for callers that still set it.
 type Message struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
 }
 
 // TextMessage is a convenience constructor for plain-text messages.
 func TextMessage(role, text string) Message {
 	b, _ := json.Marshal(text)
 	return Message{Role: role, Content: b}
+}
+
+// ToolResultMessage builds a "tool" role message carrying the result of
+// a previous tool call. content is the tool's textual output; toolCallID
+// must match the model's earlier tool_call id.
+func ToolResultMessage(toolCallID, content string) Message {
+	b, _ := json.Marshal(content)
+	return Message{
+		Role:       "tool",
+		Content:    b,
+		ToolCallID: toolCallID,
+	}
 }
 
 // PlainText extracts text from a Message. For multimodal content arrays
