@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0](https://github.com/elloloop/llmrouter/compare/v0.3.0...v0.4.0) (2026-05-16)
+
+
+### Features
+
+* **anthropic:** NewRecommendedEmbedder — Voyage AI shim for Claude users ([7b3519b](https://github.com/elloloop/llmrouter/commit/7b3519bedadba457cbbedecde85e16cd793b08d2))
+* **cartesia:** SpeakRealtime — WebSocket TTS with multi-turn context ([e087263](https://github.com/elloloop/llmrouter/commit/e087263f83099ed48784d55e0ed135696959d170))
+* **deepgram:** WebSocket streaming STT via wss://api.deepgram.com/v1/listen ([3ef9c6d](https://github.com/elloloop/llmrouter/commit/3ef9c6db80e5558f61585a14ed532a918acdf9c5))
+* **elevenlabs:** SpeakRealtime — WebSocket TTS via /stream-input ([1928f78](https://github.com/elloloop/llmrouter/commit/1928f789fd30cbd59dd7e91edaf8ed3abaf32f29))
+* **openairealtime:** OpenAI Realtime API (gpt-4o-realtime, WebSocket) ([425b42a](https://github.com/elloloop/llmrouter/commit/425b42a7b2c3d72d294d7fc22574cbad88f4f102))
+* typed tool-result message (Message.ToolCallID + ToolResultMessage helper) ([0594af0](https://github.com/elloloop/llmrouter/commit/0594af0d1cd9d7389bf4657e34e13908057db7aa))
+
+
+### Bug Fixes
+
+* drop unused struct fields flagged by staticcheck ([331c0eb](https://github.com/elloloop/llmrouter/commit/331c0eb0dd0b4e589ae42e5b8e732cd0f9e11e2f))
+
 ## [0.3.0](https://github.com/elloloop/llmrouter/compare/v0.2.0...v0.3.0) (2026-05-15)
 
 
