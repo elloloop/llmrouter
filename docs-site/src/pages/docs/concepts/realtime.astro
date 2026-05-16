@@ -1,0 +1,320 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Realtime sessions">
+  <h1>Realtime sessions</h1>
+  <p>
+    Realtime is a different mode of interaction from chat, TTS, or
+    STT in isolation. The conversation runs over a long-lived
+    bidirectional connection, both sides emit events asynchronously,
+    and the user expectation is sub-second latency — the latency
+    budget for a voice-agent turn (user stops speaking → assistant
+    starts speaking) is around 800 ms end-to-end. v0.4 models this
+    with three distinct patterns, each suited to a different vendor
+    surface.
+  </p>
+
+  <h2 id="why">Why realtime is its own thing</h2>
+  <p>
+    Compare the three interaction shapes:
+  </p>
+  <ul>
+    <li>
+      <strong>Chat</strong> — request in, stream of token deltas
+      out, channel closes. One-shot.
+    </li>
+    <li>
+      <strong>TTS</strong> — text in, stream of audio bytes out.
+      One-shot, even when "streaming."
+    </li>
+    <li>
+      <strong>STT</strong> — audio in, transcript segments out.
+      One-shot for batch, but the live variant is genuinely
+      duplex.
+    </li>
+    <li>
+      <strong>Realtime</strong> — open a session, send and receive
+      audio and text continuously, change configuration mid-flight,
+      close when done. The conversation is the unit, not a single
+      request.
+    </li>
+  </ul>
+  <p>
+    The first three fit cleanly into a request → stream-of-results
+    shape (<code>CompletionStream</code>, <code>Speak</code>,
+    <code>Transcribe</code>). Realtime does not — it needs a
+    long-lived handle with multiple send methods, a single
+    receive channel, and explicit lifecycle. That's what
+    <code>Session</code> on
+    <a href="/llmrouter/docs/providers/openai-realtime">openairealtime</a>
+    is.
+  </p>
+
+  <h2 id="landscape">The provider landscape in v0.4</h2>
+  <p>
+    Realtime is fragmented across vendors. Each does a different
+    subset of full-duplex:
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Vendor</th>
+          <th class="text-left p-3 border-b border-border">What's realtime</th>
+          <th class="text-left p-3 border-b border-border">Transport</th>
+          <th class="text-left p-3 border-b border-border">llmrouter surface</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>OpenAI Realtime</strong></td>
+          <td class="p-3 border-b border-border">Full duplex: audio + text in and out</td>
+          <td class="p-3 border-b border-border">WebSocket</td>
+          <td class="p-3 border-b border-border"><code>openairealtime.Session</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Deepgram</strong></td>
+          <td class="p-3 border-b border-border">STT only: live transcription</td>
+          <td class="p-3 border-b border-border">WebSocket</td>
+          <td class="p-3 border-b border-border"><code>Transcribe</code> with <code>Stream=true</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Cartesia</strong></td>
+          <td class="p-3 border-b border-border">TTS only: multi-turn context append</td>
+          <td class="p-3 border-b border-border">WebSocket</td>
+          <td class="p-3 border-b border-border"><code>SpeakRealtime</code> + <code>RealtimeContext</code></td>
+        </tr>
+        <tr>
+          <td class="p-3"><strong>ElevenLabs</strong></td>
+          <td class="p-3">TTS only: multi-turn context append</td>
+          <td class="p-3">WebSocket</td>
+          <td class="p-3"><code>SpeakRealtime</code> + <code>RealtimeContext</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The library models this as three patterns, not one. A single
+    "Realtime" interface that tried to cover all of these would be
+    so loose it would be useless — the semantics of "stream me a
+    transcript" are nothing like "stream me audio while I append
+    text" which are nothing like "let me talk to a model."
+  </p>
+
+  <h2 id="patterns">The three patterns</h2>
+
+  <h3 id="pattern-stt">1. STT streaming — already in <code>Transcribe</code></h3>
+  <p>
+    <code>Transcriber.Transcribe</code> with
+    <code>TranscribeRequest.Stream = true</code> opens a WebSocket
+    to the provider, pumps your audio in, and emits interim and
+    final <code>TranscriptSegment</code>s as the vendor returns
+    them. The interface is the same one that handles batch
+    transcription — only the wire transport changes.
+  </p>
+  <Code lang="go" code={`p, _ := deepgram.New(llmrouter.WithAPIKey(os.Getenv("DEEPGRAM_API_KEY")))
+
+stream, err := p.Transcribe(ctx, llmrouter.TranscribeRequest{
+    Model:       "nova-3",
+    Audio:       micReader,         // io.Reader fed by your mic capture
+    AudioFormat: "audio/wav",
+    Language:    "en-US",
+    Stream:      true,              // <-- WebSocket path
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for seg := range stream.Segments() {
+    if seg.Final {
+        log.Printf("FINAL: %s", seg.Text)
+    } else {
+        log.Printf("interim: %s", seg.Text)
+    }
+}`} />
+  <p>
+    This pattern works because STT is naturally one-directional:
+    audio in, text out. The library only needs a single
+    receive channel.
+  </p>
+
+  <h3 id="pattern-tts-context">2. TTS realtime context — <code>SpeakRealtime</code></h3>
+  <p>
+    Cartesia and ElevenLabs both expose a WebSocket TTS surface where
+    you can incrementally <em>append text</em> to a running
+    synthesis without restarting it. This matters for voice agents:
+    once the LLM emits its first sentence, you can start speaking it
+    while the rest is still being generated. The audio stream stays
+    coherent across appends — prosody and timing carry over.
+  </p>
+  <p>
+    The library returns two handles from
+    <code>SpeakRealtime</code>: an <code>*AudioStream</code> for
+    the bytes coming back, and a <code>*RealtimeContext</code> for
+    the text going out.
+  </p>
+  <Code lang="go" code={`p, _ := cartesia.New(llmrouter.WithAPIKey(os.Getenv("CARTESIA_API_KEY")))
+
+stream, rtc, err := p.SpeakRealtime(ctx, llmrouter.SpeechRequest{
+    Model:  "sonic-2",
+    Voice:  "d46abd1d-2d02-43e8-819f-51fb652c1c61",
+    Format: "pcm",
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer rtc.Close()
+
+// Producer: as the LLM emits sentence-shaped chunks, append them.
+go func() {
+    for sentence := range llmSentences {
+        if err := rtc.Append(sentence); err != nil {
+            log.Printf("append: %v", err)
+            return
+        }
+    }
+    rtc.Finalize() // tell the server "no more text coming"
+}()
+
+// Consumer: play audio as it arrives.
+for chunk := range stream.Chunks() {
+    speaker.Play(chunk.Data)
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    The signature is provider-specific because the semantics differ
+    per vendor — Cartesia and ElevenLabs both support text-append,
+    but their flush, finalize, and reconnect semantics are not
+    identical. The library does not try to hide those — it gives
+    each provider the same method name and the same handle shape,
+    and documents the vendor-specific bits on each provider page.
+  </p>
+
+  <h3 id="pattern-full-duplex">3. Full-duplex Realtime — <code>openairealtime.Session</code></h3>
+  <p>
+    OpenAI's Realtime API is its own thing: a model that takes
+    audio (or text), generates audio (or text), and runs as a
+    long-lived session with mid-flight config changes. It does not
+    fit any of the other interfaces, so it lives in its own
+    package with its own surface.
+  </p>
+  <Code lang="go" code={`p, _ := openairealtime.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+
+sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+    Model:             "gpt-4o-realtime-preview",
+    Voice:             "alloy",
+    Instructions:      "You are a friendly assistant.",
+    InputAudioFormat:  "pcm16",
+    OutputAudioFormat: "pcm16",
+    Modalities:        []string{"audio", "text"},
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer sess.Close()
+
+// Pump mic in.
+go func() {
+    for frame := range mic.Frames() {
+        sess.SendAudio(frame)
+    }
+}()
+
+// Consume server events.
+for ev := range sess.Events() {
+    switch ev.Type {
+    case "response.audio.delta":
+        speaker.Play(ev.AudioDelta)
+    case "response.text.delta":
+        log.Printf("text: %s", ev.Text)
+    case "error":
+        log.Fatalf("server: %v", ev.Error)
+    }
+}`} />
+  <p>
+    See the
+    <a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime provider page</a>
+    for the full method reference and worked examples.
+  </p>
+
+  <h2 id="when-which">When to use which</h2>
+  <p>
+    Pick by what your application is doing, not by what's newest:
+  </p>
+  <ul>
+    <li>
+      <strong>Live captioning, dictation, meeting transcripts</strong>
+      → STT streaming. Deepgram has the best latency and
+      diarization story; Whisper is fine for batch but not for live.
+    </li>
+    <li>
+      <strong>Voice agents where the LLM is the brain</strong> →
+      pair a chat provider with <code>SpeakRealtime</code> on
+      Cartesia or ElevenLabs. The LLM generates text incrementally,
+      you append each chunk, the audio plays as it synthesises.
+      Best when you want full control over the LLM choice
+      (Claude, GPT-4, your own model).
+    </li>
+    <li>
+      <strong>Voice agents where speed beats LLM choice</strong> →
+      OpenAI Realtime. Lower end-to-end latency than the
+      chat-plus-TTS pipeline because the model and the synthesiser
+      are co-located, at the cost of being locked into
+      <code>gpt-4o-realtime</code>.
+    </li>
+    <li>
+      <strong>Phone-call use cases (8 kHz μ-law)</strong> →
+      OpenAI Realtime supports <code>g711_ulaw</code> natively;
+      Cartesia and ElevenLabs both support <code>ulaw</code>
+      output. Deepgram handles telephony audio on the input side.
+    </li>
+  </ul>
+
+  <h2 id="lifecycle">Lifecycle and cancellation</h2>
+  <p>
+    All three patterns share the same cancellation story as the
+    rest of the library:
+  </p>
+  <ul>
+    <li>
+      Cancelling the <code>ctx</code> passed to
+      <code>Transcribe</code> / <code>SpeakRealtime</code> /
+      <code>Connect</code> closes the WebSocket cleanly.
+    </li>
+    <li>
+      The receive channel
+      (<code>Segments()</code> / <code>Chunks()</code> /
+      <code>Events()</code>) closes after the producer finishes.
+    </li>
+    <li>
+      <code>Err()</code> returns the terminal error after the
+      channel closes. It returns <code>nil</code> on clean
+      shutdown.
+    </li>
+    <li>
+      Explicit <code>Cancel()</code> / <code>Close()</code> is
+      idempotent and safe to call from any goroutine.
+    </li>
+  </ul>
+  <p>
+    The same single-consumer rule applies — only one goroutine
+    should range over the receive channel. Producer-side methods
+    (<code>SendAudio</code>, <code>SendText</code>,
+    <code>Append</code>) are safe to call concurrently from a
+    separate goroutine, which is the entire point of full-duplex.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime provider</a> — full-duplex session API.</li>
+    <li><a href="/llmrouter/docs/providers/deepgram">Deepgram provider</a> — WebSocket live transcription.</li>
+    <li><a href="/llmrouter/docs/providers/cartesia">Cartesia provider</a> — <code>SpeakRealtime</code> for low-latency TTS.</li>
+    <li><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs provider</a> — <code>SpeakRealtime</code> for high-quality TTS.</li>
+    <li><a href="/llmrouter/docs/concepts/audio">Audio concept</a> — non-realtime TTS / STT.</li>
+    <li><a href="/llmrouter/docs/concepts/streaming-model">Streaming model</a> — the underlying lifecycle.</li>
+  </ul>
+</DocsLayout>

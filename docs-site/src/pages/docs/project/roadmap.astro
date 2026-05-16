@@ -20,6 +20,79 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
 
   <h2 id="shipped">Shipped</h2>
 
+  <h3 id="v0-4-0">v0.4.0 — Realtime, WebSocket streaming, tool-result messages</h3>
+  <p>
+    <code>llmrouter</code> moves into the realtime tier. Existing
+    audio providers gain WebSocket transports, a brand-new top-level
+    surface wraps OpenAI's full-duplex Realtime API, and the typed
+    chat surface grows a proper tool-result message type.
+  </p>
+  <ul>
+    <li>
+      <strong>WebSocket live transcription for Deepgram</strong> —
+      <code>Transcribe</code> with <code>Stream=true</code> now
+      activates the WebSocket path against
+      <code>wss://api.deepgram.com/v1/listen</code>. Interim and final
+      segments stream back with per-word timing.
+    </li>
+    <li>
+      <strong>Cartesia <code>SpeakRealtime</code></strong> — new
+      method returning an <code>*AudioStream</code> plus a
+      <code>*RealtimeContext</code> for multi-turn TTS: append text
+      incrementally, finalize, close.
+    </li>
+    <li>
+      <strong>ElevenLabs <code>SpeakRealtime</code></strong> — same
+      signature, WebSocket TTS via <code>/stream-input</code> with
+      the same multi-turn context surface as Cartesia.
+    </li>
+    <li>
+      <strong>New <code>providers/openairealtime</code> package</strong>
+      — wraps OpenAI's <code>gpt-4o-realtime</code> WebSocket API.
+      Bidirectional audio and text with a session-based API
+      (<code>Connect</code>, <code>SendText</code>,
+      <code>SendAudio</code>, <code>Commit</code>,
+      <code>CreateResponse</code>, <code>UpdateSession</code>,
+      <code>Close</code>) that sits alongside
+      <code>Provider</code>, <code>Speaker</code>, and
+      <code>Transcriber</code>. See the
+      <a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime provider page</a>.
+    </li>
+    <li>
+      <strong>First-class tool-result message type</strong> —
+      <code>llmrouter.ToolResultMessage(toolCallID, content)</code>
+      helper plus new <code>Message.ToolCallID</code> and
+      <code>Message.Name</code> fields. OpenAI carries the typed
+      shape directly; Anthropic translates <code>Role: "tool"</code>
+      to a user-role message containing a
+      <code>tool_result</code> block — same caller code, two wire
+      formats.
+    </li>
+    <li>
+      <strong>Anthropic recommended embeddings shim</strong> —
+      <code>providers/anthropic.NewRecommendedEmbedder(voyageAPIKey, opts...)</code>
+      returns a Voyage-backed <code>Embedder</code>. Codifies
+      Anthropic's documented recommendation that Claude users
+      embed with Voyage.
+    </li>
+    <li>
+      <strong>Concept: realtime sessions</strong> — new
+      <a href="/llmrouter/docs/concepts/realtime">Realtime sessions</a>
+      page explains the three patterns (STT streaming, TTS realtime
+      context, full-duplex Realtime) and when to reach for which.
+    </li>
+    <li>
+      <strong>Test suite</strong> — grew from 1,592 to 1,742
+      subtests covering the new WebSocket transports and the
+      Realtime session state machine.
+    </li>
+    <li>
+      <strong>New dependency</strong> —
+      <code>github.com/coder/websocket v1.8.14</code> (single
+      pure-Go WebSocket library, no transitive churn).
+    </li>
+  </ul>
+
   <h3 id="v0-3-0">v0.3.0 — Audio, embeddings, four new specialist providers</h3>
   <p>
     <code>llmrouter</code> grows beyond chat. Three new root
@@ -167,45 +240,54 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     <li>Anthropic provider with full request and SSE translation.</li>
   </ul>
 
-  <h2 id="v0-4">Planned for v0.4 — Real-time audio</h2>
+  <h2 id="v0-5">Planned for v0.5 — Realtime tool use, more vendors</h2>
   <p>
-    Two of v0.3's audio providers (Deepgram, Cartesia) have WebSocket
-    surfaces that don't fit neatly into a single HTTP round-trip. v0.4
-    adds them.
+    With WebSocket transports in place, v0.5 extends the realtime
+    surface to function-calling and pulls in the next round of
+    full-duplex providers.
   </p>
   <ul>
     <li>
-      <strong>WebSocket streaming for Deepgram</strong> — live
-      transcription of microphone audio at sub-300 ms latency.
-      <code>Transcriber.Transcribe</code> with <code>Stream=true</code>
-      switches to the WebSocket transport when the model supports it.
+      <strong>Tool use over Realtime</strong> — function-call events
+      on the OpenAI Realtime session surface as typed
+      <code>SessionEvent</code>s with the same
+      <code>ToolDef</code> / <code>ToolCall</code> shapes already
+      used by chat. Today the v0.4 Realtime wrapper passes tool events
+      through <code>Raw</code> only.
     </li>
     <li>
-      <strong>WebSocket streaming for Cartesia</strong> — real-time
-      TTS for browser-direct streaming where the SSE handshake
-      latency matters.
+      <strong>Gemini Live (WebSocket)</strong> — Google's
+      full-duplex audio + text endpoint, wrapped through the same
+      <code>openairealtime</code>-style session API so the consumer
+      code reads the same.
     </li>
     <li>
-      <strong>Embeddings for Anthropic</strong> when (and if) Anthropic
-      ships a first-party embedding endpoint. Until then, the
-      documented recommendation is to pair Anthropic with
-      <a href="/llmrouter/docs/providers/voyage">Voyage AI</a>.
+      <strong>Function-call typed surface end-to-end</strong> —
+      tool-call deltas and tool-result messages already work in
+      chat; v0.5 closes the loop on streaming partial-arguments and
+      cross-vendor parity for parallel tool calls.
     </li>
     <li>
-      <strong>First-class function-calling tool result message
-      type</strong> — today, tool-result messages ride on the typed
-      surface as <code>Role: "tool"</code> with
-      <code>Content</code> as the result JSON. v0.4 adds a typed
-      <code>ToolResultMessage</code> helper that wires up the
-      <code>tool_call_id</code> linkage correctly for both OpenAI and
-      Anthropic shapes without the caller having to remember the
-      vendor-specific spelling.
+      <strong>Structured outputs / JSON-mode helper</strong> — a
+      small typed helper for the
+      <code>response_format: {`{type: "json_schema"}`}</code>
+      pattern, with the equivalent Anthropic and Gemini translations
+      hidden behind the same call.
+    </li>
+    <li>
+      <strong>Embeddings for Anthropic</strong> when (and if)
+      Anthropic ships a first-party embedding endpoint. Until then,
+      use
+      <code>anthropic.NewRecommendedEmbedder</code> (shipped in
+      v0.4) or pair with
+      <a href="/llmrouter/docs/providers/voyage">Voyage AI</a>
+      directly.
     </li>
   </ul>
 
   <h2 id="v1-0">Planned for v1.0 — API freeze</h2>
   <p>
-    Once v0.4 ships and the surface has been stable for a few months,
+    Once v0.5 ships and the surface has been stable for a few months,
     v1.0 freezes the public API. The contract from v1.0 onwards:
   </p>
   <ul>

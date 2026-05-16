@@ -1,0 +1,532 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="OpenAI Realtime API">
+  <h1>OpenAI Realtime API</h1>
+  <p>
+    The <code>openairealtime</code> provider wraps OpenAI's
+    <code>gpt-4o-realtime</code> WebSocket API — a full-duplex,
+    session-based surface for low-latency voice agents. It is
+    deliberately separate from the
+    <a href="/llmrouter/docs/providers/openai">OpenAI provider</a>
+    because the shape is fundamentally different: a long-lived
+    session with bidirectional audio and text events, not a
+    request-response exchange.
+  </p>
+  <p>
+    Read the
+    <a href="/llmrouter/docs/concepts/realtime">Realtime sessions concept page</a>
+    first if you have not seen the three realtime patterns
+    <code>llmrouter</code> models (STT streaming, TTS realtime
+    context, full-duplex Realtime). This page documents the third.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openairealtime"
+)`} />
+
+  <h2 id="endpoint">Endpoint and authentication</h2>
+  <p>
+    The provider targets
+    <code>wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview</code>
+    by default. The model id is part of the URL, not the request body
+    — it is taken from <code>SessionConfig.Model</code> at
+    <code>Connect</code> time. Override the host with
+    <code>llmrouter.WithBaseURL</code> if you are proxying or
+    targeting an Azure deployment.
+  </p>
+  <p>
+    Authentication uses two headers on the WebSocket upgrade:
+  </p>
+  <ul>
+    <li><code>Authorization: Bearer {`{api_key}`}</code></li>
+    <li><code>OpenAI-Beta: realtime=v1</code></li>
+  </ul>
+  <p>
+    Both are set automatically from the API key. There is no
+    per-message auth — the bearer token authorises the entire
+    session.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := openairealtime.New(
+    llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    The same options that work on other providers work here:
+    <code>WithAPIKey</code>, <code>WithBaseURL</code>,
+    <code>WithHTTPClient</code> (used for the WebSocket upgrade
+    handshake), and <code>WithTimeout</code> (applied to the upgrade,
+    not the session lifetime — once the socket is open, the session
+    runs until <code>Close</code> or
+    <code>ctx</code> cancellation).
+  </p>
+
+  <h2 id="connect">Connect: opening a session</h2>
+  <p>
+    <code>Provider.Connect</code> is the entry point. It performs the
+    WebSocket upgrade, sends an initial
+    <code>session.update</code> with the supplied
+    <code>SessionConfig</code>, and returns a live
+    <code>*Session</code> handle.
+  </p>
+  <Code lang="go" code={`func (p *Provider) Connect(ctx context.Context, cfg SessionConfig) (*Session, error)`} />
+
+  <h3 id="session-config">SessionConfig</h3>
+  <Code lang="go" code={`type SessionConfig struct {
+    Model             string          // "gpt-4o-realtime-preview"
+    Voice             string          // "alloy", "echo", "shimmer", ...
+    Instructions      string          // system-style guidance for the session
+    InputAudioFormat  string          // "pcm16" (default), "g711_ulaw", "g711_alaw"
+    OutputAudioFormat string          // "pcm16" (default), "g711_ulaw", "g711_alaw"
+    Modalities        []string        // {"text", "audio"} by default
+    Temperature       *float64        // 0.6-1.2 typical
+    Raw               json.RawMessage // byte passthrough; typed fields overlay
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      Realtime model id. Required. Goes into the WebSocket URL
+      query, not the message body.
+    </dd>
+    <dt><code>Voice</code></dt>
+    <dd>
+      One of OpenAI's realtime voices
+      (<code>alloy</code>, <code>echo</code>, <code>shimmer</code>,
+      <code>ash</code>, <code>ballad</code>, <code>coral</code>,
+      <code>sage</code>, <code>verse</code>). Voice is a session
+      property — changing it mid-session requires
+      <code>UpdateSession</code>.
+    </dd>
+    <dt><code>Instructions</code></dt>
+    <dd>
+      Free-form system-style guidance. Plays the role of the system
+      message in the chat API but lives on the session, not on each
+      request.
+    </dd>
+    <dt><code>InputAudioFormat</code> / <code>OutputAudioFormat</code></dt>
+    <dd>
+      Supported values: <code>pcm16</code> (16-bit signed PCM at
+      24 kHz mono — the default and the highest quality),
+      <code>g711_ulaw</code> and <code>g711_alaw</code> (8 kHz
+      telephony codecs). Mismatched formats are a server error, not a
+      client-side validation failure.
+    </dd>
+    <dt><code>Modalities</code></dt>
+    <dd>
+      Subset of <code>{`{"text", "audio"}`}</code>. Leave empty for
+      both. Audio-only sessions still receive
+      <code>response.text.delta</code> events for transcribed audio.
+    </dd>
+    <dt><code>Temperature</code></dt>
+    <dd>
+      Sampling temperature, in the same range as chat. The realtime
+      model is noticeably more sensitive to temperature than the
+      synchronous models.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough for fields the typed surface does not model
+      (turn detection config, tool definitions in v0.5, etc.). The
+      typed fields overlay <code>Raw</code> after marshalling, so
+      setting both is safe — the typed values win.
+    </dd>
+  </dl>
+
+  <h2 id="session">Session methods</h2>
+  <Code lang="go" code={`type Session struct {
+    // unexported: conn, events chan, errMu chan, err error, ...
+}
+
+func (s *Session) SendText(text string) error
+func (s *Session) SendAudio(pcm []byte) error
+func (s *Session) Commit() error
+func (s *Session) CreateResponse() error
+func (s *Session) UpdateSession(cfg SessionConfig) error
+func (s *Session) Close() error
+func (s *Session) Events() <-chan SessionEvent
+func (s *Session) Err() error`} />
+  <dl>
+    <dt><code>SendText</code></dt>
+    <dd>
+      Append a text item to the conversation buffer. Does not
+      trigger generation by itself — call
+      <code>CreateResponse</code> after the last
+      <code>SendText</code> / <code>SendAudio</code> /
+      <code>Commit</code>.
+    </dd>
+    <dt><code>SendAudio</code></dt>
+    <dd>
+      Append a PCM audio buffer to the input audio stream. The bytes
+      must match <code>SessionConfig.InputAudioFormat</code>. Stream
+      microphone capture by calling <code>SendAudio</code> on each
+      frame as it arrives — typical frame sizes are 20-40 ms of
+      24 kHz PCM (960-1920 samples = 1920-3840 bytes).
+    </dd>
+    <dt><code>Commit</code></dt>
+    <dd>
+      Signal end-of-utterance on the input audio buffer. If server
+      VAD is enabled (the default), commits happen automatically and
+      this is a no-op; with VAD disabled you must commit explicitly
+      before <code>CreateResponse</code>.
+    </dd>
+    <dt><code>CreateResponse</code></dt>
+    <dd>
+      Tell the server to generate a response from the current
+      conversation state. The response streams back as
+      <code>SessionEvent</code>s on <code>Events()</code>.
+    </dd>
+    <dt><code>UpdateSession</code></dt>
+    <dd>
+      Replace the session configuration mid-flight. Typically used
+      to change <code>Voice</code> or <code>Instructions</code>;
+      changing <code>Model</code> is not supported.
+    </dd>
+    <dt><code>Close</code></dt>
+    <dd>
+      Close the WebSocket cleanly. Idempotent. Cancelling the
+      <code>ctx</code> passed to <code>Connect</code> is equivalent.
+    </dd>
+    <dt><code>Events</code></dt>
+    <dd>
+      Receive channel of <code>SessionEvent</code> values. Single
+      consumer. Closed when the session ends, after which
+      <code>Err()</code> returns the terminal error
+      (<code>nil</code> on clean close).
+    </dd>
+    <dt><code>Err</code></dt>
+    <dd>
+      Terminal error. Blocks until the session ends. Returns
+      <code>nil</code> on a clean close,
+      <code>*llmrouter.ErrUpstream</code> for a server-reported
+      error event, or a wrapped <code>net</code> /
+      <code>context</code> error for transport failures.
+    </dd>
+  </dl>
+
+  <h2 id="events">SessionEvent</h2>
+  <Code lang="go" code={`type SessionEvent struct {
+    Type       string          // OpenAI event type, e.g. "response.text.delta"
+    Text       string          // populated for text deltas
+    AudioDelta []byte          // populated for audio deltas (decoded PCM bytes)
+    Error      *llmrouter.ErrUpstream // populated for "error" events
+    Raw        json.RawMessage // original wire JSON
+}`} />
+  <p>
+    The <code>Type</code> field is the OpenAI event name verbatim.
+    The library populates the typed convenience fields for the
+    handful of events most callers actually consume; everything else
+    is available on <code>Raw</code>.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Event <code>Type</code></th>
+          <th class="text-left p-3 border-b border-border">Typed field populated</th>
+          <th class="text-left p-3 border-b border-border">Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><code>response.text.delta</code></td>
+          <td class="p-3 border-b border-border"><code>Text</code></td>
+          <td class="p-3 border-b border-border">Incremental text from the assistant.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>response.audio.delta</code></td>
+          <td class="p-3 border-b border-border"><code>AudioDelta</code></td>
+          <td class="p-3 border-b border-border">Incremental audio bytes (PCM in <code>OutputAudioFormat</code>).</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>response.audio_transcript.delta</code></td>
+          <td class="p-3 border-b border-border"><code>Text</code></td>
+          <td class="p-3 border-b border-border">Server-side transcript of the assistant's audio output.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>response.done</code></td>
+          <td class="p-3 border-b border-border">—</td>
+          <td class="p-3 border-b border-border">End of one response; the session continues.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>error</code></td>
+          <td class="p-3 border-b border-border"><code>Error</code></td>
+          <td class="p-3 border-b border-border">Server-side error; session usually ends after this.</td>
+        </tr>
+        <tr>
+          <td class="p-3"><code>session.created</code>, <code>session.updated</code>, etc.</td>
+          <td class="p-3">—</td>
+          <td class="p-3">Lifecycle / acknowledgement; inspect via <code>Raw</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="example-text">Example: text in, audio out</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openairealtime"
+)
+
+func main() {
+    p, err := openairealtime.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+        Model:             "gpt-4o-realtime-preview",
+        Voice:             "alloy",
+        Instructions:      "You are a concise assistant.",
+        OutputAudioFormat: "pcm16",
+        Modalities:        []string{"text", "audio"},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sess.Close()
+
+    if err := sess.SendText("Say hello in five words and play it back."); err != nil {
+        log.Fatal(err)
+    }
+    if err := sess.CreateResponse(); err != nil {
+        log.Fatal(err)
+    }
+
+    out, _ := os.Create("hello.pcm")
+    defer out.Close()
+
+    for ev := range sess.Events() {
+        switch ev.Type {
+        case "response.text.delta":
+            log.Printf("text: %s", ev.Text)
+        case "response.audio.delta":
+            out.Write(ev.AudioDelta)
+        case "response.done":
+            return
+        case "error":
+            log.Fatalf("server error: %v", ev.Error)
+        }
+    }
+    if err := sess.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+  <p>
+    The resulting <code>hello.pcm</code> file is 24 kHz signed
+    16-bit mono PCM — play it with
+    <code>ffplay -f s16le -ar 24000 -ac 1 hello.pcm</code> or wrap
+    it in a WAV header.
+  </p>
+
+  <h2 id="example-audio">Example: audio in, audio out</h2>
+  <p>
+    For voice-agent use cases you want mic-in / speaker-out. The
+    <code>llmrouter</code> side is identical to the text example
+    above plus a producer goroutine that calls
+    <code>SendAudio</code> for each microphone frame. The mic
+    capture is platform-specific — the sketch below shows the
+    library calls; substitute your audio driver of choice
+    (<code>malgo</code>, <code>portaudio</code>, etc.) for the
+    pseudocode parts.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "io"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openairealtime"
+)
+
+// Pseudocode: replace with your audio capture / playback of choice.
+type mic interface {
+    Frames() <-chan []byte // 20ms of 24kHz s16le PCM per frame
+    io.Closer
+}
+type speaker interface {
+    Play(pcm []byte) error
+    io.Closer
+}
+
+func openMic() (mic, error)         { /* malgo / portaudio / ... */ return nil, nil }
+func openSpeaker() (speaker, error) { /* malgo / portaudio / ... */ return nil, nil }
+
+func main() {
+    p, err := openairealtime.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    sess, err := p.Connect(ctx, openairealtime.SessionConfig{
+        Model:             "gpt-4o-realtime-preview",
+        Voice:             "alloy",
+        Instructions:      "You are a friendly voice assistant. Reply in short sentences.",
+        InputAudioFormat:  "pcm16",
+        OutputAudioFormat: "pcm16",
+        Modalities:        []string{"audio", "text"},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sess.Close()
+
+    m, err := openMic()
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer m.Close()
+
+    sp, err := openSpeaker()
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sp.Close()
+
+    // Pump microphone frames into the session.
+    go func() {
+        for frame := range m.Frames() {
+            if err := sess.SendAudio(frame); err != nil {
+                log.Printf("send audio: %v", err)
+                return
+            }
+        }
+    }()
+
+    // Consume server events and play audio deltas as they arrive.
+    for ev := range sess.Events() {
+        switch ev.Type {
+        case "response.audio.delta":
+            if err := sp.Play(ev.AudioDelta); err != nil {
+                log.Printf("play: %v", err)
+            }
+        case "response.audio_transcript.delta":
+            log.Printf("assistant: %s", ev.Text)
+        case "error":
+            log.Fatalf("server error: %v", ev.Error)
+        }
+    }
+    if err := sess.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+  <p>
+    With server-side voice activity detection enabled (the
+    default), the model picks up end-of-utterance automatically —
+    you do not need to call <code>Commit</code> or
+    <code>CreateResponse</code> after each user turn. To disable
+    server VAD and drive turn-taking yourself, set
+    <code>{`{"turn_detection": null}`}</code> on
+    <code>SessionConfig.Raw</code>.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Three distinct error paths:
+  </p>
+  <ul>
+    <li>
+      <strong>Connect-time errors</strong> — HTTP-upgrade failures
+      (bad API key, network) return from
+      <code>Connect</code> as
+      <code>*llmrouter.ErrUpstream</code> (for non-2xx upgrade
+      responses) or a wrapped <code>net</code> error.
+    </li>
+    <li>
+      <strong>In-session server errors</strong> — surface as a
+      <code>SessionEvent</code> with
+      <code>Type == "error"</code> and a populated
+      <code>Error</code> field. The session typically ends after an
+      error event; check <code>Err()</code> for the terminal status.
+    </li>
+    <li>
+      <strong>Transport errors</strong> — abrupt socket close,
+      context cancellation, deadline exceeded. The events channel
+      closes and <code>Err()</code> returns the underlying error.
+    </li>
+  </ul>
+
+  <h2 id="caveats">Caveats and current limits</h2>
+  <ul>
+    <li>
+      <strong>No tool use in v0.4.</strong> Function-calling events
+      flow through <code>Raw</code> only. Typed tool surfaces on
+      Realtime are on the
+      <a href="/llmrouter/docs/project/roadmap#v0-5">v0.5 roadmap</a>.
+    </li>
+    <li>
+      <strong>One session per connection.</strong> Each
+      <code>Connect</code> opens a new socket. There is no
+      multiplexing — for parallel sessions, call
+      <code>Connect</code> multiple times.
+    </li>
+    <li>
+      <strong>Instructions live on the session</strong>, not on
+      each turn. To change the system prompt mid-conversation, call
+      <code>UpdateSession</code> with new
+      <code>Instructions</code>.
+    </li>
+    <li>
+      <strong>Audio formats are limited to
+      <code>pcm16</code>, <code>g711_ulaw</code>, and
+      <code>g711_alaw</code></strong> by OpenAI. Opus and MP3 are
+      not supported on the input or output side.
+    </li>
+    <li>
+      <strong>No reconnect.</strong> If the socket dies, the
+      session is dead — your application is responsible for
+      reconnecting and replaying conversation state.
+    </li>
+  </ul>
+
+  <h2 id="roadmap">Roadmap</h2>
+  <ul>
+    <li>
+      <strong>v0.5</strong> — typed tool use on
+      <code>SessionEvent</code>, function-calling end-to-end with
+      the same <code>ToolDef</code> / <code>ToolCall</code> shapes
+      used by chat.
+    </li>
+    <li>
+      <strong>v0.5</strong> — streaming
+      <code>UpdateSession</code> deltas so config changes don't
+      require a full re-marshal.
+    </li>
+    <li>
+      <strong>v0.5</strong> — Gemini Live wrapped through the same
+      <code>openairealtime</code>-shaped surface for cross-vendor
+      parity.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/realtime">Realtime sessions concept</a> — the three patterns and when to use which.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — synchronous chat / TTS / Whisper STT.</li>
+    <li><a href="/llmrouter/docs/providers/deepgram">Deepgram provider</a> — WebSocket live transcription (STT-only).</li>
+    <li><a href="/llmrouter/docs/providers/cartesia">Cartesia provider</a> — <code>SpeakRealtime</code> for low-latency TTS.</li>
+    <li><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs provider</a> — <code>SpeakRealtime</code> for high-quality TTS.</li>
+  </ul>
+</DocsLayout>

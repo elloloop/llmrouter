@@ -38,12 +38,14 @@ export const sidebarSections: NavSection[] = [
       { label: "Context & Cancellation", href: `${BASE}/concepts/context-cancellation` },
       { label: "Embeddings", href: `${BASE}/concepts/embeddings` },
       { label: "Audio (TTS + STT)", href: `${BASE}/concepts/audio` },
+      { label: "Realtime sessions", href: `${BASE}/concepts/realtime` },
     ],
   },
   {
     title: "Providers",
     items: [
       { label: "OpenAI", href: `${BASE}/providers/openai` },
+      { label: "OpenAI Realtime", href: `${BASE}/providers/openai-realtime` },
       { label: "Anthropic", href: `${BASE}/providers/anthropic` },
       { label: "Azure OpenAI", href: `${BASE}/providers/azure-openai` },
       { label: "AWS Bedrock", href: `${BASE}/providers/bedrock` },

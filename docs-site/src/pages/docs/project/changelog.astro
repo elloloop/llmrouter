@@ -23,6 +23,163 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     page is the curated, human-written summary.
   </p>
 
+  <h2 id="v0-4-0">v0.4.0 — 2026-05-16</h2>
+  <p><strong>Realtime sessions, WebSocket streaming for audio, typed tool-result messages, Anthropic Voyage shim.</strong></p>
+  <p>
+    The realtime release. Existing audio providers gain WebSocket
+    transports, OpenAI's full-duplex Realtime API gets its own
+    top-level package, and the typed chat surface grows a proper
+    tool-result message helper. Existing v0.3 code continues to
+    work — the new surface is additive.
+  </p>
+
+  <h3>WebSocket streaming on existing providers</h3>
+  <ul>
+    <li>
+      <strong>Deepgram live transcription</strong> —
+      <code>TranscribeRequest.Stream = true</code> now opens a
+      WebSocket against
+      <code>wss://api.deepgram.com/v1/listen</code>. Interim and
+      final segments stream back with per-word timing.
+      <code>TranscriptSegment.Final = false</code> for interim
+      results, <code>true</code> for the terminal segment per
+      utterance.
+    </li>
+    <li>
+      <strong>Cartesia <code>SpeakRealtime</code></strong> — new
+      method
+      <code>SpeakRealtime(ctx, SpeechRequest) (*AudioStream, *RealtimeContext, error)</code>.
+      The <code>RealtimeContext</code> handle exposes
+      <code>Append(text)</code>,
+      <code>Finalize()</code>, and
+      <code>Close()</code> for multi-turn TTS over a single
+      socket. <code>AudioStream</code> behaves like the
+      v0.3 streaming path on the consumer side.
+    </li>
+    <li>
+      <strong>ElevenLabs <code>SpeakRealtime</code></strong> —
+      identical signature, WebSocket TTS via
+      <code>/stream-input</code>. Same
+      <code>RealtimeContext</code> semantics — pick the vendor by
+      voice quality / latency, not by API shape.
+    </li>
+  </ul>
+
+  <h3>New top-level capability: OpenAI Realtime</h3>
+  <ul>
+    <li>
+      <strong>New package <code>providers/openairealtime</code></strong>
+      — wraps the
+      <code>gpt-4o-realtime</code> WebSocket API. Distinct from
+      <code>Provider</code> / <code>Speaker</code> /
+      <code>Transcriber</code> because the surface is
+      session-based, not request-response.
+    </li>
+    <li>
+      <strong>Session lifecycle</strong>:
+      <code>Provider.Connect(ctx, SessionConfig) (*Session, error)</code>
+      then
+      <code>SendText</code>, <code>SendAudio</code>,
+      <code>Commit</code>, <code>CreateResponse</code>,
+      <code>UpdateSession</code>, and
+      <code>Close</code>. Events stream out of
+      <code>Session.Events()</code> with the terminal error on
+      <code>Session.Err()</code> — same lifecycle as
+      <code>Stream</code>.
+    </li>
+    <li>
+      Full walkthroughs in the
+      <a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime provider page</a>
+      and the
+      <a href="/llmrouter/docs/concepts/realtime">Realtime sessions concept page</a>.
+    </li>
+  </ul>
+
+  <h3>Typed tool-result messages</h3>
+  <ul>
+    <li>
+      <strong>New helper</strong>:
+      <code>llmrouter.ToolResultMessage(toolCallID, content)</code>
+      returns a <code>Message</code> with
+      <code>Role: "tool"</code> and the linkage fields set.
+    </li>
+    <li>
+      <strong>New <code>Message</code> fields</strong>:
+      <code>ToolCallID</code> and <code>Name</code>, both
+      <code>omitempty</code>. The existing
+      <code>Role</code> + <code>Content</code> fields are
+      unchanged.
+    </li>
+    <li>
+      <strong>Vendor wire translation</strong>: OpenAI passes the
+      typed shape through directly; Anthropic translates a
+      <code>Role: "tool"</code> message into a user-role message
+      containing a <code>tool_result</code> content block, with
+      <code>tool_use_id</code> derived from
+      <code>ToolCallID</code>. Caller code is identical for both.
+    </li>
+  </ul>
+
+  <h3>Anthropic + Voyage embeddings shim</h3>
+  <ul>
+    <li>
+      <strong>New constructor</strong>:
+      <code>providers/anthropic.NewRecommendedEmbedder(voyageAPIKey string, opts ...llmrouter.Option) (llmrouter.Embedder, error)</code>.
+      Returns a Voyage-backed <code>Embedder</code> so calling
+      code can ask the Anthropic package for embeddings without
+      knowing about Voyage.
+    </li>
+    <li>
+      Codifies Anthropic's documented recommendation that Claude
+      users embed with Voyage. The Anthropic provider itself still
+      does not implement <code>Embedder</code>; this is a
+      convenience shim, not a wire-level wrapper.
+    </li>
+  </ul>
+
+  <h3>Dependencies and tests</h3>
+  <ul>
+    <li>
+      New dependency:
+      <code>github.com/coder/websocket v1.8.14</code> — pure-Go,
+      no cgo, no transitive churn.
+    </li>
+    <li>
+      Subtest count grew from <strong>1,592 to 1,742</strong>.
+      The new tests cover the WebSocket framing for Deepgram,
+      Cartesia, and ElevenLabs, the Realtime session state
+      machine, the tool-result translation for both vendors, and
+      the Voyage shim.
+    </li>
+  </ul>
+
+  <h3>Migration notes</h3>
+  <ul>
+    <li>
+      v0.3 code runs unchanged. The new methods are additions;
+      no existing signatures changed.
+    </li>
+    <li>
+      If you previously sent tool results as a hand-rolled
+      <code>Message{`{Role: "tool", Content: ...}`}</code>, that
+      still works — but
+      <code>ToolResultMessage</code> wires
+      <code>ToolCallID</code> in the right place for Anthropic
+      automatically.
+    </li>
+    <li>
+      Deepgram streaming behaviour changes:
+      <code>Stream=true</code> used to be a no-op, now it opens a
+      WebSocket. Code that set <code>Stream=true</code> on
+      Deepgram and got the single-final-segment fallback will now
+      receive interim segments.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.4.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.4.0</a>
+  </p>
+
   <h2 id="v0-3-0">v0.3.0 — 2026-05-15</h2>
   <p><strong>Audio, embeddings, and four new specialist providers.</strong></p>
   <p>
@@ -448,8 +605,8 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     Future versions are appended at the top of this page as they
     ship. The
     <a href="/llmrouter/docs/project/roadmap">roadmap</a> describes
-    what is planned for v0.4 (WebSocket streaming for Deepgram and
-    Cartesia, typed tool-result messages) and v1.0 (API freeze).
+    what is planned for v0.5 (tool use over Realtime, Gemini Live,
+    structured outputs) and v1.0 (API freeze).
   </p>
   <p>
     For commit-by-commit detail and signed release artifacts, see
