@@ -64,18 +64,27 @@ var rawQueryKeys = []string{
 	"endpointing",
 }
 
-// Transcribe issues a batch /v1/listen request and returns a
-// TranscriptStream that emits exactly one Final TranscriptSegment built
-// from the upstream JSON response.
+// Transcribe routes to either the batch /v1/listen HTTP path (default) or
+// the live wss:// /v1/listen WebSocket path when req.Stream is true. Both
+// modes return a TranscriptStream; the batch mode emits exactly one Final
+// segment, while the streaming mode emits zero or more interim segments
+// followed by a Final segment.
 //
-// req.Stream is accepted but ignored: WebSocket-based live transcription
-// is deferred to a future version. req.Raw is merged into the query
-// string for any of the keys in rawQueryKeys.
+// req.Raw is merged into the query string for any of the keys in
+// rawQueryKeys (batch) or rawLiveQueryKeys (streaming).
 func (p *Provider) Transcribe(ctx context.Context, req llmrouter.TranscribeRequest) (*llmrouter.TranscriptStream, error) {
 	if req.Audio == nil {
 		return nil, errors.New("deepgram: transcribe: Audio reader required")
 	}
+	if req.Stream {
+		return p.transcribeStreaming(ctx, req)
+	}
+	return p.transcribeBatch(ctx, req)
+}
 
+// transcribeBatch performs a synchronous POST to /v1/listen and emits a
+// single Final TranscriptSegment.
+func (p *Provider) transcribeBatch(ctx context.Context, req llmrouter.TranscribeRequest) (*llmrouter.TranscriptStream, error) {
 	endpoint, err := buildListenURL(p.cfg.BaseURL, req)
 	if err != nil {
 		return nil, err

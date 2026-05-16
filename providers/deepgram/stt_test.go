@@ -541,14 +541,17 @@ func TestTranscribe(t *testing.T) {
 		}
 	})
 
-	t.Run("stream_flag_ignored_emits_single_segment", func(t *testing.T) {
+	t.Run("stream_false_uses_batch_http_path", func(t *testing.T) {
+		// Sanity check that req.Stream=false continues to take the
+		// batch HTTP path (no behaviour change after the streaming
+		// refactor introduced req.Stream=true routing).
 		var req *http.Request
 		var body []byte
 		p, _ := newTestServer(t, happyHandler(t, &req, &body))
 
 		stream, err := p.Transcribe(context.Background(), llmrouter.TranscribeRequest{
 			Audio:  strings.NewReader("a"),
-			Stream: true, // intentionally ignored in v0.3
+			Stream: false,
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -557,8 +560,14 @@ func TestTranscribe(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stream err: %v", err)
 		}
+		if req == nil {
+			t.Fatal("expected batch HTTP path to be hit when Stream=false")
+		}
+		if req.URL.Path != "/v1/listen" || req.Method != http.MethodPost {
+			t.Fatalf("expected POST /v1/listen, got %s %s", req.Method, req.URL.Path)
+		}
 		if len(segs) != 1 {
-			t.Fatalf("expected 1 segment regardless of Stream flag, got %d", len(segs))
+			t.Fatalf("expected 1 segment from batch path, got %d", len(segs))
 		}
 	})
 

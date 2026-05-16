@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.50.6
 	github.com/aws/smithy-go v1.25.1
+	github.com/coder/websocket v1.8.14
 	github.com/google/uuid v1.6.0
 	google.golang.org/genai v1.57.0
 )
