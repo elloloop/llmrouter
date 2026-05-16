@@ -3,9 +3,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/elloloop/llmrouter.svg)](https://pkg.go.dev/github.com/elloloop/llmrouter)
 [![CI](https://github.com/elloloop/llmrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/elloloop/llmrouter/actions/workflows/ci.yml)
 
-A polyglot Go client for LLM providers. One OpenAI-shaped API surface across chat, embeddings, text-to-speech, and speech-to-text. Pluggable provider backends; configurable base URL + API key per provider; streaming-first.
+A polyglot Go client for LLM providers. One OpenAI-shaped API surface across chat, embeddings, text-to-speech, speech-to-text, and full-duplex realtime. Pluggable provider backends; configurable base URL + API key per provider; streaming-first.
 
-> **v0.3 status:** 20 providers across chat, embeddings, TTS, and STT. Four root interfaces (`Provider`, `Embedder`, `Speaker`, `Transcriber`). See the [roadmap](https://elloloop.github.io/llmrouter/docs/project/roadmap) for v0.4 plans (WebSocket streaming for Deepgram + Cartesia).
+> **v0.4 status:** 21 providers across chat, embeddings, TTS, STT, and realtime. Four root interfaces (`Provider`, `Embedder`, `Speaker`, `Transcriber`) plus the session-based `openairealtime.Session` surface. WebSocket streaming on Deepgram (live STT), Cartesia and ElevenLabs (`SpeakRealtime`). See the [roadmap](https://elloloop.github.io/llmrouter/docs/project/roadmap) for v0.5 plans (tool use over Realtime, Gemini Live, structured outputs).
 
 ## Why
 
@@ -19,7 +19,7 @@ There are great per-vendor SDKs in Go (`openai-go`, `anthropic-sdk-go`, `google.
 ## Install
 
 ```bash
-go get github.com/elloloop/llmrouter@v0.3.0
+go get github.com/elloloop/llmrouter@v0.4.0
 ```
 
 ## Quick start
@@ -58,28 +58,29 @@ func main() {
 
 ## Providers (capability matrix)
 
-| Provider | Chat | Embeddings | TTS | STT |
-|---|:---:|:---:|:---:|:---:|
-| OpenAI | ✓ | ✓ | ✓ | Whisper |
-| Anthropic | ✓ | — *(use Voyage)* | — | — |
-| Azure OpenAI | ✓ | ✓ | ✓ | Whisper |
-| AWS Bedrock | ✓ | Titan + Cohere | — | — |
-| Google Vertex AI | ✓ | ✓ | partial | — |
-| Google Gemini (AI Studio) | ✓ | ✓ | ✓ | audio understanding |
-| Cohere | ✓ | ✓ | — | — |
-| Mistral | ✓ | ✓ | — | — |
-| Together | ✓ | delegated | — | — |
-| Groq | ✓ | — | — | Whisper |
-| OpenRouter | ✓ | — | — | — |
-| Fireworks | ✓ | — | — | — |
-| DeepSeek | ✓ | — | — | — |
-| xAI (Grok) | ✓ | — | — | — |
-| Perplexity | ✓ | — | — | — |
-| Cerebras | ✓ | — | — | — |
-| **ElevenLabs** | — | — | ✓ | Scribe |
-| **Deepgram** | — | — | — | Nova-3 |
-| **Cartesia** | — | — | Sonic-2 | — |
-| **Voyage AI** | — | ✓ | — | — |
+| Provider | Chat | Embeddings | TTS | STT | Realtime / WS streaming |
+|---|:---:|:---:|:---:|:---:|:---:|
+| OpenAI | ✓ | ✓ | ✓ | Whisper | — |
+| Anthropic | ✓ | — *(use Voyage shim)* | — | — | — |
+| Azure OpenAI | ✓ | ✓ | ✓ | Whisper | — |
+| AWS Bedrock | ✓ | Titan + Cohere | — | — | — |
+| Google Vertex AI | ✓ | ✓ | partial | — | — |
+| Google Gemini (AI Studio) | ✓ | ✓ | ✓ | audio understanding | — |
+| Cohere | ✓ | ✓ | — | — | — |
+| Mistral | ✓ | ✓ | — | — | — |
+| Together | ✓ | delegated | — | — | — |
+| Groq | ✓ | — | — | Whisper | — |
+| OpenRouter | ✓ | — | — | — | — |
+| Fireworks | ✓ | — | — | — | — |
+| DeepSeek | ✓ | — | — | — | — |
+| xAI (Grok) | ✓ | — | — | — | — |
+| Perplexity | ✓ | — | — | — | — |
+| Cerebras | ✓ | — | — | — | — |
+| **ElevenLabs** | — | — | ✓ | Scribe | ✓ `SpeakRealtime` |
+| **Deepgram** | — | — | — | Nova-3 | ✓ live STT |
+| **Cartesia** | — | — | Sonic-2 | — | ✓ `SpeakRealtime` |
+| **Voyage AI** | — | ✓ | — | — | — |
+| **OpenAI Realtime** | session | — | session | session | ✓ full duplex |
 
 Each row links to a per-provider docs page: [docs.tinykite.co/llmrouter/docs/providers/](https://elloloop.github.io/llmrouter/docs/providers/openai).
 
@@ -198,7 +199,12 @@ for seg := range stream.Segments() {
 | `llmrouter.Speaker` | interface: `Speak(ctx, SpeechRequest) (*AudioStream, error)` |
 | `llmrouter.Transcriber` | interface: `Transcribe(ctx, TranscribeRequest) (*TranscriptStream, error)` |
 | `llmrouter.ChatRequest` | OpenAI-shaped chat request; `Raw json.RawMessage` for byte passthrough |
+| `llmrouter.Message`, `TextMessage` | typed message; `ToolCallID` and `Name` fields for tool-result wiring |
+| `llmrouter.ToolResultMessage(toolCallID, content)` | v0.4 helper for tool-result messages (typed for OpenAI, translated to `tool_result` block for Anthropic) |
 | `llmrouter.Stream` / `AudioStream` / `TranscriptStream` | `Chunks() / Segments()`, `Err()`, `Cancel()` — same lifecycle |
+| `cartesia.SpeakRealtime` / `elevenlabs.SpeakRealtime` | v0.4 WebSocket TTS — returns `*AudioStream, *RealtimeContext, error` for multi-turn append |
+| `openairealtime.Provider.Connect` | v0.4 full-duplex session: `SendText`, `SendAudio`, `Commit`, `CreateResponse`, `UpdateSession`, `Close`, `Events()`, `Err()` |
+| `anthropic.NewRecommendedEmbedder(voyageAPIKey, opts...)` | v0.4 shim returning a Voyage-backed `Embedder` (Anthropic's documented recommendation) |
 | `llmrouter.WithAPIKey`, `WithBaseURL`, `WithHTTPClient`, `WithTimeout`, `WithExtra` | provider config options |
 | `llmrouter.ErrUpstream` | non-2xx response wrapper with `Provider`, `StatusCode`, `Body` |
 
@@ -213,9 +219,10 @@ The same lifecycle applies across all three stream types — if you've used `Str
 
 ## Roadmap
 
+- **Shipped — v0.4**: WebSocket live STT on Deepgram. `SpeakRealtime` on Cartesia and ElevenLabs. New `providers/openairealtime` package wrapping `gpt-4o-realtime` full-duplex sessions. Typed `ToolResultMessage` helper with cross-vendor translation. `anthropic.NewRecommendedEmbedder` Voyage shim.
 - **Shipped — v0.3**: Embeddings + TTS + STT root interfaces. Four new specialist providers (ElevenLabs, Deepgram, Cartesia, Voyage AI). OpenAI/Azure/Gemini gain TTS+STT+embeddings. Bedrock/Vertex/Cohere/Mistral gain embeddings.
 - **Shipped — v0.2**: Azure OpenAI Service, AWS Bedrock, Google Vertex AI, Gemini (AI Studio), Cohere, Mistral. Typed tool-call passthrough. Extended thinking. Prompt caching. Multimodal content helpers. Ten OpenAI-compatible vendors verified.
-- **Planned — v0.4**: WebSocket streaming for Deepgram + Cartesia (real-time). Anthropic embeddings if/when GA. First-class typed `ToolResultMessage`.
+- **Planned — v0.5**: Typed tool use over Realtime sessions. Gemini Live (WebSocket) wrapped through the same session API. Structured outputs / JSON-mode helper. Cross-vendor function-calling end-to-end.
 - **v1.0**: API freeze. Until then, expect minor breakages between minor versions.
 
 ## Comparisons
