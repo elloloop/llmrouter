@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/elloloop/llmrouter/compare/v0.4.0...v0.5.0) (2026-05-16)
+
+
+### Features
+
+* **cohere,voyage,together:** Rerank for RAG retrieval refinement ([e0a0e81](https://github.com/elloloop/llmrouter/commit/e0a0e818aae2e0c552bf7e8fee6a11f6f25487d7))
+* **fireworks,deepseek:** embeddings via OpenAI-compatible delegation ([eba469b](https://github.com/elloloop/llmrouter/commit/eba469bd0b3078d5b9f2d438d16bd5dcbe0d06f4))
+* foundation for v0.5 — Reranker, ResponseSchema, Realtime tool use ([e4833ba](https://github.com/elloloop/llmrouter/commit/e4833baf2c7ec95a754f907c857439830b89a10d))
+* **geminilive:** Gemini Live — bidirectional WS for low-latency voice agents ([eea620a](https://github.com/elloloop/llmrouter/commit/eea620ab7a738d1e05fdfdb438b0c55682ca3dfd))
+* **openai,anthropic,vertex:** structured outputs via ChatRequest.ResponseSchema ([065433d](https://github.com/elloloop/llmrouter/commit/065433df17544cb7d1d89c0f637d960df5dfcc70))
+
 ## [0.4.0](https://github.com/elloloop/llmrouter/compare/v0.3.0...v0.4.0) (2026-05-16)
 
 
