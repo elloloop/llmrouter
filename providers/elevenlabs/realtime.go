@@ -74,8 +74,7 @@ type RealtimeContext struct {
 
 	writeMu sync.Mutex
 
-	doneMu sync.Mutex
-	done   chan struct{} // closed once the pump goroutine returns
+	done chan struct{} // closed once the pump goroutine returns
 }
 
 // Append streams another text chunk into the same TTS context. It is

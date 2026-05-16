@@ -50,9 +50,8 @@ func (rc *realtimeCapture) snapshot() []map[string]any {
 // also carries done:true (or a separate done frame is sent if
 // trailingDone is true).
 type fakeRealtimeServer struct {
-	audioChunks       [][]byte
-	trailingDone      bool
-	expectedFrameCount int
+	audioChunks  [][]byte
+	trailingDone bool
 	// waitForFrames blocks the server's emit loop until this many frames
 	// have arrived from the client. 0 means start emitting immediately.
 	waitForFrames int
