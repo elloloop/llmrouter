@@ -117,7 +117,40 @@ func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
 	if _, ok := m["stream_options"]; !ok {
 		m["stream_options"] = json.RawMessage(`{"include_usage":true}`)
 	}
+	// Inject response_format from typed ResponseSchema unless the caller
+	// already supplied one via Raw (caller wins so manual JSON-mode setups
+	// don't get overwritten).
+	if req.ResponseSchema != nil {
+		if _, ok := m["response_format"]; !ok {
+			rfBytes, err := encodeResponseFormat(req.ResponseSchema)
+			if err != nil {
+				return nil, err
+			}
+			m["response_format"] = rfBytes
+		}
+	}
 	return json.Marshal(m)
+}
+
+// encodeResponseFormat renders an llmrouter.ResponseSchema into OpenAI's
+// response_format = {"type":"json_schema","json_schema":{...}} envelope.
+// Description is omitted when empty; Schema is forwarded as-is.
+func encodeResponseFormat(s *llmrouter.ResponseSchema) (json.RawMessage, error) {
+	jsonSchema := map[string]any{
+		"name":   s.Name,
+		"strict": s.Strict,
+	}
+	if s.Description != "" {
+		jsonSchema["description"] = s.Description
+	}
+	if len(s.Schema) > 0 {
+		jsonSchema["schema"] = json.RawMessage(s.Schema)
+	}
+	envelope := map[string]any{
+		"type":        "json_schema",
+		"json_schema": jsonSchema,
+	}
+	return json.Marshal(envelope)
 }
 
 // pumpSSE reads the SSE stream from the upstream response, decodes each

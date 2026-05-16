@@ -276,7 +276,31 @@ func buildGenerateContentConfig(req llmrouter.ChatRequest, systemInstruction *ge
 	if systemInstruction != nil {
 		cfg.SystemInstruction = systemInstruction
 	}
+	applyResponseSchema(cfg, req.ResponseSchema)
 	return cfg
+}
+
+// applyResponseSchema wires an llmrouter.ResponseSchema into the Vertex
+// GenerateContentConfig. Vertex supports schema-coerced output via
+// ResponseMIMEType="application/json" + a typed ResponseSchema. We parse
+// the caller's raw JSON Schema bytes into *genai.Schema; if the parse
+// fails we still set ResponseMIMEType so the model emits JSON, but leave
+// ResponseSchema nil (best-effort fallback — the model may produce JSON
+// without strict shape constraints).
+func applyResponseSchema(cfg *genai.GenerateContentConfig, schema *llmrouter.ResponseSchema) {
+	if schema == nil {
+		return
+	}
+	cfg.ResponseMIMEType = "application/json"
+	if len(schema.Schema) == 0 {
+		return
+	}
+	var parsed genai.Schema
+	if err := json.Unmarshal(schema.Schema, &parsed); err != nil {
+		// Best-effort fallback: keep MIME type so output is JSON-ish.
+		return
+	}
+	cfg.ResponseSchema = &parsed
 }
 
 // mapFinishReason translates a Vertex FinishReason to the OpenAI

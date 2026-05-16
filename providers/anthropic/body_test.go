@@ -840,3 +840,344 @@ func TestBuildAnthropicBody_ToolResult_BlockShapeExact(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// buildAnthropicBody — ResponseSchema (forced tool-use coercion)
+// ---------------------------------------------------------------------------
+
+// decodeAnthropicBody parses an outgoing Anthropic body and returns the
+// tools array, tool_choice object, and the raw top-level map so subtests
+// can poke at individual fields. Fails the test on invalid JSON.
+func decodeAnthropicBody(t *testing.T, b []byte) (tools []map[string]any, toolChoice map[string]any, all map[string]any) {
+	t.Helper()
+	if err := json.Unmarshal(b, &all); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if rawTools, ok := all["tools"].([]any); ok {
+		for _, raw := range rawTools {
+			if m, ok := raw.(map[string]any); ok {
+				tools = append(tools, m)
+			}
+		}
+	}
+	if tc, ok := all["tool_choice"].(map[string]any); ok {
+		toolChoice = tc
+	}
+	return tools, toolChoice, all
+}
+
+func TestBuildAnthropicBody_ResponseSchema(t *testing.T) {
+	objectSchema := json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}`)
+	basicMsgs := []llmrouter.Message{llmrouter.TextMessage("user", "hi")}
+
+	t.Run("absent-no-tools-or-tool-choice-synthesised", func(t *testing.T) {
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, tc, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 0 {
+			t.Errorf("tools should be empty, got %v", tools)
+		}
+		if tc != nil {
+			t.Errorf("tool_choice should be nil, got %v", tc)
+		}
+	})
+
+	t.Run("schema-synthesises-tool-and-tool-choice", func(t *testing.T) {
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:        "extract",
+				Description: "extract fields",
+				Schema:      objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, tc, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 1 {
+			t.Fatalf("len(tools) = %d, want 1", len(tools))
+		}
+		if tools[0]["name"] != "extract" {
+			t.Errorf("tool.name = %v", tools[0]["name"])
+		}
+		if tools[0]["description"] != "extract fields" {
+			t.Errorf("tool.description = %v", tools[0]["description"])
+		}
+		inputSchema, ok := tools[0]["input_schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("input_schema missing or wrong type: %T", tools[0]["input_schema"])
+		}
+		if inputSchema["type"] != "object" {
+			t.Errorf("input_schema.type = %v", inputSchema["type"])
+		}
+		if tc == nil {
+			t.Fatalf("tool_choice missing")
+		}
+		if tc["type"] != "tool" {
+			t.Errorf("tool_choice.type = %v, want tool (Anthropic-specific)", tc["type"])
+		}
+		if tc["name"] != "extract" {
+			t.Errorf("tool_choice.name = %v", tc["name"])
+		}
+	})
+
+	t.Run("manual-tools-with-tool-choice-skip-coercion", func(t *testing.T) {
+		// When the caller supplies BOTH Tools and a ToolChoice, the
+		// schema coercion is documented as a no-op so the caller's manual
+		// tool-use setup wins.
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			Tools: []llmrouter.Tool{
+				{
+					Type: "function",
+					Function: llmrouter.ToolFunction{
+						Name:       "manual_tool",
+						Parameters: json.RawMessage(`{"type":"object"}`),
+					},
+				},
+			},
+			ToolChoice: &llmrouter.ToolChoice{Mode: "auto"},
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "ignored_schema",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, tc, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 1 {
+			t.Fatalf("len(tools) = %d, want 1 (manual only)", len(tools))
+		}
+		if tools[0]["name"] != "manual_tool" {
+			t.Errorf("manual tool replaced: %v", tools[0]["name"])
+		}
+		if tc == nil || tc["type"] != "auto" {
+			t.Errorf("tool_choice = %v, want auto preserved", tc)
+		}
+	})
+
+	t.Run("manual-tools-without-tool-choice-still-coerces", func(t *testing.T) {
+		// If caller has Tools but no ToolChoice, we treat that as
+		// informational tool descriptions and still inject the schema
+		// coercion (appending the synthetic tool + setting tool_choice).
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			Tools: []llmrouter.Tool{
+				{
+					Type:     "function",
+					Function: llmrouter.ToolFunction{Name: "informational"},
+				},
+			},
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "extract",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, tc, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 2 {
+			t.Fatalf("len(tools) = %d, want 2 (manual + synthetic)", len(tools))
+		}
+		// Find the synthetic one.
+		var foundSynthetic bool
+		for _, tool := range tools {
+			if tool["name"] == "extract" {
+				foundSynthetic = true
+			}
+		}
+		if !foundSynthetic {
+			t.Errorf("synthetic schema tool not appended")
+		}
+		if tc == nil || tc["name"] != "extract" {
+			t.Errorf("tool_choice not pinned to synthetic tool: %v", tc)
+		}
+	})
+
+	t.Run("empty-description-omitted-from-tool", func(t *testing.T) {
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "no_desc",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, _, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 1 {
+			t.Fatalf("len(tools) = %d", len(tools))
+		}
+		if _, ok := tools[0]["description"]; ok {
+			t.Errorf("description should be omitted, got %v", tools[0]["description"])
+		}
+	})
+
+	t.Run("schema-rawmessage-flows-into-input-schema-verbatim", func(t *testing.T) {
+		complex := json.RawMessage(`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"k":{"type":"string"}}}}}}`)
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "complex",
+				Schema: complex,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, _, _ := decodeAnthropicBody(t, b)
+		is := tools[0]["input_schema"].(map[string]any)
+		items, ok := is["properties"].(map[string]any)["items"].(map[string]any)
+		if !ok {
+			t.Fatalf("items missing")
+		}
+		if items["type"] != "array" {
+			t.Errorf("items.type = %v", items["type"])
+		}
+		itemSchema, ok := items["items"].(map[string]any)
+		if !ok || itemSchema["type"] != "object" {
+			t.Errorf("nested item schema lost: %v", items["items"])
+		}
+	})
+
+	t.Run("empty-name-skips-coercion", func(t *testing.T) {
+		// Mirrors OpenAI's decision direction: an empty name means we have
+		// no tool to pin tool_choice to. We skip silently rather than
+		// emitting an invalid Anthropic body.
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, tc, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 0 {
+			t.Errorf("tools should be empty when name empty, got %v", tools)
+		}
+		if tc != nil {
+			t.Errorf("tool_choice should be nil when name empty, got %v", tc)
+		}
+	})
+
+	t.Run("tool-choice-shape-is-tool-name-anthropic-form", func(t *testing.T) {
+		// Reaffirm: Anthropic-specific shape {type:"tool", name:...},
+		// NOT OpenAI's {type:"function", function:{name:...}}.
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "shape_check",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		_, tc, _ := decodeAnthropicBody(t, b)
+		if tc == nil {
+			t.Fatalf("tool_choice missing")
+		}
+		// Allowed keys only: type, name.
+		for k := range tc {
+			if k != "type" && k != "name" {
+				t.Errorf("unexpected tool_choice key: %q", k)
+			}
+		}
+		if _, hasFunction := tc["function"]; hasFunction {
+			t.Errorf("Anthropic shape must not contain a function key")
+		}
+	})
+
+	t.Run("schema-coercion-coexists-with-system-message", func(t *testing.T) {
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model: "claude-3",
+			Messages: []llmrouter.Message{
+				llmrouter.TextMessage("system", "be precise"),
+				llmrouter.TextMessage("user", "hi"),
+			},
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "extract",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		_, _, all := decodeAnthropicBody(t, b)
+		if all["system"] != "be precise" {
+			t.Errorf("system message dropped: %v", all["system"])
+		}
+		if _, ok := all["tools"]; !ok {
+			t.Errorf("tools missing")
+		}
+		if _, ok := all["tool_choice"]; !ok {
+			t.Errorf("tool_choice missing")
+		}
+	})
+
+	t.Run("strict-field-on-schema-not-leaked", func(t *testing.T) {
+		// Anthropic has no notion of "strict" — the strict flag on
+		// llmrouter.ResponseSchema is an OpenAI concept and must not
+		// appear anywhere in the Anthropic body.
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:    "claude-3",
+			Messages: basicMsgs,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "x",
+				Strict: true,
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(string(b), `"strict"`) {
+			t.Errorf("strict leaked into Anthropic body: %s", string(b))
+		}
+	})
+
+	t.Run("schema-coercion-coexists-with-existing-tool-choice-no-tools", func(t *testing.T) {
+		// Edge: ToolChoice set but Tools empty. The skip condition requires
+		// BOTH; with only ToolChoice we still synthesise the tool and pin
+		// tool_choice (overwriting the caller-supplied one). This is
+		// documented as expected — pure schema mode wins.
+		b, err := buildAnthropicBody(llmrouter.ChatRequest{
+			Model:      "claude-3",
+			Messages:   basicMsgs,
+			ToolChoice: &llmrouter.ToolChoice{Mode: "auto"},
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "schema_wins",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		tools, tc, _ := decodeAnthropicBody(t, b)
+		if len(tools) != 1 || tools[0]["name"] != "schema_wins" {
+			t.Errorf("schema tool not synthesised when only ToolChoice present: %v", tools)
+		}
+		if tc == nil || tc["type"] != "tool" || tc["name"] != "schema_wins" {
+			t.Errorf("tool_choice not pinned to schema: %v", tc)
+		}
+	})
+}

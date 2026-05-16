@@ -1259,3 +1259,288 @@ func TestBuildRequestBody_MixedToolAndTextMessages(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// buildRequestBody — ResponseSchema (structured-output coercion)
+// ---------------------------------------------------------------------------
+
+// decodeResponseFormat is a small helper that pulls the response_format
+// object out of an outgoing OpenAI body. Returns nil when absent.
+func decodeResponseFormat(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	rf, ok := m["response_format"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return rf
+}
+
+func TestBuildRequestBody_ResponseSchema(t *testing.T) {
+	objectSchema := json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}`)
+
+	t.Run("absent-omits-response-format", func(t *testing.T) {
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model:    "gpt-4o-mini",
+			Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("invalid json: %v", err)
+		}
+		if _, ok := m["response_format"]; ok {
+			t.Fatalf("response_format unexpectedly present: %v", m["response_format"])
+		}
+	})
+
+	t.Run("typed-injects-json-schema-envelope", func(t *testing.T) {
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:        "Answer",
+				Description: "the answer",
+				Strict:      true,
+				Schema:      objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		if rf == nil {
+			t.Fatalf("response_format missing")
+		}
+		if rf["type"] != "json_schema" {
+			t.Errorf("type = %v, want json_schema", rf["type"])
+		}
+		js, ok := rf["json_schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("json_schema missing or wrong type: %T", rf["json_schema"])
+		}
+		if js["name"] != "Answer" {
+			t.Errorf("name = %v", js["name"])
+		}
+		if js["description"] != "the answer" {
+			t.Errorf("description = %v", js["description"])
+		}
+		if v, ok := js["strict"].(bool); !ok || !v {
+			t.Errorf("strict = %v, want true", js["strict"])
+		}
+		sch, ok := js["schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("schema missing or wrong type: %T", js["schema"])
+		}
+		if sch["type"] != "object" {
+			t.Errorf("schema.type = %v", sch["type"])
+		}
+	})
+
+	t.Run("raw-caller-response-format-wins", func(t *testing.T) {
+		// Caller supplied response_format directly via Raw; typed
+		// ResponseSchema must not overwrite.
+		raw := json.RawMessage(`{"model":"x","messages":[],"response_format":{"type":"json_object"}}`)
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "x",
+			Raw:   raw,
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Ignored",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		if rf == nil {
+			t.Fatalf("response_format missing")
+		}
+		if rf["type"] != "json_object" {
+			t.Errorf("caller response_format overwritten: type = %v", rf["type"])
+		}
+		if _, hasJS := rf["json_schema"]; hasJS {
+			t.Errorf("typed schema leaked into caller's response_format")
+		}
+	})
+
+	t.Run("strict-false-rendered", func(t *testing.T) {
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "X",
+				Strict: false,
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		if v, ok := js["strict"].(bool); !ok || v {
+			t.Errorf("strict = %v, want false", js["strict"])
+		}
+	})
+
+	t.Run("strict-true-rendered", func(t *testing.T) {
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "X",
+				Strict: true,
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		if v, ok := js["strict"].(bool); !ok || !v {
+			t.Errorf("strict = %v, want true", js["strict"])
+		}
+	})
+
+	t.Run("schema-rawmessage-forwarded-verbatim", func(t *testing.T) {
+		// Use a nested object schema with mixed types to verify byte-for-byte
+		// forwarding.
+		nested := json.RawMessage(`{"type":"object","properties":{"outer":{"type":"object","properties":{"inner":{"type":"array","items":{"type":"integer"}}}}}}`)
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Nested",
+				Schema: nested,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		sch := js["schema"].(map[string]any)
+		outer, ok := sch["properties"].(map[string]any)["outer"].(map[string]any)
+		if !ok {
+			t.Fatalf("outer missing")
+		}
+		inner, ok := outer["properties"].(map[string]any)["inner"].(map[string]any)
+		if !ok {
+			t.Fatalf("inner missing")
+		}
+		if inner["type"] != "array" {
+			t.Errorf("inner.type = %v", inner["type"])
+		}
+		items, ok := inner["items"].(map[string]any)
+		if !ok || items["type"] != "integer" {
+			t.Errorf("items shape wrong: %v", inner["items"])
+		}
+	})
+
+	t.Run("empty-description-omitted", func(t *testing.T) {
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "NoDesc",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		if _, ok := js["description"]; ok {
+			t.Errorf("description should be omitted, got %v", js["description"])
+		}
+	})
+
+	t.Run("populated-description-included", func(t *testing.T) {
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:        "WithDesc",
+				Description: "schema purpose",
+				Schema:      objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		if js["description"] != "schema purpose" {
+			t.Errorf("description = %v", js["description"])
+		}
+	})
+
+	t.Run("empty-name-produces-empty-name-field", func(t *testing.T) {
+		// Decision: OpenAI provider does not validate Name; an empty name
+		// is forwarded as-is. OpenAI itself will reject the request with a
+		// 400 — we let the upstream be the source of truth on schema
+		// validation rather than baking a duplicate check in.
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		if js["name"] != "" {
+			t.Errorf("name = %v, want empty string", js["name"])
+		}
+	})
+
+	t.Run("stream-flags-still-set-with-schema", func(t *testing.T) {
+		// Adding ResponseSchema must not disturb stream/include_usage forcing.
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "X",
+				Schema: objectSchema,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("invalid json: %v", err)
+		}
+		if v, ok := m["stream"].(bool); !ok || !v {
+			t.Errorf("stream not true: %v", m["stream"])
+		}
+		if _, ok := m["stream_options"]; !ok {
+			t.Errorf("stream_options missing")
+		}
+	})
+
+	t.Run("empty-schema-bytes-omits-schema-key", func(t *testing.T) {
+		// If the caller hands us a zero-length Schema, we still emit the
+		// envelope (so OpenAI errors clearly), but the schema field is
+		// omitted rather than serialised as null.
+		b, err := buildRequestBody(llmrouter.ChatRequest{
+			Model: "gpt-4o-mini",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Empty",
+				Schema: nil,
+			},
+		})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		rf := decodeResponseFormat(t, b)
+		js := rf["json_schema"].(map[string]any)
+		if _, ok := js["schema"]; ok {
+			t.Errorf("schema key should be omitted when bytes empty")
+		}
+	})
+}
+

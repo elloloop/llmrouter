@@ -171,6 +171,15 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 		}
 	}
 
+	// Translate typed ResponseSchema -> forced tool-use. Anthropic has no
+	// native JSON-schema mode; the idiomatic pattern is to register a
+	// synthetic tool whose input_schema is the desired output shape, then
+	// pin tool_choice to that tool so the model is forced to call it.
+	//
+	// When the caller is already doing manual tool-use (req.Tools set AND
+	// req.ToolChoice supplied) we skip schema coercion to avoid conflict.
+	applyResponseSchema(out, req)
+
 	// Pull optional tuning knobs from the original raw body if present.
 	if len(req.Raw) > 0 {
 		var src map[string]json.RawMessage
@@ -201,6 +210,50 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+// applyResponseSchema injects a synthetic tool + forced tool_choice into
+// the outgoing Anthropic body so the model is constrained to emit JSON
+// matching the schema. Skips when:
+//   - req.ResponseSchema is nil (nothing to do)
+//   - the caller has manual tools (req.Tools non-empty) AND a
+//     ToolChoice — that combination is treated as caller-driven tool use
+//     and we don't want the synthetic tool to conflict
+//   - schema.Name is empty (we have no tool name to pin tool_choice to)
+//
+// The schema's raw JSON bytes flow into input_schema verbatim so callers
+// can express any valid JSON Schema shape.
+func applyResponseSchema(out map[string]any, req llmrouter.ChatRequest) {
+	if req.ResponseSchema == nil {
+		return
+	}
+	if len(req.Tools) > 0 && req.ToolChoice != nil {
+		// Caller is doing manual tool use; don't override their setup.
+		return
+	}
+	if req.ResponseSchema.Name == "" {
+		// Without a name we can't pin tool_choice; skip rather than guess.
+		return
+	}
+	tool := map[string]any{"name": req.ResponseSchema.Name}
+	if req.ResponseSchema.Description != "" {
+		tool["description"] = req.ResponseSchema.Description
+	}
+	if len(req.ResponseSchema.Schema) > 0 {
+		tool["input_schema"] = json.RawMessage(req.ResponseSchema.Schema)
+	}
+	// Append rather than replace so schema coercion composes with
+	// caller-supplied informational tools (rare but harmless).
+	switch existing := out["tools"].(type) {
+	case []map[string]any:
+		out["tools"] = append(existing, tool)
+	default:
+		out["tools"] = []map[string]any{tool}
+	}
+	out["tool_choice"] = map[string]any{
+		"type": "tool",
+		"name": req.ResponseSchema.Name,
+	}
 }
 
 // translateMultipartContent converts OpenAI-shaped multipart content

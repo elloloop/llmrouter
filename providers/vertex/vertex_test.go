@@ -1,6 +1,7 @@
 package vertex
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -508,4 +509,174 @@ func TestEnsureExtra_Lazy(t *testing.T) {
 	if c.Extra["sentinel"] != "x" {
 		t.Fatalf("ensureExtra wiped existing map")
 	}
+}
+
+// --- buildGenerateContentConfig + ResponseSchema ---------------------------
+
+// We test through buildGenerateContentConfig (and exercise applyResponseSchema
+// directly where needed) so structured-output coercion is verified end-to-end
+// from ChatRequest into the genai.GenerateContentConfig.
+
+func TestBuildGenerateContentConfig_ResponseSchema(t *testing.T) {
+	objectSchema := json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`)
+
+	t.Run("absent-no-mime-type-no-schema", func(t *testing.T) {
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{Model: "g"}, nil)
+		if cfg.ResponseMIMEType != "" {
+			t.Errorf("ResponseMIMEType = %q, want empty", cfg.ResponseMIMEType)
+		}
+		if cfg.ResponseSchema != nil {
+			t.Errorf("ResponseSchema = %v, want nil", cfg.ResponseSchema)
+		}
+	})
+
+	t.Run("typed-sets-mime-and-schema", func(t *testing.T) {
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model: "g",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Answer",
+				Schema: objectSchema,
+			},
+		}, nil)
+		if cfg.ResponseMIMEType != "application/json" {
+			t.Errorf("ResponseMIMEType = %q", cfg.ResponseMIMEType)
+		}
+		if cfg.ResponseSchema == nil {
+			t.Fatalf("ResponseSchema nil")
+		}
+		if cfg.ResponseSchema.Properties == nil {
+			t.Fatalf("Properties nil")
+		}
+		if _, ok := cfg.ResponseSchema.Properties["name"]; !ok {
+			t.Errorf("name property missing")
+		}
+		if len(cfg.ResponseSchema.Required) != 1 || cfg.ResponseSchema.Required[0] != "name" {
+			t.Errorf("Required = %v", cfg.ResponseSchema.Required)
+		}
+	})
+
+	t.Run("malformed-schema-bytes-fallback-mime-only", func(t *testing.T) {
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model: "g",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Bad",
+				Schema: json.RawMessage(`{not valid json`),
+			},
+		}, nil)
+		if cfg.ResponseMIMEType != "application/json" {
+			t.Errorf("ResponseMIMEType = %q, want application/json fallback", cfg.ResponseMIMEType)
+		}
+		if cfg.ResponseSchema != nil {
+			t.Errorf("ResponseSchema should be nil on malformed input, got %+v", cfg.ResponseSchema)
+		}
+	})
+
+	t.Run("empty-schema-bytes-sets-mime-only", func(t *testing.T) {
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model: "g",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Empty",
+				Schema: nil,
+			},
+		}, nil)
+		if cfg.ResponseMIMEType != "application/json" {
+			t.Errorf("ResponseMIMEType = %q", cfg.ResponseMIMEType)
+		}
+		if cfg.ResponseSchema != nil {
+			t.Errorf("ResponseSchema should be nil for empty bytes")
+		}
+	})
+
+	t.Run("schema-coexists-with-other-config", func(t *testing.T) {
+		temp := 0.5
+		topP := 0.9
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model:       "g",
+			MaxTokens:   123,
+			Temperature: &temp,
+			TopP:        &topP,
+			Stop:        []string{"\n"},
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Mix",
+				Schema: objectSchema,
+			},
+		}, nil)
+		if cfg.MaxOutputTokens != 123 {
+			t.Errorf("MaxOutputTokens = %d", cfg.MaxOutputTokens)
+		}
+		if cfg.Temperature == nil || *cfg.Temperature != 0.5 {
+			t.Errorf("Temperature = %v", cfg.Temperature)
+		}
+		if cfg.TopP == nil || *cfg.TopP != 0.9 {
+			t.Errorf("TopP = %v", cfg.TopP)
+		}
+		if cfg.ResponseMIMEType != "application/json" {
+			t.Errorf("ResponseMIMEType lost: %q", cfg.ResponseMIMEType)
+		}
+		if cfg.ResponseSchema == nil {
+			t.Errorf("ResponseSchema lost")
+		}
+	})
+
+	t.Run("schema-coexists-with-system-instruction", func(t *testing.T) {
+		sys := &genai.Content{Parts: []*genai.Part{{Text: "rules"}}}
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model: "g",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "WithSys",
+				Schema: objectSchema,
+			},
+		}, sys)
+		if cfg.SystemInstruction == nil {
+			t.Errorf("SystemInstruction missing")
+		}
+		if cfg.ResponseSchema == nil {
+			t.Errorf("ResponseSchema missing alongside system instruction")
+		}
+	})
+
+	t.Run("description-on-schema-flows-into-parsed-schema", func(t *testing.T) {
+		// If the JSON Schema itself carries a description, it should land
+		// in genai.Schema.Description via json.Unmarshal.
+		schemaWithDesc := json.RawMessage(`{"type":"object","description":"top-level desc","properties":{"a":{"type":"string"}}}`)
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model: "g",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Desc",
+				Schema: schemaWithDesc,
+			},
+		}, nil)
+		if cfg.ResponseSchema == nil {
+			t.Fatalf("ResponseSchema nil")
+		}
+		if cfg.ResponseSchema.Description != "top-level desc" {
+			t.Errorf("Description = %q", cfg.ResponseSchema.Description)
+		}
+	})
+
+	t.Run("array-schema-parses", func(t *testing.T) {
+		arr := json.RawMessage(`{"type":"array","items":{"type":"string"}}`)
+		cfg := buildGenerateContentConfig(llmrouter.ChatRequest{
+			Model: "g",
+			ResponseSchema: &llmrouter.ResponseSchema{
+				Name:   "Arr",
+				Schema: arr,
+			},
+		}, nil)
+		if cfg.ResponseSchema == nil {
+			t.Fatalf("ResponseSchema nil")
+		}
+		if cfg.ResponseSchema.Items == nil {
+			t.Errorf("Items missing on array schema")
+		}
+	})
+
+	t.Run("applyResponseSchema-direct-nil-noop", func(t *testing.T) {
+		cfg := &genai.GenerateContentConfig{}
+		applyResponseSchema(cfg, nil)
+		if cfg.ResponseMIMEType != "" || cfg.ResponseSchema != nil {
+			t.Errorf("nil schema should leave cfg untouched, got mime=%q schema=%v",
+				cfg.ResponseMIMEType, cfg.ResponseSchema)
+		}
+	})
 }
