@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/elloloop/llmrouter/compare/v0.5.0...v0.6.0) (2026-05-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* forward non-transcript STT events; add Type + SpeechFinal
+
+### Features
+
+* forward non-transcript STT events; add Type + SpeechFinal ([7fc0b30](https://github.com/elloloop/llmrouter/commit/7fc0b307bc2a8627e12a8fa075949c02652c8427))
+
 ## [0.5.0](https://github.com/elloloop/llmrouter/compare/v0.4.0...v0.5.0) (2026-05-16)
 
 
