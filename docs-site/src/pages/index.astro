@@ -105,7 +105,7 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <div class="badge">
             <span class="dot"></span>
-            v0.4.0 &middot; 21 providers &middot; chat, embeddings, TTS, STT, realtime
+            v0.5.0 &middot; 22 providers &middot; chat, embeddings, TTS, STT, realtime, rerank
           </div>
           <h1>
             One Go client.<br />
@@ -113,15 +113,16 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
           </h1>
           <p class="subtitle">
             <strong>llmrouter</strong> is a streaming-first Go library
-            that gives you an OpenAI-shaped API across 21 providers
+            that gives you an OpenAI-shaped API across 22 providers
             &mdash; chat, embeddings, text-to-speech, speech-to-text,
-            and full-duplex realtime &mdash; with byte-passthrough
-            for building gateways and proxies.
+            full-duplex realtime, structured outputs, and rerank
+            &mdash; with byte-passthrough for building gateways and
+            proxies.
           </p>
           <div class="install-highlight">
             <div class="install-box">
-              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.4.0</code>
-              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.4.0">
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.5.0</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.5.0">
                 Copy
               </button>
             </div>
@@ -187,15 +188,17 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
             </article>
             <article class="pillar">
               <div class="pillar-icon">A+R</div>
-              <h3>Audio, embeddings, realtime</h3>
+              <h3>Audio, embeddings, realtime, rerank</h3>
               <p>
                 Chat is not the whole story. v0.3 added
                 <code>Speaker</code>, <code>Transcriber</code>, and
-                <code>Embedder</code>. v0.4 adds
-                <strong>WebSocket streaming</strong> for Deepgram,
-                Cartesia, and ElevenLabs &mdash; plus a new
-                <code>openairealtime.Session</code> for full-duplex
-                voice agents on <code>gpt-4o-realtime</code>.
+                <code>Embedder</code>. v0.4 added WebSocket
+                streaming and full-duplex
+                <code>openairealtime.Session</code>. v0.5 adds
+                <strong>Gemini Live</strong>, tool use on Realtime,
+                <strong>structured outputs</strong>, and a new
+                <code>Reranker</code> interface (Cohere, Voyage,
+                Together).
               </p>
             </article>
             <article class="pillar">
@@ -219,11 +222,13 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
       <section class="features" id="features">
         <div class="container">
           <p class="section-label reveal">What you get today</p>
-          <h2 class="section-heading reveal">21 providers, five capabilities, one shape.</h2>
+          <h2 class="section-heading reveal">22 providers, six capabilities, one shape.</h2>
           <p class="section-sub reveal">
-            v0.4 ships chat, embeddings, TTS, STT, and full-duplex
-            realtime &mdash; against every major LLM vendor plus
-            specialist audio, embedding, and realtime shops.
+            v0.5 ships chat, embeddings, TTS, STT, full-duplex
+            realtime, and rerank &mdash; against every major LLM
+            vendor plus specialist audio, embedding, realtime, and
+            rerank shops. Structured outputs (JSON Schema) work
+            cross-vendor on the chat surface.
           </p>
           <div class="features-grid reveal">
             <article class="feature-card">
@@ -238,11 +243,12 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
             </article>
             <article class="feature-card">
               <div class="feature-icon">EMB</div>
-              <h3>9 embedding providers</h3>
+              <h3>11 embedding providers</h3>
               <p>
                 OpenAI, Azure, Bedrock (Titan + Cohere), Vertex,
-                Gemini, Cohere, Mistral, Together, and
-                <strong>Voyage AI</strong> &mdash; the canonical
+                Gemini, Cohere, Mistral, Together,
+                <strong>Fireworks</strong>, <strong>DeepSeek</strong>,
+                and <strong>Voyage AI</strong> &mdash; the canonical
                 pairing for Anthropic Claude.
               </p>
             </article>
@@ -270,13 +276,38 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               <div class="feature-icon">RT</div>
               <h3>Realtime voice agents</h3>
               <p>
-                <strong>OpenAI Realtime</strong> for full-duplex audio
-                + text over <code>gpt-4o-realtime</code>, plus
+                <strong>OpenAI Realtime</strong> (now with typed
+                tool use) and <strong>Gemini Live</strong> for
+                full-duplex audio + text, plus
                 <code>SpeakRealtime</code> on
                 <strong>Cartesia</strong> and
-                <strong>ElevenLabs</strong> for multi-turn TTS over
-                a single socket. See
+                <strong>ElevenLabs</strong> for multi-turn TTS. See
                 <a href="/llmrouter/docs/concepts/realtime">Realtime sessions</a>.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">JSON</div>
+              <h3>Structured outputs</h3>
+              <p>
+                One <code>ChatRequest.ResponseSchema</code> field,
+                three wire translations: native
+                <code>response_format</code> on OpenAI, forced
+                tool-use on Anthropic, <code>ResponseMIMEType</code>
+                on Vertex / Gemini. See
+                <a href="/llmrouter/docs/concepts/structured-outputs">Structured outputs</a>.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">RNK</div>
+              <h3>Rerank for RAG</h3>
+              <p>
+                One <code>Reranker</code> interface across
+                <strong>Cohere</strong> (<code>rerank-v3.5</code>),
+                <strong>Voyage</strong> (<code>rerank-2</code>),
+                and <strong>Together</strong>
+                (<code>Llama-Rank-V1</code>). Second-stage filter
+                for any RAG pipeline. See
+                <a href="/llmrouter/docs/concepts/rerank">Rerank</a>.
               </p>
             </article>
             <article class="feature-card">
@@ -293,7 +324,7 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               <div class="feature-icon">A2</div>
               <h3>Apache-2.0, pre-1.0</h3>
               <p>
-                Apache-2.0 licensed. Currently v0.4.x &mdash; expect
+                Apache-2.0 licensed. Currently v0.5.x &mdash; expect
                 minor API churn between minor versions until v1.0
                 freezes the surface. Patch versions never break the
                 API.
@@ -342,12 +373,13 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
       <section class="providers-section" id="providers">
         <div class="container">
           <p class="section-label reveal">Providers</p>
-          <h2 class="section-heading reveal">Five capabilities. Twenty-one backends.</h2>
+          <h2 class="section-heading reveal">Six capabilities. Twenty-two backends.</h2>
           <p class="section-sub reveal">
-            Chat, embeddings, TTS, and STT are single one-method
-            interfaces. Realtime is its own session-based surface for
-            full-duplex voice agents. Application code never branches
-            on which vendor is upstream.
+            Chat, embeddings, TTS, STT, and rerank are single
+            one-method interfaces. Realtime is its own session-based
+            surface for full-duplex voice agents. Structured outputs
+            ride on the chat surface as one extra field. Application
+            code never branches on which vendor is upstream.
           </p>
 
           <div class="capability-matrix reveal">
@@ -359,30 +391,33 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
                   <th>Embeddings</th>
                   <th>TTS</th>
                   <th>STT</th>
+                  <th>Rerank</th>
+                  <th>Structured outputs</th>
                 </tr>
               </thead>
               <tbody>
-                <tr><td><a href="/llmrouter/docs/providers/openai">OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/anthropic">Anthropic</a></td><td class="y">&#10003;</td><td class="n">use Voyage</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/bedrock">AWS Bedrock</a></td><td class="y">&#10003;</td><td class="y">Titan + Cohere</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/vertex">Vertex AI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y partial">partial</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio)</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">audio</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/cohere">Cohere</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/mistral">Mistral</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Together</a></td><td class="y">&#10003;</td><td class="y">delegated</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Groq</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Whisper</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">OpenRouter</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Fireworks</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">DeepSeek</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">xAI (Grok)</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Perplexity</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Cerebras</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr class="specialist"><td><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="y">Scribe</td></tr>
-                <tr class="specialist"><td><a href="/llmrouter/docs/providers/deepgram">Deepgram</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Nova-3</td></tr>
-                <tr class="specialist"><td><a href="/llmrouter/docs/providers/cartesia">Cartesia</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Sonic-2</td><td class="n">&mdash;</td></tr>
-                <tr class="specialist"><td><a href="/llmrouter/docs/providers/voyage">Voyage AI</a></td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
-                <tr class="specialist"><td><a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime</a></td><td class="y">session</td><td class="n">&mdash;</td><td class="y">session</td><td class="y">session</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai">OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/anthropic">Anthropic</a></td><td class="y">&#10003;</td><td class="n">use Voyage</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">tool-use</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/bedrock">AWS Bedrock</a></td><td class="y">&#10003;</td><td class="y">Titan + Cohere</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/vertex">Vertex AI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y partial">partial</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio)</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">audio</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/cohere">Cohere</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">v3.5</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/mistral">Mistral</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Together</a></td><td class="y">&#10003;</td><td class="y">delegated</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Llama-Rank</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Groq</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Whisper</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">OpenRouter</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Fireworks</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">DeepSeek</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">xAI (Grok)</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Perplexity</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/openai-compatible">Cerebras</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/elevenlabs">ElevenLabs</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="y">Scribe</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/deepgram">Deepgram</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Nova-3</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/cartesia">Cartesia</a></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">Sonic-2</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/voyage">Voyage AI</a></td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">rerank-2</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime</a></td><td class="y">session</td><td class="n">&mdash;</td><td class="y">session</td><td class="y">session</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
+                <tr class="specialist"><td><a href="/llmrouter/docs/providers/gemini-live">Gemini Live</a></td><td class="y">session</td><td class="n">&mdash;</td><td class="y">session</td><td class="y">session</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
               </tbody>
             </table>
           </div>
@@ -416,11 +451,13 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
             </article>
             <article class="provider-card shipped">
               <div class="provider-tag">Embeddings</div>
-              <h3>9 embedding providers</h3>
+              <h3>11 embedding providers</h3>
               <p>
                 OpenAI &middot; Azure &middot; Cohere &middot;
                 <strong>Voyage</strong> &middot; Vertex &middot;
                 Gemini &middot; Mistral &middot; Together &middot;
+                <strong>Fireworks</strong> &middot;
+                <strong>DeepSeek</strong> &middot;
                 Bedrock (Titan + Cohere).
               </p>
               <a href="/llmrouter/docs/concepts/embeddings" class="provider-link">
@@ -431,15 +468,46 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               <div class="provider-tag">Realtime</div>
               <h3>Realtime &amp; WebSocket</h3>
               <p>
-                <strong>OpenAI Realtime</strong> full-duplex session
-                API. <strong>Deepgram</strong> WebSocket live
-                transcription. <code>SpeakRealtime</code> on
+                <strong>OpenAI Realtime</strong> (with typed tool
+                use, v0.5) and <strong>Gemini Live</strong>
+                full-duplex sessions. <strong>Deepgram</strong>
+                WebSocket live transcription.
+                <code>SpeakRealtime</code> on
                 <strong>Cartesia</strong> and
-                <strong>ElevenLabs</strong> for multi-turn streaming
-                TTS. New in v0.4.
+                <strong>ElevenLabs</strong>.
               </p>
               <a href="/llmrouter/docs/concepts/realtime" class="provider-link">
                 Read Realtime concept &rarr;
+              </a>
+            </article>
+            <article class="provider-card shipped">
+              <div class="provider-tag">Rerank</div>
+              <h3>3 rerank providers</h3>
+              <p>
+                <strong>Cohere</strong> (<code>rerank-v3.5</code>)
+                &middot; <strong>Voyage</strong>
+                (<code>rerank-2</code>) &middot;
+                <strong>Together</strong>
+                (<code>Llama-Rank-V1</code>). Second-stage filter
+                for any RAG pipeline. New in v0.5.
+              </p>
+              <a href="/llmrouter/docs/concepts/rerank" class="provider-link">
+                Read Rerank concept &rarr;
+              </a>
+            </article>
+            <article class="provider-card shipped">
+              <div class="provider-tag">Structured</div>
+              <h3>Structured outputs</h3>
+              <p>
+                Cross-vendor <code>ChatRequest.ResponseSchema</code>
+                field. Native on <strong>OpenAI</strong>; forced
+                tool-use on <strong>Anthropic</strong>;
+                <code>ResponseMIMEType</code> on
+                <strong>Vertex</strong> and
+                <strong>Gemini</strong>. New in v0.5.
+              </p>
+              <a href="/llmrouter/docs/concepts/structured-outputs" class="provider-link">
+                Read Structured outputs &rarr;
               </a>
             </article>
           </div>
@@ -450,19 +518,19 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <div class="stats-grid reveal">
             <div>
-              <div class="stat-value">v0.4.0</div>
+              <div class="stat-value">v0.5.0</div>
               <div class="stat-label">Latest release</div>
             </div>
             <div>
-              <div class="stat-value">21</div>
+              <div class="stat-value">22</div>
               <div class="stat-label">Providers</div>
             </div>
             <div>
-              <div class="stat-value">5</div>
-              <div class="stat-label">Capabilities (chat, embed, TTS, STT, realtime)</div>
+              <div class="stat-value">6</div>
+              <div class="stat-label">Capabilities (chat, embed, TTS, STT, realtime, rerank)</div>
             </div>
             <div>
-              <div class="stat-value">1,742</div>
+              <div class="stat-value">2,000+</div>
               <div class="stat-label">Subtests</div>
             </div>
           </div>
@@ -475,8 +543,8 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
             <h2>Install in one line.</h2>
             <p class="install-sub">Go 1.23+. Apache-2.0. No surprises in your <code>go.sum</code>.</p>
             <div class="install-cmd">
-              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.4.0</code>
-              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.4.0">Copy</button>
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.5.0</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.5.0">Copy</button>
             </div>
             <p class="install-platforms">
               Then head to the

@@ -39,6 +39,8 @@ export const sidebarSections: NavSection[] = [
       { label: "Embeddings", href: `${BASE}/concepts/embeddings` },
       { label: "Audio (TTS + STT)", href: `${BASE}/concepts/audio` },
       { label: "Realtime sessions", href: `${BASE}/concepts/realtime` },
+      { label: "Structured outputs", href: `${BASE}/concepts/structured-outputs` },
+      { label: "Rerank", href: `${BASE}/concepts/rerank` },
     ],
   },
   {
@@ -46,6 +48,7 @@ export const sidebarSections: NavSection[] = [
     items: [
       { label: "OpenAI", href: `${BASE}/providers/openai` },
       { label: "OpenAI Realtime", href: `${BASE}/providers/openai-realtime` },
+      { label: "Gemini Live", href: `${BASE}/providers/gemini-live` },
       { label: "Anthropic", href: `${BASE}/providers/anthropic` },
       { label: "Azure OpenAI", href: `${BASE}/providers/azure-openai` },
       { label: "AWS Bedrock", href: `${BASE}/providers/bedrock` },
@@ -81,6 +84,7 @@ export const sidebarSections: NavSection[] = [
       { label: "Errors", href: `${BASE}/api/errors` },
       { label: "Audio (Speaker + Transcriber)", href: `${BASE}/api/audio` },
       { label: "Embeddings (Embedder)", href: `${BASE}/api/embeddings` },
+      { label: "Rerank", href: `${BASE}/api/rerank` },
       { label: "Provider openai", href: `${BASE}/api/provider-openai` },
       { label: "Provider anthropic", href: `${BASE}/api/provider-anthropic` },
     ],

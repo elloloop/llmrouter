@@ -1,0 +1,312 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Rerank">
+  <h1>Rerank</h1>
+  <p>
+    Reranking is the &ldquo;take a list of candidate documents and a
+    query, and reorder them by how well each candidate actually
+    answers the query&rdquo; capability. It is the standard
+    second-stage filter in a RAG pipeline: vector search is fast and
+    recalls a wide set of plausibly-relevant chunks, and a rerank
+    model then narrows that wide set down to the handful you actually
+    feed into the LLM context window.
+  </p>
+  <p>
+    <code>llmrouter</code> exposes this via a single root
+    interface, <code>Reranker</code>, implemented today by Cohere,
+    Voyage, and Together. Application code never branches on which
+    rerank vendor is upstream.
+  </p>
+
+  <h2 id="use-case">Why rerank is its own thing</h2>
+  <p>
+    Vector search is cheap and shallow. It compares embeddings — one
+    fixed-dimension vector per document, one for the query — and
+    returns whatever's nearest in the embedding space. That's a
+    decent recall signal, but it does not capture term-level
+    relevance the way a cross-encoder does. A cross-encoder reads
+    the query and the candidate <em>together</em> and produces a
+    single relevance score that's noticeably better than embedding
+    similarity for the top-of-list ordering.
+  </p>
+  <p>
+    The standard pipeline is:
+  </p>
+  <ol>
+    <li>
+      <strong>Vector search</strong> — recall the top ~100 candidates
+      from your vector store. Cheap, fast, approximate.
+    </li>
+    <li>
+      <strong>Rerank</strong> — score those 100 with a cross-encoder
+      and keep the top 5-10. One extra API call, much sharper
+      ordering.
+    </li>
+    <li>
+      <strong>Generate</strong> — feed the top 5-10 into the LLM as
+      context.
+    </li>
+  </ol>
+  <p>
+    Skipping the rerank stage is the single most common reason RAG
+    pipelines return technically-relevant-but-wrong answers.
+  </p>
+
+  <h2 id="api">The API</h2>
+  <Code lang="go" code={`type Reranker interface {
+    Name() string
+    Rerank(ctx context.Context, req RerankRequest) (*RerankResponse, error)
+}
+
+type RerankRequest struct {
+    Model     string   // vendor model id, e.g. "rerank-v3.5" (Cohere)
+    Query     string   // the user's question
+    Documents []string // candidates to rerank
+    TopN      int      // cap on returned results; 0 means "all"
+    Raw       json.RawMessage // byte passthrough for vendor-specific fields
+}
+
+type RerankResponse struct {
+    Results []RerankResult
+    Usage   *Usage          // tokens billed (when reported)
+    Raw     json.RawMessage // original wire JSON
+}
+
+type RerankResult struct {
+    Index    int     // position in the original Documents slice
+    Score    float64 // 0.0-1.0; higher = more relevant
+    Document string  // copy of the document text, for convenience
+}`} />
+  <p>
+    The shape is intentionally minimal — query, documents, optional
+    cap, results sorted by descending score with the original index
+    preserved so callers can join back to metadata they kept
+    alongside the documents.
+  </p>
+
+  <h2 id="providers">Provider models and endpoints</h2>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Provider</th>
+          <th class="text-left p-3 border-b border-border">Model id</th>
+          <th class="text-left p-3 border-b border-border">Endpoint</th>
+          <th class="text-left p-3 border-b border-border">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Cohere</strong></td>
+          <td class="p-3 border-b border-border"><code>rerank-v3.5</code>, <code>rerank-english-v3.0</code>, <code>rerank-multilingual-v3.0</code></td>
+          <td class="p-3 border-b border-border"><code>https://api.cohere.com/v2/rerank</code></td>
+          <td class="p-3 border-b border-border">The original commercial rerank API. Best multilingual coverage.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Voyage</strong></td>
+          <td class="p-3 border-b border-border"><code>rerank-2</code>, <code>rerank-2-lite</code></td>
+          <td class="p-3 border-b border-border"><code>https://api.voyageai.com/v1/rerank</code></td>
+          <td class="p-3 border-b border-border">The canonical pairing for Anthropic Claude. Cheaper than Cohere at similar quality.</td>
+        </tr>
+        <tr>
+          <td class="p-3"><strong>Together</strong></td>
+          <td class="p-3"><code>Salesforce/Llama-Rank-V1</code></td>
+          <td class="p-3"><code>https://api.together.xyz/v1/rerank</code></td>
+          <td class="p-3">Open-weights rerank. Lowest cost; quality lags the commercial models on long candidates.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="example">Example: rerank vector-search candidates</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/cohere"
+)
+
+// Pseudocode: the documents and their metadata came out of your
+// vector store. Keep the metadata aligned with the documents slice
+// by index so you can join back after rerank.
+type Chunk struct {
+    ID   string
+    Text string
+}
+
+func vectorSearch(ctx context.Context, query string) ([]Chunk, error) {
+    // ... whatever your store is (Qdrant, pgvector, ...) returns
+    // its top 100 by embedding similarity ...
+    return nil, nil
+}
+
+func main() {
+    ctx := context.Background()
+
+    query := "How do I cancel a streaming chat completion?"
+    candidates, err := vectorSearch(ctx, query)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Cohere implements Reranker on its existing Provider type.
+    p, err := cohere.New(llmrouter.WithAPIKey(os.Getenv("COHERE_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    docs := make([]string, len(candidates))
+    for i, c := range candidates {
+        docs[i] = c.Text
+    }
+
+    resp, err := p.Rerank(ctx, llmrouter.RerankRequest{
+        Model:     "rerank-v3.5",
+        Query:     query,
+        Documents: docs,
+        TopN:      5,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Results come back sorted by descending Score, with Index
+    // pointing back into the original Documents slice.
+    for _, r := range resp.Results {
+        chunk := candidates[r.Index]
+        fmt.Printf("score=%.3f id=%s text=%q\n", r.Score, chunk.ID, chunk.Text)
+    }
+}`} />
+  <p>
+    Swap the provider to Voyage or Together by changing the import,
+    the constructor, and the model id. The
+    <code>Rerank</code> call is identical:
+  </p>
+  <Code lang="go" code={`// Voyage
+import "github.com/elloloop/llmrouter/providers/voyage"
+v, _ := voyage.New(llmrouter.WithAPIKey(os.Getenv("VOYAGE_API_KEY")))
+resp, _ := v.Rerank(ctx, llmrouter.RerankRequest{
+    Model: "rerank-2", Query: query, Documents: docs, TopN: 5,
+})
+
+// Together
+import "github.com/elloloop/llmrouter/providers/openai"
+t, _ := openai.New(
+    llmrouter.WithAPIKey(os.Getenv("TOGETHER_API_KEY")),
+    llmrouter.WithBaseURL("https://api.together.xyz/v1"),
+)
+resp, _ := t.Rerank(ctx, llmrouter.RerankRequest{
+    Model: "Salesforce/Llama-Rank-V1", Query: query, Documents: docs, TopN: 5,
+})`} />
+
+  <h2 id="picking-topn">Picking a value for <code>TopN</code></h2>
+  <p>
+    <code>TopN</code> is a soft cap. The vendor may return fewer
+    results if its internal score floor isn't met by enough
+    candidates — this is a feature, not a bug. It means the
+    pipeline got a clean signal that the long tail isn't worth
+    feeding to the LLM.
+  </p>
+  <p>
+    Rules of thumb:
+  </p>
+  <ul>
+    <li>
+      <strong>5-10</strong> for chat-style RAG where the LLM
+      synthesises an answer from a few sources.
+    </li>
+    <li>
+      <strong>15-25</strong> for &ldquo;cite all relevant passages&rdquo;
+      use cases where recall matters more than precision.
+    </li>
+    <li>
+      <strong>1-3</strong> when the downstream step is itself an
+      LLM call with a tiny context budget (e.g. an on-device model).
+    </li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>One extra network round-trip.</strong> Rerank sits on
+      the hot path between vector search and generation. Plan for
+      150-400 ms of added latency depending on candidate count and
+      document length.
+    </li>
+    <li>
+      <strong>Document length is billed.</strong> Cohere and Voyage
+      both charge per &ldquo;document token&rdquo; pair. Sending the
+      full document text when only the first 1-2 KB matters wastes
+      money. Truncate aggressively before sending.
+    </li>
+    <li>
+      <strong>Multilingual quality varies.</strong> Cohere's
+      multilingual models cover more languages well than Voyage's;
+      Together's open-weights model is mostly English-only. Test on
+      your actual locale before committing.
+    </li>
+    <li>
+      <strong>The score is a black box.</strong> A score of 0.8 from
+      Cohere is not directly comparable to 0.8 from Voyage. Pick a
+      provider and calibrate against your own evals; don't try to
+      reuse score thresholds across vendors.
+    </li>
+    <li>
+      <strong>No streaming.</strong> Rerank is a synchronous
+      request-response call; there is no progressive result. Latency
+      is end-to-end.
+    </li>
+  </ul>
+
+  <h2 id="when-to-use">When to use rerank</h2>
+  <p>
+    Reach for rerank when:
+  </p>
+  <ul>
+    <li>
+      You have a RAG pipeline whose top-of-list ordering matters
+      (i.e. always).
+    </li>
+    <li>
+      Your vector store recall is set wide (top-50 to top-200) and
+      you need to narrow before feeding the LLM.
+    </li>
+    <li>
+      Eval shows that the right answer is in the candidate set but
+      not always in the top-K by embedding similarity.
+    </li>
+  </ul>
+  <p>
+    Skip it when:
+  </p>
+  <ul>
+    <li>
+      You're only retrieving 1-3 candidates total — there's nothing
+      to reorder.
+    </li>
+    <li>
+      Latency budget is critical and your evals show vector recall
+      alone hits the precision floor you need.
+    </li>
+    <li>
+      You're searching over very short candidates (tweets, log
+      lines) where cross-encoder gains are smaller.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/embeddings">Embeddings concept</a> — the first stage of the RAG pipeline.</li>
+    <li><a href="/llmrouter/docs/api/rerank">API reference: Rerank</a> — full type definitions.</li>
+    <li><a href="/llmrouter/docs/providers/cohere">Cohere provider</a> — the canonical rerank vendor.</li>
+    <li><a href="/llmrouter/docs/providers/voyage">Voyage AI provider</a> — pairs naturally with Anthropic for embed + rerank.</li>
+  </ul>
+</DocsLayout>

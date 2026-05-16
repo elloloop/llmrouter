@@ -1,0 +1,182 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package llmrouter — Rerank">
+  <h1>Package llmrouter — Rerank</h1>
+  <p>
+    Every public symbol declared in
+    <a href="https://github.com/elloloop/llmrouter/blob/main/rerank.go"><code>rerank.go</code></a>.
+    One interface — <a href="#reranker"><code>Reranker</code></a> —
+    plus the request and response types it speaks.
+  </p>
+  <p>
+    See the <a href="/llmrouter/docs/concepts/rerank">Rerank concept page</a>
+    for when and why to use this surface in a RAG pipeline.
+  </p>
+  <p>
+    Import path:
+  </p>
+  <Code lang="go" code={`import "github.com/elloloop/llmrouter"`} />
+
+  <h2 id="reranker">Reranker</h2>
+  <p>
+    The rerank contract. Implementations are concurrency-safe.
+  </p>
+  <Code lang="go" code={`type Reranker interface {
+    Name() string
+    Rerank(ctx context.Context, req RerankRequest) (*RerankResponse, error)
+}`} />
+  <p>
+    <code>Rerank</code> is a single-round-trip call — there is no
+    streaming, no <code>Stream</code> handle. A non-nil error is
+    returned on synchronous failures (bad config, non-2xx HTTP
+    status, malformed response body). <code>Name</code> returns the
+    provider's short id, matching the value also returned by the
+    same provider's <code>Provider.Name()</code>.
+  </p>
+
+  <h2 id="rerank-request">RerankRequest</h2>
+  <p>
+    The rerank-request shape. Vendor-agnostic.
+  </p>
+  <Code lang="go" code={`type RerankRequest struct {
+    Model     string          // vendor model id; e.g. "rerank-v3.5"
+    Query     string          // the user's question
+    Documents []string        // candidates to rerank
+    TopN      int             // soft cap on returned results; 0 means "all"
+    Raw       json.RawMessage // byte passthrough; typed fields overlay
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      The model identifier. The literal string is sent to the
+      upstream; providers don't alias. Common values:
+      <code>rerank-v3.5</code> (Cohere), <code>rerank-2</code>
+      (Voyage), <code>Salesforce/Llama-Rank-V1</code> (Together).
+    </dd>
+    <dt><code>Query</code></dt>
+    <dd>
+      The query string each document is scored against. Required.
+      Length limits are vendor-specific — most accept several
+      kilobytes.
+    </dd>
+    <dt><code>Documents</code></dt>
+    <dd>
+      The candidate documents. Required. Order is preserved on the
+      wire; results refer back via
+      <code>RerankResult.Index</code>. Length limits per document
+      vary by vendor; Cohere allows ~4 KB, Voyage similar, Together
+      shorter. Truncate aggressively — long documents cost more and
+      rarely improve quality past the first ~1 KB.
+    </dd>
+    <dt><code>TopN</code></dt>
+    <dd>
+      Soft cap on returned results. <code>0</code> means &ldquo;return
+      everything ranked.&rdquo; The vendor may return fewer than
+      <code>TopN</code> if its internal score floor isn't met.
+      Common values: 5-10 for chat RAG, 15-25 for citation use cases.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough escape hatch. Vendor-specific fields
+      (Cohere <code>rank_fields</code>, Voyage <code>truncation</code>)
+      can be sent through <code>Raw</code>. The typed fields above
+      overlay <code>Raw</code> after marshalling, so setting both is
+      safe — the typed values win.
+    </dd>
+  </dl>
+
+  <h2 id="rerank-response">RerankResponse</h2>
+  <p>
+    The rerank-response shape.
+  </p>
+  <Code lang="go" code={`type RerankResponse struct {
+    Results []RerankResult  // sorted by descending Score
+    Usage   *Usage          // tokens billed (when reported)
+    Raw     json.RawMessage // original wire JSON
+}`} />
+  <dl>
+    <dt><code>Results</code></dt>
+    <dd>
+      The reranked results, sorted by descending
+      <code>Score</code>. Always non-nil but may be empty if every
+      candidate scored below the vendor's internal floor.
+    </dd>
+    <dt><code>Usage</code></dt>
+    <dd>
+      Token / billable-unit counts when the vendor reports them.
+      Cohere and Voyage both report; Together does not always.
+      <code>nil</code> when no usage info was returned.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Original wire JSON for byte-level passthrough or to read
+      vendor-specific fields the typed surface omits.
+    </dd>
+  </dl>
+
+  <h2 id="rerank-result">RerankResult</h2>
+  <p>
+    A single reranked result.
+  </p>
+  <Code lang="go" code={`type RerankResult struct {
+    Index    int     // position in the original RerankRequest.Documents slice
+    Score    float64 // 0.0-1.0; higher = more relevant
+    Document string  // copy of the document text, for convenience
+}`} />
+  <dl>
+    <dt><code>Index</code></dt>
+    <dd>
+      The position in the original
+      <code>RerankRequest.Documents</code> slice. Use this to join
+      back to metadata you kept alongside the documents (chunk id,
+      source URL, page number, ...). Never reordered.
+    </dd>
+    <dt><code>Score</code></dt>
+    <dd>
+      The relevance score in <code>[0.0, 1.0]</code>. Vendor-specific
+      calibration — a score of 0.8 from Cohere is not directly
+      comparable to 0.8 from Voyage. Pick one provider and calibrate
+      thresholds against your own evaluation set.
+    </dd>
+    <dt><code>Document</code></dt>
+    <dd>
+      A copy of the document text from the request, included for
+      logging / debugging convenience. The library returns this
+      verbatim from the request — the upstream does not echo it back
+      on every vendor.
+    </dd>
+  </dl>
+
+  <h2 id="implementations">Implementations</h2>
+  <p>
+    <code>Reranker</code> is implemented today by:
+  </p>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/providers/cohere"><strong>Cohere</strong></a>
+      &mdash; <code>rerank-v3.5</code>,
+      <code>rerank-english-v3.0</code>,
+      <code>rerank-multilingual-v3.0</code>.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/voyage"><strong>Voyage</strong></a>
+      &mdash; <code>rerank-2</code>, <code>rerank-2-lite</code>.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/openai-compatible"><strong>Together</strong></a>
+      via the OpenAI-compatible provider with
+      <code>WithBaseURL("https://api.together.xyz/v1")</code> &mdash;
+      <code>Salesforce/Llama-Rank-V1</code>.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/rerank">Rerank concept</a> — when and why.</li>
+    <li><a href="/llmrouter/docs/api/embeddings">API reference: Embeddings</a> — first stage of the RAG pipeline.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter">Package llmrouter</a> — full API index.</li>
+  </ul>
+</DocsLayout>

@@ -23,6 +23,212 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     page is the curated, human-written summary.
   </p>
 
+  <h2 id="v0-5-0">v0.5.0 — 2026-05-16</h2>
+  <p><strong>Gemini Live, Realtime tool use, structured outputs, Rerank, embeddings on Fireworks + DeepSeek.</strong></p>
+  <p>
+    The function-calling and RAG-refinement release. Five capability
+    blocks land together: Google's full-duplex Gemini Live joins the
+    realtime tier; OpenAI Realtime gets first-class tool use;
+    structured outputs become a cross-vendor
+    <code>ChatRequest</code> field; a brand-new
+    <code>Reranker</code> interface closes the second-stage RAG
+    gap; and Fireworks + DeepSeek complete the OpenAI-compat
+    embedding coverage. Existing v0.4 code continues to work — the
+    new surface is additive.
+  </p>
+
+  <h3>New top-level capability: Gemini Live</h3>
+  <ul>
+    <li>
+      <strong>New package
+      <code>providers/geminilive</code></strong> — wraps Google's
+      <code>BidiGenerateContent</code> WebSocket API. Mirror of
+      <code>openairealtime</code> exactly:
+      <code>Provider.Connect(ctx, SessionConfig) (*Session, error)</code>
+      returning a handle with <code>SendText</code>,
+      <code>SendAudio</code>, <code>SendToolResult</code>,
+      <code>Close</code>, <code>Events()</code>, and
+      <code>Err()</code>.
+    </li>
+    <li>
+      <strong>SessionConfig</strong> fields:
+      <code>Model</code>, <code>Voice</code> (one of
+      <code>Aoede</code>, <code>Charon</code>, <code>Fenrir</code>,
+      <code>Kore</code>, <code>Puck</code>),
+      <code>Instructions</code>, <code>OutputAudioFormat</code>,
+      <code>Modalities</code>, <code>Temperature</code>,
+      <code>TopP</code>, <code>Tools</code>, <code>Raw</code>.
+    </li>
+    <li>
+      <strong>SessionEvent</strong> types: <code>setup.complete</code>,
+      <code>server.text</code>, <code>server.audio</code> (with
+      <code>AudioMime</code>),
+      <code>server.tool_call</code> (with <code>ToolCallID</code>,
+      <code>ToolName</code>, <code>ToolArgs</code>),
+      <code>server.turn_complete</code>, <code>error</code>.
+    </li>
+    <li>
+      Sample-rate asymmetry surfaced in docs: input is 16 kHz PCM,
+      output is 24 kHz PCM. One session per connection. See the
+      <a href="/llmrouter/docs/providers/gemini-live">Gemini Live provider page</a>.
+    </li>
+  </ul>
+
+  <h3>Tool use on OpenAI Realtime</h3>
+  <ul>
+    <li>
+      <strong><code>SessionConfig.Tools</code> and
+      <code>SessionConfig.ToolChoice</code></strong> — same
+      <code>llmrouter.ToolDef</code> shape used by chat. No new tool
+      schema for callers to learn.
+    </li>
+    <li>
+      <strong>New <code>SessionEvent</code> fields</strong>:
+      <code>ToolCallID</code>, <code>ToolName</code>,
+      <code>ToolArgumentsDelta</code> (incremental JSON args from
+      <code>response.function_call_arguments.delta</code>), and
+      <code>ToolArguments</code> (complete args from
+      <code>response.function_call_arguments.done</code>).
+    </li>
+    <li>
+      <strong>New <code>Session.SendToolResult(ctx, toolCallID, output)</code></strong>
+      — replies to a tool call with the function output as a typed
+      <code>conversation.item.create</code> frame. Function-calling
+      is now first-class over the Realtime channel — no more
+      dropping to <code>Raw</code>.
+    </li>
+  </ul>
+
+  <h3>Structured outputs (JSON Schema)</h3>
+  <ul>
+    <li>
+      <strong>New root type</strong>:
+      <code>llmrouter.ResponseSchema</code> with
+      <code>Name</code>, <code>Description</code>,
+      <code>Schema json.RawMessage</code>, and
+      <code>Strict bool</code>.
+    </li>
+    <li>
+      <strong>New field</strong>:
+      <code>ChatRequest.ResponseSchema *ResponseSchema</code>.
+      <code>nil</code> means &ldquo;no constraint&rdquo; (the existing
+      behaviour).
+    </li>
+    <li>
+      <strong>Cross-vendor translation</strong>: OpenAI uses native
+      <code>response_format.json_schema</code>; Anthropic translates
+      to forced tool-use with a synthetic tool whose
+      <code>input_schema</code> matches; Vertex and Gemini set
+      <code>GenerateContentConfig.ResponseMIMEType +
+      ResponseSchema</code> via the genai SDK. Other providers ignore
+      the field. See the
+      <a href="/llmrouter/docs/concepts/structured-outputs">Structured outputs concept</a>.
+    </li>
+  </ul>
+
+  <h3>Rerank</h3>
+  <ul>
+    <li>
+      <strong>New root interface</strong>:
+      <code>llmrouter.Reranker</code> with
+      <code>Rerank(ctx, RerankRequest) (*RerankResponse, error)</code>.
+    </li>
+    <li>
+      <strong>New request / response types</strong>:
+      <code>RerankRequest</code> (<code>Model</code>,
+      <code>Query</code>, <code>Documents</code>,
+      <code>TopN</code>, <code>Raw</code>),
+      <code>RerankResponse</code> (<code>Results</code>,
+      <code>Usage</code>, <code>Raw</code>), and
+      <code>RerankResult</code> (<code>Index</code>,
+      <code>Score</code>, <code>Document</code>). Results are sorted
+      by descending score; <code>Index</code> joins back to the
+      original document slice.
+    </li>
+    <li>
+      <strong>Implementations</strong>: Cohere
+      (<code>rerank-v3.5</code> and the v3.0 family), Voyage
+      (<code>rerank-2</code>, <code>rerank-2-lite</code>), Together
+      (<code>Salesforce/Llama-Rank-V1</code>). See the
+      <a href="/llmrouter/docs/concepts/rerank">Rerank concept</a>
+      and <a href="/llmrouter/docs/api/rerank">API reference</a>.
+    </li>
+  </ul>
+
+  <h3>Embeddings extended to Fireworks + DeepSeek</h3>
+  <ul>
+    <li>
+      Thin delegation through the OpenAI-compatible provider, with
+      the right base URLs pre-configured. Completes the
+      OpenAI-compat embedding coverage across the ten verified
+      vendors — every OpenAI-compat provider that exposes an
+      embedding endpoint now implements <code>Embedder</code>
+      without extra work.
+    </li>
+  </ul>
+
+  <h3>Capability matrix updates</h3>
+  <ul>
+    <li>
+      <strong>New row</strong>: Gemini Live (session-based audio +
+      text, tool use).
+    </li>
+    <li>
+      <strong>New column</strong>: Rerank
+      (Cohere &#10003;, Voyage &#10003;, Together &#10003;).
+    </li>
+    <li>
+      <strong>New column</strong>: Structured outputs
+      (OpenAI &#10003;, Anthropic &#10003; via tool-use coercion,
+      Vertex &#10003;, Gemini &#10003;).
+    </li>
+    <li>
+      <strong>Embed column extended</strong>: Fireworks &#10003;,
+      DeepSeek &#10003;.
+    </li>
+  </ul>
+
+  <h3>Tests</h3>
+  <ul>
+    <li>
+      Subtest count grew from <strong>1,742 to ~2,200</strong>.
+      The new tests cover the Gemini Live state machine, the
+      Realtime tool-call event translation, structured-output schema
+      translation on three providers, and rerank request/response
+      shapes on three providers.
+    </li>
+  </ul>
+
+  <h3>Migration notes</h3>
+  <ul>
+    <li>
+      v0.4 code runs unchanged. <code>ResponseSchema</code> defaults
+      to <code>nil</code>; the new
+      <code>SessionConfig.Tools</code> /
+      <code>SessionConfig.ToolChoice</code> fields are additions,
+      not replacements.
+    </li>
+    <li>
+      If you previously parsed Realtime tool-call events from
+      <code>SessionEvent.Raw</code>, the typed
+      <code>ToolCallID</code> / <code>ToolName</code> /
+      <code>ToolArgumentsDelta</code> / <code>ToolArguments</code>
+      fields are now populated alongside — the <code>Raw</code>
+      escape hatch still works.
+    </li>
+    <li>
+      Anthropic structured-output callers must read the result from
+      <code>Choice.Delta.ToolCalls</code> (forced tool-use), not
+      from <code>Choice.Delta.Content</code>. The
+      <a href="/llmrouter/docs/concepts/structured-outputs#anthropic-shape">concept page</a>
+      shows the pattern.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.5.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.5.0</a>
+  </p>
+
   <h2 id="v0-4-0">v0.4.0 — 2026-05-16</h2>
   <p><strong>Realtime sessions, WebSocket streaming for audio, typed tool-result messages, Anthropic Voyage shim.</strong></p>
   <p>
@@ -605,8 +811,9 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     Future versions are appended at the top of this page as they
     ship. The
     <a href="/llmrouter/docs/project/roadmap">roadmap</a> describes
-    what is planned for v0.5 (tool use over Realtime, Gemini Live,
-    structured outputs) and v1.0 (API freeze).
+    what is planned for v0.6 (OpenAI Files + Assistants v2, batch
+    APIs, audio in chat, semantic caching, prompt management) and
+    v1.0 (API freeze).
   </p>
   <p>
     For commit-by-commit detail and signed release artifacts, see

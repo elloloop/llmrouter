@@ -1,0 +1,609 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Gemini Live API">
+  <h1>Gemini Live API</h1>
+  <p>
+    The <code>geminilive</code> provider wraps Google's
+    <strong>Gemini Live</strong> WebSocket API — a full-duplex,
+    session-based surface for low-latency voice agents on the
+    Gemini family of models. The shape is deliberately a mirror of
+    <a href="/llmrouter/docs/providers/openai-realtime">OpenAI
+    Realtime</a> so application code can pick a vendor by latency,
+    voice, and price without restructuring around a different API.
+  </p>
+  <p>
+    Read the
+    <a href="/llmrouter/docs/concepts/realtime">Realtime sessions concept page</a>
+    first if you have not seen the three realtime patterns
+    <code>llmrouter</code> models (STT streaming, TTS realtime
+    context, full-duplex Realtime). This page documents Google's
+    take on the third.
+  </p>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/geminilive"
+)`} />
+
+  <h2 id="endpoint">Endpoint and authentication</h2>
+  <p>
+    The provider targets the Gemini Live WebSocket endpoint:
+  </p>
+  <Code lang="text" code={`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={api_key}`} />
+  <p>
+    Authentication is via <strong>API key in the query string</strong>
+    — the same scheme as the synchronous Gemini (AI Studio) provider,
+    not the OAuth/ADC flow used by Vertex. There is no
+    <code>Authorization</code> header on the WebSocket upgrade; the
+    key in the URL authorises the entire session.
+  </p>
+  <p>
+    Override the host with <code>llmrouter.WithBaseURL</code> if you
+    are proxying or pointing at a regional endpoint. The query
+    parameter is appended automatically from the API key supplied via
+    <code>llmrouter.WithAPIKey</code>.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := geminilive.New(
+    llmrouter.WithAPIKey(os.Getenv("GEMINI_API_KEY")),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>
+    The standard options apply: <code>WithAPIKey</code>,
+    <code>WithBaseURL</code>, <code>WithHTTPClient</code> (used for
+    the WebSocket upgrade handshake), and <code>WithTimeout</code>
+    (applied to the upgrade, not the session lifetime — once the
+    socket is open, the session runs until <code>Close</code> or
+    <code>ctx</code> cancellation).
+  </p>
+
+  <h2 id="connect">Connect: opening a session</h2>
+  <p>
+    <code>Provider.Connect</code> is the entry point. It performs the
+    WebSocket upgrade, sends an initial <code>setup</code> frame with
+    the supplied <code>SessionConfig</code>, waits for the server's
+    <code>setup.complete</code> acknowledgement, and returns a live
+    <code>*Session</code> handle.
+  </p>
+  <Code lang="go" code={`func (p *Provider) Connect(ctx context.Context, cfg SessionConfig) (*Session, error)`} />
+
+  <h3 id="session-config">SessionConfig</h3>
+  <Code lang="go" code={`type SessionConfig struct {
+    Model             string          // e.g. "models/gemini-2.0-flash-exp"
+    Voice             string          // "Aoede", "Charon", "Fenrir", "Kore", "Puck"
+    Instructions      string          // system-style guidance for the session
+    OutputAudioFormat string          // "pcm16" (default — 24 kHz)
+    Modalities        []string        // {"TEXT", "AUDIO"} by default
+    Temperature       *float64        // 0.0-2.0
+    TopP              *float64        // nucleus sampling
+    Tools             []llmrouter.ToolDef // function-calling definitions
+    Raw               json.RawMessage     // byte passthrough; typed fields overlay
+}`} />
+  <dl>
+    <dt><code>Model</code></dt>
+    <dd>
+      Gemini Live model id. Required. Goes into the
+      <code>setup.model</code> field on the initial frame. As of
+      writing the live-capable models live under the
+      <code>models/gemini-2.0-flash-exp</code> name; check the
+      <a href="https://ai.google.dev/gemini-api/docs/multimodal-live" target="_blank" rel="noopener">Google docs</a>
+      for the current GA model id.
+    </dd>
+    <dt><code>Voice</code></dt>
+    <dd>
+      One of the five Live voices:
+      <code>Aoede</code>, <code>Charon</code>, <code>Fenrir</code>,
+      <code>Kore</code>, <code>Puck</code>. Voice is a session
+      property — changing it requires a fresh
+      <code>Connect</code>; Gemini Live does not yet support
+      mid-session voice swaps.
+    </dd>
+    <dt><code>Instructions</code></dt>
+    <dd>
+      Free-form system-style guidance. Translated to
+      <code>system_instruction</code> on the setup frame. Plays the
+      same role as the system message in chat but lives on the
+      session.
+    </dd>
+    <dt><code>OutputAudioFormat</code></dt>
+    <dd>
+      Currently fixed to <code>pcm16</code> (16-bit signed PCM at
+      <strong>24 kHz</strong> mono). Listed as a field for forward
+      compatibility — the only accepted value today is the default.
+    </dd>
+    <dt><code>Modalities</code></dt>
+    <dd>
+      Subset of <code>{`{"TEXT", "AUDIO"}`}</code>. Leave empty for
+      both. Note the spellings are uppercase on the wire (unlike
+      OpenAI Realtime). The library accepts either case from the
+      caller and normalises before sending.
+    </dd>
+    <dt><code>Temperature</code> / <code>TopP</code></dt>
+    <dd>
+      Sampling controls passed through to
+      <code>generation_config</code>. Pointers so that the zero value
+      means &ldquo;use the model default&rdquo; rather than &ldquo;0.0&rdquo;.
+    </dd>
+    <dt><code>Tools</code></dt>
+    <dd>
+      Optional function-calling definitions. Uses the same
+      <code>llmrouter.ToolDef</code> shape as chat, translated to
+      Gemini's <code>tools.function_declarations</code> schema. See
+      the <a href="#tools">tool use</a> section below.
+    </dd>
+    <dt><code>Raw</code></dt>
+    <dd>
+      Byte passthrough for fields the typed surface does not model
+      (e.g. <code>realtime_input_config</code>,
+      <code>speech_config.language_code</code>). Typed fields overlay
+      <code>Raw</code> after marshalling, so setting both is safe.
+    </dd>
+  </dl>
+
+  <h2 id="session">Session methods</h2>
+  <Code lang="go" code={`type Session struct {
+    // unexported: conn, events chan, err error, ...
+}
+
+func (s *Session) SendText(text string) error
+func (s *Session) SendAudio(pcm []byte) error
+func (s *Session) SendToolResult(toolCallID string, output any) error
+func (s *Session) Close() error
+func (s *Session) Events() <-chan SessionEvent
+func (s *Session) Err() error`} />
+  <dl>
+    <dt><code>SendText</code></dt>
+    <dd>
+      Send a text turn as <code>client_content</code> with
+      <code>turn_complete: true</code>. Unlike OpenAI Realtime, there
+      is no separate &ldquo;create response&rdquo; step — the
+      <code>turn_complete</code> flag tells the server to start
+      generating.
+    </dd>
+    <dt><code>SendAudio</code></dt>
+    <dd>
+      Append a PCM audio chunk to the
+      <code>realtime_input</code> stream. The bytes must be 16-bit
+      signed PCM at <strong>16 kHz</strong> mono — note this is
+      different from the <em>output</em> sample rate (24 kHz). Stream
+      microphone capture by calling <code>SendAudio</code> on each
+      frame as it arrives.
+    </dd>
+    <dt><code>SendToolResult</code></dt>
+    <dd>
+      Reply to a tool call from the server with the function's
+      output. The <code>output</code> is marshalled to JSON and sent
+      as <code>tool_response.function_responses[].response</code>
+      keyed by <code>toolCallID</code>.
+    </dd>
+    <dt><code>Close</code></dt>
+    <dd>
+      Close the WebSocket cleanly. Idempotent. Cancelling the
+      <code>ctx</code> passed to <code>Connect</code> is equivalent.
+    </dd>
+    <dt><code>Events</code></dt>
+    <dd>
+      Receive channel of <code>SessionEvent</code> values. Single
+      consumer. Closed when the session ends, after which
+      <code>Err()</code> returns the terminal error
+      (<code>nil</code> on clean close).
+    </dd>
+    <dt><code>Err</code></dt>
+    <dd>
+      Terminal error. Blocks until the session ends. Returns
+      <code>nil</code> on clean close,
+      <code>*llmrouter.ErrUpstream</code> for a server-reported
+      error, or a wrapped <code>net</code> / <code>context</code>
+      error for transport failures.
+    </dd>
+  </dl>
+
+  <h2 id="events">SessionEvent</h2>
+  <Code lang="go" code={`type SessionEvent struct {
+    Type               string          // "setup.complete", "server.text", "server.audio", "server.tool_call", "server.turn_complete", "error"
+    Text               string          // populated for server.text
+    AudioDelta         []byte          // populated for server.audio (raw PCM bytes)
+    AudioMime          string          // e.g. "audio/pcm;rate=24000"
+    ToolCallID         string          // populated for server.tool_call
+    ToolName           string          // populated for server.tool_call
+    ToolArgs           json.RawMessage // populated for server.tool_call — full args object
+    Error              *llmrouter.ErrUpstream // populated for "error"
+    Raw                json.RawMessage // original wire JSON
+}`} />
+  <p>
+    Gemini Live events do not have stable string names on the wire
+    the way OpenAI Realtime does — the server sends one of a handful
+    of typed message shapes
+    (<code>setupComplete</code>, <code>serverContent</code>,
+    <code>toolCall</code>, ...) and the library normalises them to
+    the <code>Type</code> values listed below.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Event <code>Type</code></th>
+          <th class="text-left p-3 border-b border-border">Typed fields populated</th>
+          <th class="text-left p-3 border-b border-border">Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><code>setup.complete</code></td>
+          <td class="p-3 border-b border-border">—</td>
+          <td class="p-3 border-b border-border">Server acknowledged the initial setup frame; safe to start sending input.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>server.text</code></td>
+          <td class="p-3 border-b border-border"><code>Text</code></td>
+          <td class="p-3 border-b border-border">Incremental text from the model.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>server.audio</code></td>
+          <td class="p-3 border-b border-border"><code>AudioDelta</code>, <code>AudioMime</code></td>
+          <td class="p-3 border-b border-border">Incremental audio bytes (24 kHz PCM by default).</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>server.tool_call</code></td>
+          <td class="p-3 border-b border-border"><code>ToolCallID</code>, <code>ToolName</code>, <code>ToolArgs</code></td>
+          <td class="p-3 border-b border-border">Server is asking the client to execute a registered tool. Reply with <code>SendToolResult</code>.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>server.turn_complete</code></td>
+          <td class="p-3 border-b border-border">—</td>
+          <td class="p-3 border-b border-border">End of one server turn; the session continues for the next user turn.</td>
+        </tr>
+        <tr>
+          <td class="p-3"><code>error</code></td>
+          <td class="p-3"><code>Error</code></td>
+          <td class="p-3">Server-side error; session usually ends after this.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="example-text">Example: text in, audio out</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/geminilive"
+)
+
+func main() {
+    p, err := geminilive.New(llmrouter.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    sess, err := p.Connect(ctx, geminilive.SessionConfig{
+        Model:        "models/gemini-2.0-flash-exp",
+        Voice:        "Aoede",
+        Instructions: "You are a concise assistant. Reply in one short sentence.",
+        Modalities:   []string{"AUDIO", "TEXT"},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sess.Close()
+
+    if err := sess.SendText("Say hello in five words and play it back."); err != nil {
+        log.Fatal(err)
+    }
+
+    out, _ := os.Create("hello.pcm")
+    defer out.Close()
+
+    for ev := range sess.Events() {
+        switch ev.Type {
+        case "setup.complete":
+            // ready
+        case "server.text":
+            log.Printf("text: %s", ev.Text)
+        case "server.audio":
+            out.Write(ev.AudioDelta)
+        case "server.turn_complete":
+            return
+        case "error":
+            log.Fatalf("server error: %v", ev.Error)
+        }
+    }
+    if err := sess.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+  <p>
+    The resulting <code>hello.pcm</code> file is <strong>24 kHz signed
+    16-bit mono PCM</strong> — play it with
+    <code>ffplay -f s16le -ar 24000 -ac 1 hello.pcm</code> or wrap
+    it in a WAV header.
+  </p>
+
+  <h2 id="example-audio">Example: audio in, audio out</h2>
+  <p>
+    Voice agents pump microphone frames in via
+    <code>SendAudio</code> while the consumer goroutine drains
+    server events and plays audio deltas. Mic capture is
+    platform-specific — the sketch below shows the library calls;
+    substitute your audio driver of choice
+    (<code>malgo</code>, <code>portaudio</code>, etc.) for the
+    pseudocode parts.
+  </p>
+  <p>
+    Pay attention to the <strong>sample-rate asymmetry</strong>:
+    input must be 16 kHz PCM, output arrives as 24 kHz PCM. Resample
+    on the way in (most mic libraries default to 48 kHz) and on the
+    way out for your playback device.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "io"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/geminilive"
+)
+
+// Pseudocode: replace with your audio capture / playback of choice.
+type mic interface {
+    Frames() <-chan []byte // 20ms of 16kHz s16le PCM per frame
+    io.Closer
+}
+type speaker interface {
+    Play(pcm []byte) error // expects 24kHz s16le PCM
+    io.Closer
+}
+
+func openMic16k() (mic, error)         { /* malgo / portaudio / ... */ return nil, nil }
+func openSpeaker24k() (speaker, error) { /* malgo / portaudio / ... */ return nil, nil }
+
+func main() {
+    p, err := geminilive.New(llmrouter.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    sess, err := p.Connect(ctx, geminilive.SessionConfig{
+        Model:        "models/gemini-2.0-flash-exp",
+        Voice:        "Puck",
+        Instructions: "You are a friendly voice assistant. Reply in short sentences.",
+        Modalities:   []string{"AUDIO", "TEXT"},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sess.Close()
+
+    m, err := openMic16k()
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer m.Close()
+
+    sp, err := openSpeaker24k()
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sp.Close()
+
+    // Pump microphone frames into the session.
+    go func() {
+        for frame := range m.Frames() {
+            if err := sess.SendAudio(frame); err != nil {
+                log.Printf("send audio: %v", err)
+                return
+            }
+        }
+    }()
+
+    // Consume server events and play audio deltas as they arrive.
+    for ev := range sess.Events() {
+        switch ev.Type {
+        case "server.audio":
+            if err := sp.Play(ev.AudioDelta); err != nil {
+                log.Printf("play: %v", err)
+            }
+        case "server.text":
+            log.Printf("assistant: %s", ev.Text)
+        case "error":
+            log.Fatalf("server error: %v", ev.Error)
+        }
+    }
+    if err := sess.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+  <p>
+    Gemini Live uses server-side voice activity detection by default
+    — the model picks up end-of-utterance automatically from the
+    audio stream, so you do not need a manual
+    &ldquo;commit&rdquo; step the way OpenAI Realtime has when VAD
+    is disabled.
+  </p>
+
+  <h2 id="tools">Example: tool use</h2>
+  <p>
+    Declare tools on the session, watch for
+    <code>server.tool_call</code> events, execute the function, and
+    reply with <code>SendToolResult</code>. The same
+    <code>llmrouter.ToolDef</code> type used by chat works here — no
+    Gemini-specific tool schema in your application code.
+  </p>
+  <Code lang="go" code={`sess, err := p.Connect(ctx, geminilive.SessionConfig{
+    Model:        "models/gemini-2.0-flash-exp",
+    Voice:        "Kore",
+    Instructions: "You are a weather assistant. Use the get_weather tool when asked.",
+    Modalities:   []string{"AUDIO", "TEXT"},
+    Tools: []llmrouter.ToolDef{{
+        Type: "function",
+        Function: llmrouter.FunctionDef{
+            Name:        "get_weather",
+            Description: "Look up current weather for a city.",
+            Parameters: json.RawMessage(` + "`" + `{
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"}
+                },
+                "required": ["city"]
+            }` + "`" + `),
+        },
+    }},
+})
+if err != nil { log.Fatal(err) }
+defer sess.Close()
+
+_ = sess.SendText("What is the weather in Berlin?")
+
+for ev := range sess.Events() {
+    switch ev.Type {
+    case "server.tool_call":
+        // Execute the tool — args is whatever the schema declared.
+        var args struct{ City string ` + "`json:\"city\"`" + ` }
+        _ = json.Unmarshal(ev.ToolArgs, &args)
+
+        result := map[string]any{
+            "city":        args.City,
+            "temperature": "18C",
+            "conditions":  "cloudy",
+        }
+        if err := sess.SendToolResult(ev.ToolCallID, result); err != nil {
+            log.Fatal(err)
+        }
+    case "server.text":
+        log.Printf("assistant: %s", ev.Text)
+    case "server.turn_complete":
+        return
+    case "error":
+        log.Fatalf("server error: %v", ev.Error)
+    }
+}`} />
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Three distinct error paths, identical in shape to OpenAI
+    Realtime:
+  </p>
+  <ul>
+    <li>
+      <strong>Connect-time errors</strong> — HTTP-upgrade failures
+      (bad API key, network) return from
+      <code>Connect</code> as
+      <code>*llmrouter.ErrUpstream</code> (for non-2xx upgrade
+      responses) or a wrapped <code>net</code> error.
+    </li>
+    <li>
+      <strong>In-session server errors</strong> — surface as a
+      <code>SessionEvent</code> with
+      <code>Type == "error"</code> and a populated
+      <code>Error</code> field. Gemini Live typically closes the
+      socket after an error; check <code>Err()</code> for the
+      terminal status.
+    </li>
+    <li>
+      <strong>Transport errors</strong> — abrupt socket close,
+      context cancellation, deadline exceeded. The events channel
+      closes and <code>Err()</code> returns the underlying error.
+    </li>
+  </ul>
+
+  <h2 id="caveats">Caveats and current limits</h2>
+  <ul>
+    <li>
+      <strong>Beta API on the Google side.</strong> Gemini Live is
+      still labelled experimental — the wire shape can shift between
+      Google SDK releases. The <code>geminilive</code> wrapper pins
+      to a snapshot and may need updates when Google iterates.
+    </li>
+    <li>
+      <strong>Audio sample rates are asymmetric.</strong> Input is
+      <strong>16 kHz</strong> PCM, output is
+      <strong>24 kHz</strong> PCM. Get your resampler right or you
+      will hear chipmunk / molasses voices.
+    </li>
+    <li>
+      <strong>One session per connection.</strong> Each
+      <code>Connect</code> opens a new socket. There is no
+      multiplexing — for parallel sessions, call <code>Connect</code>
+      multiple times.
+    </li>
+    <li>
+      <strong>Voice cannot change mid-session.</strong> To switch
+      voices, close and reconnect with a new
+      <code>SessionConfig</code>.
+    </li>
+    <li>
+      <strong>No reconnect.</strong> If the socket dies, the session
+      is dead — your application is responsible for reconnecting and
+      replaying conversation state.
+    </li>
+    <li>
+      <strong>Input audio format is fixed</strong> to 16-bit signed
+      PCM at 16 kHz. Opus, MP3, and other codecs are not supported
+      on the input side.
+    </li>
+  </ul>
+
+  <h2 id="vs-openai">Gemini Live vs OpenAI Realtime</h2>
+  <p>
+    Both providers expose the same <code>Connect</code> /
+    <code>SendText</code> / <code>SendAudio</code> /
+    <code>SendToolResult</code> / <code>Events</code> /
+    <code>Close</code> shape, so the choice is about voice quality,
+    latency, model behaviour, and price — not API ergonomics. Some
+    rules of thumb:
+  </p>
+  <ul>
+    <li>
+      <strong>Latency profile.</strong> OpenAI Realtime tends to
+      have lower first-audio latency in benchmarks; Gemini Live is
+      catching up and is often cheaper per minute.
+    </li>
+    <li>
+      <strong>Voices.</strong> OpenAI has 8 voices today
+      (<code>alloy</code>, <code>echo</code>, ...); Gemini has 5
+      (<code>Aoede</code>, <code>Charon</code>,
+      <code>Fenrir</code>, <code>Kore</code>, <code>Puck</code>).
+      Pick by ear, not spec sheet.
+    </li>
+    <li>
+      <strong>Multimodal input.</strong> Gemini's strength is
+      vision + audio — if the agent needs to look at a screenshot
+      or a frame from a video stream, Gemini Live's
+      <code>realtime_input</code> accepts inline image bytes
+      alongside audio in a way OpenAI Realtime does not.
+    </li>
+    <li>
+      <strong>Stability.</strong> OpenAI Realtime is closer to GA;
+      Gemini Live is still flagged experimental and gets shape
+      changes from Google more often.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/realtime">Realtime sessions concept</a> — the three patterns and when to use which.</li>
+    <li><a href="/llmrouter/docs/providers/openai-realtime">OpenAI Realtime provider</a> — same shape, different vendor.</li>
+    <li><a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio) provider</a> — synchronous chat / embeddings / TTS / audio-understanding STT.</li>
+    <li><a href="/llmrouter/docs/providers/vertex">Vertex AI provider</a> — managed Gemini with ADC auth (no Live yet).</li>
+  </ul>
+</DocsLayout>

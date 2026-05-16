@@ -1,0 +1,326 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Structured outputs (JSON Schema)">
+  <h1>Structured outputs (JSON Schema)</h1>
+  <p>
+    Structured outputs let you constrain a model's response to a JSON
+    schema you control. Instead of asking the model nicely in the
+    prompt to &ldquo;please respond with JSON matching this shape,&rdquo;
+    you attach a schema to the request and the provider enforces it
+    on the wire. Your application receives JSON that always parses
+    against your schema — no more
+    <code>{`{"answer": "Sure! Here's the JSON you asked for: ..."}`}</code>
+    wrappers, no more truncated braces.
+  </p>
+  <p>
+    <code>llmrouter</code> exposes this via a single
+    <code>ChatRequest.ResponseSchema</code> field. Each provider that
+    supports the feature translates it to whatever the underlying
+    wire format calls it. Application code looks the same regardless
+    of vendor.
+  </p>
+
+  <h2 id="problem">The problem with prompt-engineered JSON</h2>
+  <p>
+    Before structured outputs, getting reliable JSON out of a model
+    meant some combination of:
+  </p>
+  <ul>
+    <li>
+      Putting an example JSON object in the system prompt.
+    </li>
+    <li>
+      Telling the model in CAPS that the response MUST be valid JSON
+      and NOTHING ELSE.
+    </li>
+    <li>
+      Wrapping the model call in a retry loop that re-prompts on
+      parse failure.
+    </li>
+    <li>
+      Hoping for the best.
+    </li>
+  </ul>
+  <p>
+    This works often enough to be tempting and fails often enough to
+    be expensive. Failure modes include the model wrapping the JSON
+    in Markdown fences, prefacing it with an apology, hallucinating
+    fields not in the example, omitting required fields, or
+    truncating mid-object at the token limit.
+  </p>
+  <p>
+    Structured outputs eliminate all of these — the provider
+    constrains the model's sampling at decode time so the only
+    tokens that can be emitted are ones that keep the partial
+    response on-schema.
+  </p>
+
+  <h2 id="api">The API</h2>
+  <p>
+    Two new types on the root package:
+  </p>
+  <Code lang="go" code={`type ResponseSchema struct {
+    Name        string          // a short identifier; passed through to OpenAI's json_schema.name
+    Description string          // optional; helps the model understand intent
+    Schema      json.RawMessage // the JSON Schema body
+    Strict      bool            // request strict-mode enforcement (OpenAI; ignored by others)
+}
+
+type ChatRequest struct {
+    // ... existing fields ...
+    ResponseSchema *ResponseSchema // attach a schema to constrain the output
+}`} />
+  <p>
+    The field is a pointer so the zero value (<code>nil</code>) means
+    &ldquo;don't ask for structured output.&rdquo; Setting it switches
+    the request to constrained mode without changing anything else
+    about how you consume the response.
+  </p>
+
+  <h2 id="translation">Cross-vendor translation</h2>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Provider</th>
+          <th class="text-left p-3 border-b border-border">Wire translation</th>
+          <th class="text-left p-3 border-b border-border">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>OpenAI</strong></td>
+          <td class="p-3 border-b border-border"><code>response_format.type = "json_schema"</code> with the schema body inlined.</td>
+          <td class="p-3 border-b border-border">Native. Strict mode supported on <code>gpt-4o-2024-08-06</code> and newer.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Anthropic</strong></td>
+          <td class="p-3 border-b border-border">Forced tool-use: a synthetic tool is injected whose <code>input_schema</code> matches the requested schema, and <code>tool_choice</code> is set to that tool.</td>
+          <td class="p-3 border-b border-border">The model's response arrives as a tool call on <code>Choice.Delta.ToolCalls</code> rather than as text. Caller parses the args.</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Vertex AI</strong></td>
+          <td class="p-3 border-b border-border"><code>GenerateContentConfig.ResponseMIMEType = "application/json"</code> + <code>ResponseSchema</code> set on the genai SDK request.</td>
+          <td class="p-3 border-b border-border">Supported on Gemini 1.5 and newer. The library uses the official genai SDK's schema types.</td>
+        </tr>
+        <tr>
+          <td class="p-3"><strong>Gemini (AI Studio)</strong></td>
+          <td class="p-3">Same as Vertex (shared transport).</td>
+          <td class="p-3">Same Gemini-1.5+ model requirement.</td>
+        </tr>
+        <tr>
+          <td class="p-3"><strong>Others</strong></td>
+          <td class="p-3">Field ignored.</td>
+          <td class="p-3">No-op — the request goes through unchanged. The model may still produce JSON if you also prompt for it, but there is no enforcement.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="example">Example: extract a structured product from text</h2>
+  <p>
+    Say you want to parse a free-form product description into a
+    typed struct. Define the Go struct, derive the JSON Schema, set
+    it on the request, parse the result.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/openai"
+)
+
+// The shape we want the model to produce.
+type Product struct {
+    Name        string   ` + "`json:\"name\"`" + `
+    PriceCents  int      ` + "`json:\"price_cents\"`" + `
+    Currency    string   ` + "`json:\"currency\"`" + `
+    InStock     bool     ` + "`json:\"in_stock\"`" + `
+    Categories  []string ` + "`json:\"categories\"`" + `
+}
+
+// The JSON Schema that describes it. Keep this hand-written — it's
+// the source of truth the provider enforces.
+const productSchema = ` + "`" + `{
+    "type": "object",
+    "properties": {
+        "name":        {"type": "string"},
+        "price_cents": {"type": "integer", "minimum": 0},
+        "currency":    {"type": "string", "enum": ["USD", "EUR", "GBP"]},
+        "in_stock":    {"type": "boolean"},
+        "categories":  {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["name", "price_cents", "currency", "in_stock", "categories"],
+    "additionalProperties": false
+}` + "`" + `
+
+func main() {
+    p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model: "gpt-4o-2024-08-06",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("system", "Extract structured product data from the user's text."),
+            llmrouter.TextMessage("user", "The new Aeropress XL is in stock at $79.99, in coffee gear and brewing categories."),
+        },
+        ResponseSchema: &llmrouter.ResponseSchema{
+            Name:        "product",
+            Description: "A single product extracted from free-form text.",
+            Schema:      json.RawMessage(productSchema),
+            Strict:      true,
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    var raw []byte
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            raw = append(raw, []byte(c.Delta.Content)...)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+
+    var product Product
+    if err := json.Unmarshal(raw, &product); err != nil {
+        log.Fatalf("model returned invalid JSON despite schema: %v", err)
+    }
+    fmt.Printf("%+v\n", product)
+}`} />
+  <p>
+    The same program runs against Anthropic by changing the import
+    and the model — but you parse the result from
+    <code>Choice.Delta.ToolCalls</code> instead of from the text
+    deltas. See the next section.
+  </p>
+
+  <h2 id="anthropic-shape">Reading the response on Anthropic</h2>
+  <p>
+    Because Anthropic implements structured outputs via forced
+    tool-use, the model's reply arrives as a tool call rather than as
+    free text. Your consumer needs to look at
+    <code>Choice.Delta.ToolCalls</code>:
+  </p>
+  <Code lang="go" code={`stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-5-sonnet-latest",
+    MaxTokens: 1024,
+    Messages:  []llmrouter.Message{ /* ... */ },
+    ResponseSchema: &llmrouter.ResponseSchema{
+        Name:   "product",
+        Schema: json.RawMessage(productSchema),
+    },
+})
+
+var argsBuf []byte
+for chunk := range stream.Chunks() {
+    for _, c := range chunk.Choices {
+        for _, tc := range c.Delta.ToolCalls {
+            // The synthetic tool's name matches ResponseSchema.Name.
+            argsBuf = append(argsBuf, []byte(tc.Function.Arguments)...)
+        }
+    }
+}
+
+var product Product
+_ = json.Unmarshal(argsBuf, &product)`} />
+  <p>
+    Application code that wants vendor parity can wrap this in a
+    helper that returns <code>[]byte</code> regardless of whether
+    the model spoke via text deltas (OpenAI / Vertex / Gemini) or
+    tool-call argument deltas (Anthropic).
+  </p>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>Not all models support strict mode.</strong> On OpenAI,
+      <code>Strict: true</code> requires <code>gpt-4o-2024-08-06</code>
+      or newer; older models accept the schema as a hint but do not
+      enforce it.
+    </li>
+    <li>
+      <strong>Anthropic returns the result via tool-call args.</strong>
+      Your consumer must read from
+      <code>Choice.Delta.ToolCalls</code>, not from
+      <code>Choice.Delta.Content</code>. Write a small helper to
+      paper over the difference if you need true cross-vendor
+      portability.
+    </li>
+    <li>
+      <strong>Models can still fail.</strong> Rare but real:
+      out-of-tokens truncation, content-filter interruptions, and
+      genuine model bugs can produce invalid JSON. Wrap the parse in
+      a retry once and surface a typed error on the second failure.
+    </li>
+    <li>
+      <strong>Schema complexity has a cost.</strong> Deeply nested
+      schemas with many <code>oneOf</code> / <code>anyOf</code>
+      branches make constrained decoding slower and more
+      token-hungry. Keep schemas flat and small where you can.
+    </li>
+    <li>
+      <strong>Strict mode disallows <code>additionalProperties: true</code></strong>
+      on OpenAI. Set it to <code>false</code> on every nested object,
+      or strict mode will reject the schema at request time.
+    </li>
+  </ul>
+
+  <h2 id="vs-prompting">When to use structured outputs vs prompting</h2>
+  <p>
+    Reach for <code>ResponseSchema</code> when:
+  </p>
+  <ul>
+    <li>
+      The downstream code <em>parses</em> the response and you need
+      that parse to succeed every time.
+    </li>
+    <li>
+      You're populating a database row, calling an API, or driving
+      a typed pipeline.
+    </li>
+    <li>
+      The schema is small enough to describe in JSON Schema cleanly.
+    </li>
+  </ul>
+  <p>
+    Stick with prompt-engineered JSON when:
+  </p>
+  <ul>
+    <li>
+      The response is consumed by a human and parse failures are
+      recoverable.
+    </li>
+    <li>
+      You're targeting providers that don't support structured
+      outputs and adding a schema would be a no-op.
+    </li>
+    <li>
+      The output shape genuinely varies per call — a schema with too
+      many alternatives is harder to write than a free-form prompt
+      with examples.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/provider-interface">Provider interface</a> — the chat surface this field hangs off.</li>
+    <li><a href="/llmrouter/docs/providers/openai">OpenAI provider</a> — native <code>response_format</code> support.</li>
+    <li><a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a> — forced tool-use translation.</li>
+    <li><a href="/llmrouter/docs/providers/vertex">Vertex AI provider</a> — Gemini schema support via the genai SDK.</li>
+  </ul>
+</DocsLayout>

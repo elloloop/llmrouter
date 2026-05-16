@@ -20,6 +20,88 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
 
   <h2 id="shipped">Shipped</h2>
 
+  <h3 id="v0-5-0">v0.5.0 — Gemini Live, Realtime tool use, structured outputs, rerank</h3>
+  <p>
+    The function-calling and RAG-refinement release. Tool use lands
+    on Realtime sessions, structured outputs become a first-class
+    cross-vendor field, Google's full-duplex Gemini Live joins the
+    realtime tier, and a brand-new <code>Reranker</code> interface
+    closes the second-stage RAG gap.
+  </p>
+  <ul>
+    <li>
+      <strong>New <code>providers/geminilive</code> package</strong>
+      — wraps Google's Gemini Live WebSocket API. Mirrors the
+      <code>openairealtime</code> shape exactly:
+      <code>Provider.Connect</code> returning a
+      <code>*Session</code> with <code>SendText</code>,
+      <code>SendAudio</code>, <code>SendToolResult</code>,
+      <code>Close</code>, <code>Events()</code>, and
+      <code>Err()</code>. Application code that already drives
+      OpenAI Realtime ports across with an import swap. See the
+      <a href="/llmrouter/docs/providers/gemini-live">Gemini Live provider page</a>.
+    </li>
+    <li>
+      <strong>Tool use over OpenAI Realtime</strong> —
+      <code>SessionConfig.Tools</code> and
+      <code>SessionConfig.ToolChoice</code> accept the same
+      <code>llmrouter.ToolDef</code> shapes as chat. New
+      <code>SessionEvent</code> fields
+      (<code>ToolCallID</code>, <code>ToolName</code>,
+      <code>ToolArgumentsDelta</code>, <code>ToolArguments</code>)
+      surface
+      <code>response.function_call_arguments.{`{delta,done}`}</code>
+      events as typed values. New
+      <code>Session.SendToolResult(ctx, toolCallID, output)</code>
+      method closes the function-calling loop without dropping to
+      <code>Raw</code>.
+    </li>
+    <li>
+      <strong>Structured outputs (JSON Schema)</strong> — new root
+      <code>llmrouter.ResponseSchema</code> type and
+      <code>ChatRequest.ResponseSchema *ResponseSchema</code> field.
+      OpenAI translates to
+      <code>response_format.json_schema</code>. Anthropic translates
+      to forced tool-use with a synthetic tool whose
+      <code>input_schema</code> matches the requested schema. Vertex
+      and Gemini translate to
+      <code>GenerateContentConfig.ResponseMIMEType</code> +
+      <code>ResponseSchema</code> via the genai SDK. See the
+      <a href="/llmrouter/docs/concepts/structured-outputs">Structured outputs concept</a>.
+    </li>
+    <li>
+      <strong>Rerank</strong> — new root
+      <code>llmrouter.Reranker</code> interface plus
+      <code>RerankRequest</code>, <code>RerankResponse</code>, and
+      <code>RerankResult</code> types. Implemented on Cohere
+      (<code>rerank-v3.5</code>), Voyage (<code>rerank-2</code>),
+      and Together (<code>Salesforce/Llama-Rank-V1</code>). Best-in-
+      class second-stage filter for RAG pipelines. See the
+      <a href="/llmrouter/docs/concepts/rerank">Rerank concept</a>
+      and <a href="/llmrouter/docs/api/rerank">API reference</a>.
+    </li>
+    <li>
+      <strong>Embeddings extended to Fireworks and DeepSeek</strong>
+      — thin delegation through the OpenAI-compatible provider,
+      completing the OpenAI-compat embedding coverage across the
+      ten verified vendors.
+    </li>
+    <li>
+      <strong>Provider capability matrix</strong> — Gemini Live row
+      added; Rerank column added (Cohere, Voyage, Together);
+      Embed column gains Fireworks and DeepSeek; Structured outputs
+      column added (OpenAI, Anthropic via tool-use coercion, Vertex,
+      Gemini).
+    </li>
+    <li>
+      <strong>Test suite</strong> — grew from 1,742 to ~2,200
+      subtests covering the Gemini Live state machine, Realtime
+      tool-call event translation, structured-output schema
+      translation on three providers, and rerank request/response
+      shapes on three providers.
+    </li>
+  </ul>
+
   <h3 id="v0-4-0">v0.4.0 — Realtime, WebSocket streaming, tool-result messages</h3>
   <p>
     <code>llmrouter</code> moves into the realtime tier. Existing
@@ -240,39 +322,32 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     <li>Anthropic provider with full request and SSE translation.</li>
   </ul>
 
-  <h2 id="v0-5">Planned for v0.5 — Realtime tool use, more vendors</h2>
+  <h2 id="v0-6">Planned for v0.6 — Files, batch, audio in chat, semantic caching</h2>
   <p>
-    With WebSocket transports in place, v0.5 extends the realtime
-    surface to function-calling and pulls in the next round of
-    full-duplex providers.
+    With realtime, function-calling, structured outputs, and rerank
+    in place, v0.6 turns toward the operational surface that's still
+    only available via vendor SDKs: file uploads, batch jobs,
+    multimodal audio in synchronous chat, and the next tier of
+    cross-vendor caching and prompt management.
   </p>
   <ul>
     <li>
-      <strong>Tool use over Realtime</strong> — function-call events
-      on the OpenAI Realtime session surface as typed
-      <code>SessionEvent</code>s with the same
-      <code>ToolDef</code> / <code>ToolCall</code> shapes already
-      used by chat. Today the v0.4 Realtime wrapper passes tool events
-      through <code>Raw</code> only.
+      <strong>OpenAI Files API + Assistants v2</strong> — typed
+      file-upload surface for documents, plus a thin wrapper around
+      Assistants v2 for the cases that genuinely need server-side
+      thread state.
     </li>
     <li>
-      <strong>Gemini Live (WebSocket)</strong> — Google's
-      full-duplex audio + text endpoint, wrapped through the same
-      <code>openairealtime</code>-style session API so the consumer
-      code reads the same.
+      <strong>Batch APIs</strong> — OpenAI and Anthropic both
+      expose 24-hour batch endpoints at ~50% cost. A cross-vendor
+      <code>Batcher</code> interface that takes a slice of
+      <code>ChatRequest</code> and returns a job handle.
     </li>
     <li>
-      <strong>Function-call typed surface end-to-end</strong> —
-      tool-call deltas and tool-result messages already work in
-      chat; v0.5 closes the loop on streaming partial-arguments and
-      cross-vendor parity for parallel tool calls.
-    </li>
-    <li>
-      <strong>Structured outputs / JSON-mode helper</strong> — a
-      small typed helper for the
-      <code>response_format: {`{type: "json_schema"}`}</code>
-      pattern, with the equivalent Anthropic and Gemini translations
-      hidden behind the same call.
+      <strong>Audio in chat (gpt-4o audio)</strong> — typed
+      audio-input message content for the synchronous
+      <code>gpt-4o-audio-preview</code> family, complementing the
+      Realtime path for cases that don't need full duplex.
     </li>
     <li>
       <strong>Embeddings for Anthropic</strong> when (and if)
@@ -283,11 +358,23 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
       <a href="/llmrouter/docs/providers/voyage">Voyage AI</a>
       directly.
     </li>
+    <li>
+      <strong>Semantic caching</strong> — an opt-in cache layer that
+      hashes the request body and short-circuits identical
+      (or embedding-similar) requests. Strictly opt-in; defaults
+      off.
+    </li>
+    <li>
+      <strong>Prompt management / versioning</strong> — a typed
+      <code>PromptTemplate</code> surface with named versions, so
+      application code can refer to prompts by id and pin to a
+      version separately from the model id.
+    </li>
   </ul>
 
   <h2 id="v1-0">Planned for v1.0 — API freeze</h2>
   <p>
-    Once v0.5 ships and the surface has been stable for a few months,
+    Once v0.6 ships and the surface has been stable for a few months,
     v1.0 freezes the public API. The contract from v1.0 onwards:
   </p>
   <ul>
@@ -330,9 +417,10 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     </li>
     <li>
       <strong>Vector store / RAG.</strong> Vector databases,
-      retrievers, chunkers, rerankers, and prompt assembly are an
-      entire product category. <code>llmrouter</code> gives you
-      embeddings; the retrieval pipeline is yours to build.
+      retrievers, chunkers, and prompt assembly are an entire
+      product category. <code>llmrouter</code> gives you embeddings
+      and (since v0.5) rerank; the storage and retrieval pipeline
+      is yours to build.
     </li>
     <li>
       <strong>Persistent conversation state.</strong> Storing turns
