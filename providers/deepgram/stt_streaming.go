@@ -297,32 +297,53 @@ type deepgramLiveFrame struct {
 }
 
 // decodeLiveFrame converts one wire payload into a TranscriptSegment.
-// Returns ok=false for events the caller should silently skip
-// (Metadata, SpeechStarted, UtteranceEnd, anything without a
-// transcript). Returns a non-nil error only when the JSON itself is
-// malformed.
+//
+// As of v0.6 NO event types are filtered: Results frames carry the
+// transcript fields (Text, Final, SpeechFinal, Start, End, Confidence,
+// Words); non-Results frames (SpeechStarted, UtteranceEnd, Metadata,
+// and any future events) are forwarded as event-only segments with
+// Type set verbatim from the upstream and Text empty. Consumers that
+// only care about transcript text should switch on Type and skip
+// anything other than "" or "Results".
+//
+// Returns ok=false only for the empty payload (used by tests). Returns
+// a non-nil error only when the JSON itself is malformed.
 func decodeLiveFrame(payload []byte) (llmrouter.TranscriptSegment, bool, error) {
+	if len(payload) == 0 {
+		return llmrouter.TranscriptSegment{}, false, nil
+	}
 	var frame deepgramLiveFrame
 	if err := json.Unmarshal(payload, &frame); err != nil {
 		return llmrouter.TranscriptSegment{}, false, fmt.Errorf("deepgram: decode live frame: %w", err)
 	}
-	if frame.Type != "Results" {
-		return llmrouter.TranscriptSegment{}, false, nil
-	}
-	if len(frame.Channel.Alternatives) == 0 {
-		return llmrouter.TranscriptSegment{}, false, nil
-	}
-	alt := frame.Channel.Alternatives[0]
 	rawCopy := make(json.RawMessage, len(payload))
 	copy(rawCopy, payload)
+
+	// Non-Results frames are forwarded as typed event segments (no
+	// transcript fields). Consumers dispatch on Type.
+	if frame.Type != "Results" {
+		return llmrouter.TranscriptSegment{
+			Type: frame.Type,
+			Raw:  rawCopy,
+		}, true, nil
+	}
+	if len(frame.Channel.Alternatives) == 0 {
+		return llmrouter.TranscriptSegment{
+			Type: frame.Type,
+			Raw:  rawCopy,
+		}, true, nil
+	}
+	alt := frame.Channel.Alternatives[0]
 	seg := llmrouter.TranscriptSegment{
-		Text:       alt.Transcript,
-		Final:      frame.IsFinal,
-		Start:      secondsToDuration(frame.Start),
-		End:        secondsToDuration(frame.Start + frame.Duration),
-		Confidence: float32(alt.Confidence),
-		Words:      mapWords(alt.Words),
-		Raw:        rawCopy,
+		Type:        frame.Type,
+		Text:        alt.Transcript,
+		Final:       frame.IsFinal,
+		SpeechFinal: frame.SpeechFinal,
+		Start:       secondsToDuration(frame.Start),
+		End:         secondsToDuration(frame.Start + frame.Duration),
+		Confidence:  float32(alt.Confidence),
+		Words:       mapWords(alt.Words),
+		Raw:         rawCopy,
 	}
 	return seg, true, nil
 }

@@ -582,6 +582,65 @@ func TestTranscriptSegment_EmptyWordsOmitted(t *testing.T) {
 	}
 }
 
+func TestTranscriptSegment_TypeOmittedWhenEmpty(t *testing.T) {
+	seg := llmrouter.TranscriptSegment{Text: "hi", Final: true}
+	b, _ := json.Marshal(seg)
+	if strings.Contains(string(b), `"type"`) {
+		t.Fatalf("empty Type should be omitted: %s", b)
+	}
+}
+
+func TestTranscriptSegment_TypePopulated(t *testing.T) {
+	cases := []string{"Results", "SpeechStarted", "UtteranceEnd", "Metadata"}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			seg := llmrouter.TranscriptSegment{Type: in}
+			b, _ := json.Marshal(seg)
+			if !strings.Contains(string(b), `"type":"`+in+`"`) {
+				t.Fatalf("Type missing: %s", b)
+			}
+		})
+	}
+}
+
+func TestTranscriptSegment_SpeechFinalOmittedWhenFalse(t *testing.T) {
+	seg := llmrouter.TranscriptSegment{Text: "hi", Final: true, SpeechFinal: false}
+	b, _ := json.Marshal(seg)
+	if strings.Contains(string(b), "speech_final") {
+		t.Fatalf("SpeechFinal false should be omitted: %s", b)
+	}
+}
+
+func TestTranscriptSegment_SpeechFinalDistinctFromFinal(t *testing.T) {
+	// Both bools should round-trip independently.
+	cases := []struct {
+		name        string
+		final       bool
+		speechFinal bool
+	}{
+		{"both-false", false, false},
+		{"final-only", true, false},
+		{"speech-only", false, true},
+		{"both-true", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seg := llmrouter.TranscriptSegment{Text: "x", Final: tc.final, SpeechFinal: tc.speechFinal}
+			b, _ := json.Marshal(seg)
+			var got llmrouter.TranscriptSegment
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Final != tc.final {
+				t.Errorf("Final mismatch: %v vs %v", got.Final, tc.final)
+			}
+			if got.SpeechFinal != tc.speechFinal {
+				t.Errorf("SpeechFinal mismatch: %v vs %v", got.SpeechFinal, tc.speechFinal)
+			}
+		})
+	}
+}
+
 // ---------- TranscriptStream lifecycle ----------
 
 func TestNewTranscriptStream_ReturnsAllThreeValues(t *testing.T) {

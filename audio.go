@@ -175,15 +175,44 @@ type TranscriptStream struct {
 	err      error
 }
 
-// TranscriptSegment is one piece of transcribed text. Streaming providers
-// emit interim segments (Final=false) followed by a final segment
-// (Final=true). Non-streaming providers emit one Final segment.
+// TranscriptSegment is one piece of transcribed text OR a non-text
+// stream event (speech start, utterance end, metadata, etc).
+//
+// Streaming providers emit interim transcript segments (Final=false)
+// followed by a final segment (Final=true). They MAY also emit other
+// event types for endpointing, diarization, or session metadata —
+// these arrive with Type populated and Text usually empty. Non-
+// streaming providers emit one transcript segment with Final=true.
+//
+// Consumers that don't care about non-transcript events should switch
+// on Type and skip anything other than "" (empty / unset, which is
+// the transcript-content default) and any provider-specific "Results"
+// equivalent.
 type TranscriptSegment struct {
-	// Text is the transcribed text for this segment.
+	// Type discriminates the kind of segment. Empty string means a
+	// transcript-content segment (the common case). Streaming STT
+	// providers populate this verbatim from the upstream event name,
+	// e.g. Deepgram emits "Results", "SpeechStarted", "UtteranceEnd",
+	// "Metadata". Consumers can switch on this to drive barge-in,
+	// turn-taking, and similar behaviours.
+	Type string `json:"type,omitempty"`
+
+	// Text is the transcribed text for this segment. Empty for non-
+	// transcript event types (SpeechStarted etc).
 	Text string `json:"text"`
 
-	// Final is true on the terminal segment.
+	// Final is true on the terminal segment for an utterance. Streaming
+	// providers may emit several interim segments (Final=false) before a
+	// final segment (Final=true). Non-streaming providers emit one
+	// Final segment.
 	Final bool `json:"final"`
+
+	// SpeechFinal, distinct from Final, indicates the provider has
+	// detected end-of-speech for the current utterance. Deepgram and a
+	// few others report it as a separate bool alongside is_final;
+	// callers building voice agents typically dispatch turn-taking off
+	// SpeechFinal rather than Final.
+	SpeechFinal bool `json:"speech_final,omitempty"`
 
 	// Start / End are timestamps relative to the start of the audio.
 	// Zero when the provider doesn't return timing.

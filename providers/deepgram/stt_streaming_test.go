@@ -483,7 +483,7 @@ func TestTranscribeStreaming(t *testing.T) {
 		}
 	})
 
-	t.Run("metadata_frames_are_skipped", func(t *testing.T) {
+	t.Run("non_results_frames_forwarded_with_type", func(t *testing.T) {
 		mixed := []string{
 			`{"type":"Metadata","request_id":"r1"}`,
 			`{"type":"SpeechStarted","timestamp":0.1}`,
@@ -505,14 +505,76 @@ func TestTranscribeStreaming(t *testing.T) {
 			t.Fatalf("stream err: %v", err)
 		}
 		<-done
+		// All 5 frames now arrive; consumers dispatch on Type.
+		if len(segs) != 5 {
+			t.Fatalf("expected 5 segments (all event types forwarded), got %d", len(segs))
+		}
+		wantTypes := []string{"Metadata", "SpeechStarted", "Results", "UtteranceEnd", "Results"}
+		for i, want := range wantTypes {
+			if segs[i].Type != want {
+				t.Errorf("segs[%d].Type = %q, want %q", i, segs[i].Type, want)
+			}
+		}
+		// Non-Results segments carry no transcript fields.
+		for i, idx := range []int{0, 1, 3} {
+			if segs[idx].Text != "" {
+				t.Errorf("segs[%d].Text = %q, want empty for %s", idx, segs[idx].Text, wantTypes[i])
+			}
+			if segs[idx].Final {
+				t.Errorf("segs[%d].Final true for non-Results event", idx)
+			}
+		}
+		// Results segments carry text + Final.
+		if segs[2].Text != "hi" || segs[2].Final {
+			t.Errorf("interim Results: text=%q final=%v", segs[2].Text, segs[2].Final)
+		}
+		if segs[4].Text != "hi there" || !segs[4].Final {
+			t.Errorf("final Results: text=%q final=%v", segs[4].Text, segs[4].Final)
+		}
+		// Raw populated on every segment.
+		for i, s := range segs {
+			if len(s.Raw) == 0 {
+				t.Errorf("segs[%d].Raw is empty", i)
+			}
+		}
+	})
+
+	t.Run("speech_final_distinct_from_final", func(t *testing.T) {
+		// Interim Results with speech_final=true is meaningful even when
+		// is_final=false: the model has detected end-of-utterance.
+		frames := []string{
+			`{"type":"Results","start":0.0,"duration":0.5,"is_final":false,"speech_final":true,"channel":{"alternatives":[{"transcript":"hi","confidence":0.95,"words":[]}]}}`,
+			`{"type":"Results","start":0.0,"duration":1.0,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hi there","confidence":0.99,"words":[]}]}}`,
+		}
+		p, _, done := newLiveTestServer(t, liveServerOpts{}, frames)
+		stream, err := p.Transcribe(context.Background(), llmrouter.TranscribeRequest{
+			Audio:  strings.NewReader("a"),
+			Stream: true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		segs, err := drainSegments(t, stream)
+		if err != nil {
+			t.Fatalf("stream err: %v", err)
+		}
+		<-done
 		if len(segs) != 2 {
-			t.Fatalf("expected 2 transcript segments (Metadata/SpeechStarted/UtteranceEnd skipped), got %d", len(segs))
+			t.Fatalf("expected 2 segments, got %d", len(segs))
 		}
+		// First: interim transcript with end-of-speech signal (turn-taking trigger).
 		if segs[0].Final {
-			t.Fatal("expected first transcript segment interim")
+			t.Error("seg[0].Final should be false (interim)")
 		}
+		if !segs[0].SpeechFinal {
+			t.Error("seg[0].SpeechFinal should be true")
+		}
+		// Second: final transcript.
 		if !segs[1].Final {
-			t.Fatal("expected second transcript segment final")
+			t.Error("seg[1].Final should be true")
+		}
+		if !segs[1].SpeechFinal {
+			t.Error("seg[1].SpeechFinal should be true")
 		}
 	})
 
