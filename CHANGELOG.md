@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/elloloop/llmrouter/compare/v0.6.0...v0.7.0) (2026-05-16)
+
+
+### Features
+
+* **azureanthropic:** Claude on Azure AI Foundry ([0b90b4a](https://github.com/elloloop/llmrouter/commit/0b90b4afd881b92eda14743d2e19da9c5ab08af4))
+
 ## [0.6.0](https://github.com/elloloop/llmrouter/compare/v0.5.0...v0.6.0) (2026-05-16)
 
 
