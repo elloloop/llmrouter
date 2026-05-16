@@ -2,27 +2,33 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/elloloop/llmrouter.svg)](https://pkg.go.dev/github.com/elloloop/llmrouter)
 [![CI](https://github.com/elloloop/llmrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/elloloop/llmrouter/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/elloloop/llmrouter)](https://goreportcard.com/report/github.com/elloloop/llmrouter)
+[![Latest release](https://img.shields.io/github/v/release/elloloop/llmrouter?sort=semver)](https://github.com/elloloop/llmrouter/releases)
+[![Go version](https://img.shields.io/github/go-mod/go-version/elloloop/llmrouter)](go.mod)
+[![License](https://img.shields.io/github/license/elloloop/llmrouter)](LICENSE)
 
-A polyglot Go client for LLM providers. One OpenAI-shaped API surface across chat, embeddings, text-to-speech, speech-to-text, full-duplex realtime, structured outputs, and rerank. Pluggable provider backends; configurable base URL + API key per provider; streaming-first.
+**One Go API across 22 LLM providers — chat, embeddings, TTS, STT, realtime voice, and rerank — so your application code never branches on provider.**
 
-> **v0.5 status:** 22 providers across chat, embeddings, TTS, STT, realtime, and rerank. Five root interfaces (`Provider`, `Embedder`, `Speaker`, `Transcriber`, `Reranker`) plus the session-based `openairealtime.Session` and `geminilive.Session` surfaces. Structured outputs land as a `ChatRequest.ResponseSchema` field with native OpenAI / forced-tool-use Anthropic / Vertex+Gemini translation. Tool use is first-class over OpenAI Realtime sessions. See the [roadmap](https://elloloop.github.io/llmrouter/docs/project/roadmap) for v0.6 plans (OpenAI Files + Assistants v2, batch APIs, audio in chat, semantic caching, prompt management).
+Docs: **<https://elloloop.github.io/llmrouter/>**
 
-## Why
+## Why llmrouter
 
-There are great per-vendor SDKs in Go (`openai-go`, `anthropic-sdk-go`, `google.golang.org/genai`) and one unified library worth knowing about (`mozilla-ai/any-llm-go`). `llmrouter` exists for one specific shape of project:
-
-- You want a **single API surface** across multiple vendors and multiple capabilities — chat, embeddings, TTS, STT — so application code doesn't branch on provider.
-- You want **byte-level passthrough** where possible — for proxies, gateways, or any "intercept the OpenAI request, route it somewhere, stream it back" use case.
-- You want to use **any URL with any API key** for OpenAI-compatible vendors (OpenRouter, Together, Groq, self-hosted) without a per-vendor SDK.
-- You want **first-class streaming** with proper `context.Context` cancellation that propagates to the upstream HTTP request — across chat, audio output, and live transcription.
+- **One API surface across 22 vendors.** OpenAI, Anthropic, Azure OpenAI, AWS Bedrock, Google Vertex AI, Google Gemini, Cohere, Mistral, Groq, Together, OpenRouter, Fireworks, DeepSeek, xAI (Grok), Perplexity, Cerebras, ElevenLabs, Deepgram, Cartesia, Voyage AI, plus dedicated realtime packages for OpenAI Realtime and Gemini Live. Same `ChatRequest`, same streaming lifecycle, no provider-specific branching in your app code.
+- **Six capabilities, not just chat.** Streaming chat, embeddings, text-to-speech (TTS), speech-to-text (STT) with word-level timing, full-duplex realtime sessions over WebSocket for voice agents, rerank for RAG retrieval, and structured outputs via JSON Schema (native on OpenAI, forced tool-use on Anthropic, `ResponseMIMEType` on Vertex/Gemini).
+- **Byte-level passthrough for LLM gateways.** `ChatRequest.Raw` and `Chunk.Raw` let you proxy upstream OpenAI traffic byte-identically — ideal for self-hosted gateways, observability layers, and routing/caching proxies.
+- **Boring dependencies.** Standard library plus well-known major-vendor SDKs only (AWS SDK v2, `google.golang.org/genai`, `coder/websocket`, `google/uuid`). Apache-2.0. No exotic transitive footprint.
 
 ## Install
 
 ```bash
-go get github.com/elloloop/llmrouter@v0.5.0
+go get github.com/elloloop/llmrouter@latest
 ```
 
+Requires Go 1.24+.
+
 ## Quick start
+
+### Streaming chat (OpenAI)
 
 ```go
 package main
@@ -39,61 +45,104 @@ import (
 
 func main() {
     p, err := openai.New(llmrouter.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
-    if err != nil { log.Fatal(err) }
+    if err != nil {
+        log.Fatal(err)
+    }
 
     stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
-        Model:    "gpt-4o-mini",
-        Messages: []llmrouter.Message{llmrouter.TextMessage("user", "Say hi in 5 words.")},
+        Model: "gpt-4o-mini",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "Say hi in 5 words."),
+        },
     })
-    if err != nil { log.Fatal(err) }
+    if err != nil {
+        log.Fatal(err)
+    }
 
     for chunk := range stream.Chunks() {
         for _, c := range chunk.Choices {
             fmt.Print(c.Delta.Content)
         }
     }
-    if err := stream.Err(); err != nil { log.Fatal(err) }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
-## Providers (capability matrix)
+### Same code, different provider (Anthropic Claude)
 
-| Provider | Chat | Embeddings | TTS | STT | Rerank | Structured outputs | Realtime / WS streaming |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| OpenAI | ✓ | ✓ | ✓ | Whisper | — | ✓ | — |
-| Anthropic | ✓ | — *(use Voyage shim)* | — | — | — | ✓ *(tool-use)* | — |
-| Azure OpenAI | ✓ | ✓ | ✓ | Whisper | — | ✓ | — |
-| AWS Bedrock | ✓ | Titan + Cohere | — | — | — | — | — |
-| Google Vertex AI | ✓ | ✓ | partial | — | — | ✓ | — |
-| Google Gemini (AI Studio) | ✓ | ✓ | ✓ | audio understanding | — | ✓ | — |
-| Cohere | ✓ | ✓ | — | — | ✓ `rerank-v3.5` | — | — |
-| Mistral | ✓ | ✓ | — | — | — | — | — |
-| Together | ✓ | delegated | — | — | ✓ `Llama-Rank-V1` | — | — |
-| Groq | ✓ | — | — | Whisper | — | — | — |
-| OpenRouter | ✓ | — | — | — | — | — | — |
-| Fireworks | ✓ | ✓ | — | — | — | — | — |
-| DeepSeek | ✓ | ✓ | — | — | — | — | — |
-| xAI (Grok) | ✓ | — | — | — | — | — | — |
-| Perplexity | ✓ | — | — | — | — | — | — |
-| Cerebras | ✓ | — | — | — | — | — | — |
-| **ElevenLabs** | — | — | ✓ | Scribe | — | — | ✓ `SpeakRealtime` |
-| **Deepgram** | — | — | — | Nova-3 | — | — | ✓ live STT |
-| **Cartesia** | — | — | Sonic-2 | — | — | — | ✓ `SpeakRealtime` |
-| **Voyage AI** | — | ✓ | — | — | ✓ `rerank-2` | — | — |
-| **OpenAI Realtime** | session | — | session | session | — | — | ✓ full duplex + tools |
-| **Gemini Live** | session | — | session | session | — | — | ✓ full duplex + tools |
-
-Each row links to a per-provider docs page: [docs.tinykite.co/llmrouter/docs/providers/](https://elloloop.github.io/llmrouter/docs/providers/openai).
-
-## Custom base URL — same provider, any endpoint
+Only the import and the model name change. The Anthropic provider translates the request body and the SSE event stream to the same shape.
 
 ```go
-// OpenRouter (OpenAI-compatible)
-openrouter, _ := openai.New(
-    llmrouter.WithAPIKey(os.Getenv("OPENROUTER_API_KEY")),
-    llmrouter.WithBaseURL("https://openrouter.ai/api/v1"),
+import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/anthropic"
 )
 
+p, _ := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+
+stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-7-sonnet-latest",
+    MaxTokens: 256,
+    Messages: []llmrouter.Message{
+        llmrouter.TextMessage("system", "You are concise."),
+        llmrouter.TextMessage("user", "Why is the sky blue?"),
+    },
+})
+```
+
+### Embeddings
+
+```go
+import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/voyage"
+)
+
+p, _ := voyage.New(llmrouter.WithAPIKey(os.Getenv("VOYAGE_API_KEY")))
+
+resp, _ := p.Embed(ctx, llmrouter.EmbedRequest{
+    Model:    "voyage-3",
+    Inputs:   []string{"What is RAG?", "Document chunk text..."},
+    TaskType: "RETRIEVAL_QUERY",
+})
+
+for i, vec := range resp.Embeddings {
+    fmt.Printf("input %d: %d dims\n", i, len(vec))
+}
+```
+
+### Text-to-speech (ElevenLabs)
+
+```go
+import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/elevenlabs"
+)
+
+p, _ := elevenlabs.New(llmrouter.WithAPIKey(os.Getenv("ELEVENLABS_API_KEY")))
+
+stream, _ := p.Speak(ctx, llmrouter.SpeechRequest{
+    Model:  "eleven_turbo_v2_5",
+    Input:  "Hello from ElevenLabs.",
+    Voice:  "21m00Tcm4TlvDq8ikWAM",
+    Format: "mp3",
+})
+
+out, _ := os.Create("hello.mp3")
+defer out.Close()
+for chunk := range stream.Chunks() {
+    out.Write(chunk.Data)
+}
+if err := stream.Err(); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Custom base URL — any OpenAI-compatible endpoint
+
+```go
 // Together
 together, _ := openai.New(
     llmrouter.WithAPIKey(os.Getenv("TOGETHER_API_KEY")),
@@ -102,154 +151,113 @@ together, _ := openai.New(
 
 // Self-hosted vLLM / Ollama / anything OpenAI-compatible
 local, _ := openai.New(
-    llmrouter.WithAPIKey("not-needed-but-required-by-config"),
+    llmrouter.WithAPIKey("not-needed"),
     llmrouter.WithBaseURL("http://localhost:11434/v1"),
 )
 ```
 
-## Anthropic with the OpenAI request shape
+## Capability matrix
 
-The Anthropic provider translates both the request body (OpenAI `messages` → Anthropic `/v1/messages`, system role lifted to top-level `system` field) and the SSE event stream. You write the same `ChatRequest`; the wire-level translation is hidden.
+22 provider packages. ✓ = supported, — = not applicable for this vendor.
 
-```go
-import "github.com/elloloop/llmrouter/providers/anthropic"
+| Provider | Chat | Embed | TTS | STT | Realtime | Rerank | Structured outputs |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| OpenAI | ✓ | ✓ | ✓ | ✓ Whisper | — | — | ✓ native |
+| Anthropic | ✓ | — (Voyage shim) | — | — | — | — | ✓ forced tool-use |
+| Azure OpenAI | ✓ | ✓ | ✓ | ✓ Whisper | — | — | ✓ |
+| AWS Bedrock | ✓ | ✓ Titan + Cohere | — | — | — | — | — |
+| Google Vertex AI | ✓ | ✓ | ✓ | ✓ | — | — | ✓ `ResponseMIMEType` |
+| Google Gemini | ✓ | ✓ | ✓ | ✓ | — | — | ✓ `ResponseMIMEType` |
+| Cohere | ✓ | ✓ | — | — | — | ✓ `rerank-v3.5` | — |
+| Mistral | ✓ | ✓ | — | — | — | — | — |
+| Groq | ✓ | — | — | ✓ Whisper | — | — | — |
+| Together | ✓ | ✓ | — | — | — | ✓ `Llama-Rank-V1` | — |
+| OpenRouter | ✓ | — | — | — | — | — | — |
+| Fireworks | ✓ | ✓ | — | — | — | — | — |
+| DeepSeek | ✓ | ✓ | — | — | — | — | — |
+| xAI (Grok) | ✓ | — | — | — | — | — | — |
+| Perplexity | ✓ | — | — | — | — | — | — |
+| Cerebras | ✓ | — | — | — | — | — | — |
+| ElevenLabs | — | — | ✓ + `SpeakRealtime` | ✓ Scribe | — | — | — |
+| Deepgram | — | — | — | ✓ Nova-3 (WS) | — | — | — |
+| Cartesia | — | — | ✓ Sonic-2 + `SpeakRealtime` | — | — | — | — |
+| Voyage AI | — | ✓ | — | — | — | ✓ `rerank-2` | — |
+| **OpenAI Realtime** | session | — | session | session | ✓ full duplex + tools | — | — |
+| **Gemini Live** | session | — | session | session | ✓ full duplex + tools | — | — |
 
-p, _ := anthropic.New(llmrouter.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+Per-provider docs: <https://elloloop.github.io/llmrouter/docs/providers/openai>
 
-stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
-    Model: "claude-3-7-sonnet-latest",
-    Messages: []llmrouter.Message{
-        llmrouter.TextMessage("system", "You are concise."),
-        llmrouter.TextMessage("user", "Why is the sky blue?"),
-    },
-    MaxTokens: 256,
-})
-```
+## Architecture
 
-## Embeddings
+llmrouter exposes a small set of root interfaces (`Provider`, `Embedder`, `Speaker`, `Transcriber`, `Reranker`) backed by per-vendor packages under `providers/`. Each provider package implements only the interfaces it actually supports — Anthropic implements `Provider`, Voyage implements `Embedder` and `Reranker`, Deepgram implements `Transcriber` (over WebSocket), and so on. There is no central dispatcher and no plugin registry; you import the provider package(s) you need and pass them around as the relevant interface.
 
-```go
-import "github.com/elloloop/llmrouter/providers/voyage"
+The library is OpenAI-shaped on the wire: requests use the OpenAI `messages` array and Chat Completion chunk format. Non-OpenAI providers translate request/response at the package boundary — Anthropic lifts the `system` role to a top-level field, Bedrock maps to Converse Stream, Vertex/Gemini hit the Generative Language API. For OpenAI-compatible vendors (Together, Groq, OpenRouter, Fireworks, DeepSeek, xAI, Perplexity, Cerebras, vLLM, Ollama) the request flows through byte-passthrough — `ChatRequest.Raw` is forwarded as-is, and `Chunk.Raw` carries the original wire bytes back to the caller. This makes llmrouter usable as the engine behind a self-hosted LLM gateway that needs to stay byte-identical to upstream OpenAI.
 
-p, _ := voyage.New(llmrouter.WithAPIKey(os.Getenv("VOYAGE_API_KEY")))
-
-resp, _ := p.Embed(ctx, llmrouter.EmbedRequest{
-    Model:    "voyage-3",
-    Inputs:   []string{"What is RAG?", "Document chunk text..."},
-    TaskType: "RETRIEVAL_QUERY", // mapped per-vendor (Cohere search_query, Voyage query, ...)
-})
-
-for i, vec := range resp.Embeddings {
-    fmt.Printf("input %d: %d dims\n", i, len(vec))
-}
-```
-
-See the [Embeddings concept page](https://elloloop.github.io/llmrouter/docs/concepts/embeddings) for the cross-vendor task-type mapping table.
-
-## Audio: TTS
-
-```go
-import "github.com/elloloop/llmrouter/providers/cartesia"
-
-p, _ := cartesia.New(llmrouter.WithAPIKey(os.Getenv("CARTESIA_API_KEY")))
-
-stream, _ := p.Speak(ctx, llmrouter.SpeechRequest{
-    Model:  "sonic-2",
-    Input:  "Hello from Cartesia, streamed in under 100 milliseconds.",
-    Voice:  "d46abd1d-2d02-43e8-819f-51fb652c1c61",
-    Format: "mp3",
-    Stream: true,
-})
-
-out, _ := os.Create("hello.mp3")
-defer out.Close()
-for chunk := range stream.Chunks() {
-    out.Write(chunk.Data)
-}
-```
-
-## Audio: STT
-
-```go
-import "github.com/elloloop/llmrouter/providers/deepgram"
-
-p, _ := deepgram.New(llmrouter.WithAPIKey(os.Getenv("DEEPGRAM_API_KEY")))
-
-f, _ := os.Open("meeting.wav")
-defer f.Close()
-
-stream, _ := p.Transcribe(ctx, llmrouter.TranscribeRequest{
-    Model:          "nova-3",
-    Audio:          f,
-    AudioFormat:    "audio/wav",
-    Language:       "en-US",
-    ResponseFormat: "verbose_json",
-})
-
-for seg := range stream.Segments() {
-    fmt.Printf("[%s] %s\n", seg.Start, seg.Text)
-}
-```
+Streaming is uniform across capabilities: every long-lived call returns a typed stream (`Stream`, `AudioStream`, `TranscriptStream`) exposing a `Chunks()` / `Segments()` channel, an `Err()` terminal error, and a `Cancel()` method. Cancelling the `context.Context` passed in propagates to the upstream HTTP request, and mid-stream errors surface through `Err()` rather than being silently swallowed.
 
 ## API surface
 
-| | |
+| Symbol | Purpose |
 |---|---|
-| `llmrouter.Provider` | interface: `Name()`, `CompletionStream(ctx, req) (*Stream, error)` |
-| `llmrouter.Embedder` | interface: `Embed(ctx, EmbedRequest) (*EmbedResponse, error)` |
-| `llmrouter.Speaker` | interface: `Speak(ctx, SpeechRequest) (*AudioStream, error)` |
-| `llmrouter.Transcriber` | interface: `Transcribe(ctx, TranscribeRequest) (*TranscriptStream, error)` |
-| `llmrouter.Reranker` | **v0.5** interface: `Rerank(ctx, RerankRequest) (*RerankResponse, error)` — Cohere, Voyage, Together |
-| `llmrouter.ChatRequest` | OpenAI-shaped chat request; `Raw json.RawMessage` for byte passthrough |
-| `llmrouter.ResponseSchema` | **v0.5** JSON-schema constraint type; attach via `ChatRequest.ResponseSchema *ResponseSchema` — translated to native `response_format` on OpenAI, forced tool-use on Anthropic, `ResponseMIMEType` on Vertex/Gemini |
-| `llmrouter.Message`, `TextMessage` | typed message; `ToolCallID` and `Name` fields for tool-result wiring |
-| `llmrouter.ToolResultMessage(toolCallID, content)` | v0.4 helper for tool-result messages (typed for OpenAI, translated to `tool_result` block for Anthropic) |
-| `llmrouter.Stream` / `AudioStream` / `TranscriptStream` | `Chunks() / Segments()`, `Err()`, `Cancel()` — same lifecycle |
-| `cartesia.SpeakRealtime` / `elevenlabs.SpeakRealtime` | v0.4 WebSocket TTS — returns `*AudioStream, *RealtimeContext, error` for multi-turn append |
-| `openairealtime.Provider.Connect` | v0.4 full-duplex session: `SendText`, `SendAudio`, `Commit`, `CreateResponse`, `UpdateSession`, `Close`, `Events()`, `Err()`. **v0.5** adds typed tool use via `SessionConfig.Tools` / `SessionConfig.ToolChoice` and `Session.SendToolResult(ctx, toolCallID, output)` |
-| `geminilive.Provider.Connect` | **v0.5** full-duplex session against Google's `BidiGenerateContent`: `SendText`, `SendAudio`, `SendToolResult`, `Close`, `Events()`, `Err()` — same shape as `openairealtime` |
-| `anthropic.NewRecommendedEmbedder(voyageAPIKey, opts...)` | v0.4 shim returning a Voyage-backed `Embedder` (Anthropic's documented recommendation) |
-| `llmrouter.WithAPIKey`, `WithBaseURL`, `WithHTTPClient`, `WithTimeout`, `WithExtra` | provider config options |
-| `llmrouter.ErrUpstream` | non-2xx response wrapper with `Provider`, `StatusCode`, `Body` |
+| `Provider` | interface: `Name()`, `CompletionStream(ctx, req) (*Stream, error)` |
+| `Embedder` | interface: `Embed(ctx, EmbedRequest) (*EmbedResponse, error)` |
+| `Speaker` | interface: `Speak(ctx, SpeechRequest) (*AudioStream, error)` |
+| `Transcriber` | interface: `Transcribe(ctx, TranscribeRequest) (*TranscriptStream, error)` |
+| `Reranker` | interface: `Rerank(ctx, RerankRequest) (*RerankResponse, error)` |
+| `ChatRequest` | OpenAI-shaped chat request; `Raw json.RawMessage` for byte passthrough |
+| `EmbedRequest` / `SpeechRequest` / `TranscribeRequest` / `RerankRequest` | per-capability request types |
+| `ResponseSchema` | JSON-schema constraint attached via `ChatRequest.ResponseSchema` |
+| `Message` / `TextMessage(role, text)` | typed message; `Content` is `json.RawMessage` for multimodal arrays |
+| `MultipartMessage(role, parts...)` | helper for vision / audio content blocks |
+| `ToolResultMessage(toolCallID, content)` | helper for tool-result messages with cross-vendor translation |
+| `Stream` / `AudioStream` / `TranscriptStream` | `Chunks() / Segments()`, `Err()`, `Cancel()` — same lifecycle |
+| `openairealtime.Provider.Connect` | full-duplex `gpt-4o-realtime` session with typed tool use |
+| `geminilive.Provider.Connect` | full-duplex Gemini `BidiGenerateContent` session |
+| `cartesia.SpeakRealtime` / `elevenlabs.SpeakRealtime` | WebSocket TTS with multi-turn append |
+| `anthropic.NewRecommendedEmbedder` | Voyage-backed `Embedder` shim (Anthropic's documented recommendation) |
+| `WithAPIKey` / `WithBaseURL` / `WithHTTPClient` / `WithTimeout` / `WithExtra` | provider config options |
+| `ErrUpstream` | non-2xx response wrapper with `Provider`, `StatusCode`, `Body` |
+| `ErrInvalidConfig` | constructor-time validation error |
 
-## Streaming semantics
+## Comparison vs alternatives
 
-- The producer goroutine pushes values into a buffered channel; the consumer reads until close.
-- Cancelling the `ctx` passed to `CompletionStream` / `Speak` / `Transcribe` propagates to the upstream HTTP request.
-- After the channel closes, call `Err()` for the terminal error (nil on success).
-- Single-consumer: only one goroutine should read from the channel.
+| | `llmrouter` | per-vendor SDKs | `mozilla-ai/any-llm-go` | LiteLLM |
+|---|---|---|---|---|
+| Language | Go | Go | Go | Python only |
+| Chat providers | 22 | one per package | ~10 | many |
+| Cloud triple (Azure / Bedrock / Vertex) | ✓ all three | per vendor | partial / no / no | ✓ |
+| TTS / STT / Rerank | ✓ all three | per vendor | — | partial |
+| Realtime WebSocket (voice agents) | ✓ OpenAI + Gemini Live | per vendor | — | — |
+| Byte passthrough for gateways | ✓ `Chunk.Raw`, `ChatRequest.Raw` | n/a | — | partial |
+| Streaming lifecycle | `chan` + ctx cancel + `Err()` | varies per SDK | similar | sync wrappers |
+| Mid-stream errors surfaced | ✓ | varies | ✗ | varies |
 
-The same lifecycle applies across all three stream types — if you've used `Stream`, you already know how to use `AudioStream` and `TranscriptStream`.
+**vs per-vendor SDKs:** great if you only use one vendor. Painful once you support two — you write provider-specific branching, parse two SSE formats, handle two error shapes.
+
+**vs `mozilla-ai/any-llm-go`:** closest Go alternative. llmrouter additionally supports Azure / Bedrock / Vertex, TTS/STT/Rerank/Realtime, and byte-passthrough for gateways.
+
+**vs LiteLLM:** great if you're on Python. llmrouter is the Go-native equivalent for backend services and gateways that don't want a Python sidecar.
+
+**vs direct HTTP:** you'd re-implement SSE parsing, error normalization, context cancellation, and retry semantics per vendor.
 
 ## Roadmap
 
-- **Shipped — v0.5**: New `providers/geminilive` package wrapping Google's `BidiGenerateContent` WebSocket API (same shape as `openairealtime`). Typed tool use over OpenAI Realtime (`SessionConfig.Tools`, `SessionConfig.ToolChoice`, `Session.SendToolResult`). Structured outputs via `ChatRequest.ResponseSchema` (OpenAI native / Anthropic forced tool-use / Vertex+Gemini `ResponseMIMEType`). New `Reranker` interface with Cohere, Voyage, Together. Embeddings extended to Fireworks + DeepSeek.
-- **Shipped — v0.4**: WebSocket live STT on Deepgram. `SpeakRealtime` on Cartesia and ElevenLabs. New `providers/openairealtime` package wrapping `gpt-4o-realtime` full-duplex sessions. Typed `ToolResultMessage` helper with cross-vendor translation. `anthropic.NewRecommendedEmbedder` Voyage shim.
-- **Shipped — v0.3**: Embeddings + TTS + STT root interfaces. Four new specialist providers (ElevenLabs, Deepgram, Cartesia, Voyage AI). OpenAI/Azure/Gemini gain TTS+STT+embeddings. Bedrock/Vertex/Cohere/Mistral gain embeddings.
-- **Shipped — v0.2**: Azure OpenAI Service, AWS Bedrock, Google Vertex AI, Gemini (AI Studio), Cohere, Mistral. Typed tool-call passthrough. Extended thinking. Prompt caching. Multimodal content helpers. Ten OpenAI-compatible vendors verified.
-- **Planned — v0.6**: OpenAI Files API + Assistants v2. Cross-vendor batch APIs. Audio in chat (`gpt-4o-audio-preview`). Embeddings for Anthropic when GA. Semantic caching. Prompt management / versioning.
-- **v1.0**: API freeze. Until then, expect minor breakages between minor versions.
+See the [full roadmap](https://elloloop.github.io/llmrouter/docs/project/roadmap/). Highlights:
 
-## Comparisons
+- **v0.6 (next):** OpenAI Files API + Assistants v2, cross-vendor batch APIs, audio in chat (`gpt-4o-audio-preview`), semantic caching, prompt management / versioning.
+- **v0.7:** Anthropic native embeddings when GA, additional realtime providers, gateway-side circuit-breaker primitives.
+- **v1.0:** API freeze. Until then, expect minor breakages between minor versions — pinned modules are recommended.
 
-| | `llmrouter` (this) | `mozilla-ai/any-llm-go` | per-vendor SDKs |
-|---|---|---|---|
-| Chat providers (v0.3) | 16 (incl. all 3 cloud triple + 8 OpenAI-compat) | 10 | one per package |
-| Embedding providers | 9 (incl. Voyage) | partial | one per package |
-| TTS providers | 5 (OpenAI, Azure, Gemini, ElevenLabs, Cartesia) | no | yes (per vendor) |
-| STT providers | 5 (Whisper variants + Gemini + Scribe + Nova-3) | no | yes (per vendor) |
-| Byte passthrough | yes (`Chunk.Raw`, `AudioChunk.Raw`) | no (parses to typed shapes) | n/a |
-| Cloud triple | yes (Azure / Bedrock / Vertex) | partial / no / no | yes (each vendor) |
-| Streaming | channel + context cancel | channel + context cancel | varies |
-| Mid-stream errors | yes (since v0.2) | no | varies |
-| Pre-1.0 churn | expect API changes between minors | expect API changes | stable |
-
-## License
-
-[Apache 2.0](./LICENSE)
+See the [CHANGELOG](./CHANGELOG.md) for shipped releases.
 
 ## Contributing
 
-Issues and PRs welcome. For larger changes, please open an issue first to discuss the shape.
+Issues and PRs welcome. For larger changes, please open an issue first to discuss the shape. See [CONTRIBUTING.md](./CONTRIBUTING.md) if present, and the [docs site](https://elloloop.github.io/llmrouter/) for design notes and per-provider implementation guides.
 
-The library was extracted from [Kite AI Router](https://github.com/tinykite-co) — a self-hosted LLM gateway. The provider code originated there and got cleaner along the way; thanks to the Tollgate codebase for proving it out in production.
+## License
+
+[Apache 2.0](./LICENSE). See [NOTICE](./NOTICE) for attributions.
+
+## Acknowledgements
+
+llmrouter was extracted from the **Kite AI Router** (codename: Tollgate), a self-hosted LLM gateway built at `tinykite-co`. The OpenAI and Anthropic provider implementations originated there and were cleaned up during extraction in May 2026. See [NOTICE](./NOTICE) for full attributions.

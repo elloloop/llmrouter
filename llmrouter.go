@@ -1,30 +1,64 @@
 // Package llmrouter is a polyglot Go client for LLM providers.
 //
-// One OpenAI-shaped API surface fans out to OpenAI, Anthropic, Azure
-// OpenAI, AWS Bedrock, Google Vertex (planned), and any OpenAI-compatible
-// endpoint (Groq, Together, OpenRouter, self-hosted) via a configurable
-// base URL.
+// One OpenAI-shaped API surface fans out to 22 providers across six
+// capabilities: chat (with streaming), embeddings, text-to-speech (TTS),
+// speech-to-text (STT), full-duplex realtime over WebSocket, and rerank
+// for RAG. Pluggable provider backends; configurable base URL and API key
+// per provider; streaming-first with proper context cancellation that
+// propagates to the upstream HTTP request.
 //
-// Streaming-first design with proper context cancellation propagation.
+// Chat providers include OpenAI, Anthropic (Claude), Azure OpenAI, AWS
+// Bedrock, Google Vertex AI, Google Gemini, Cohere, Mistral, Groq,
+// Together, OpenRouter, Fireworks, DeepSeek, xAI (Grok), Perplexity, and
+// Cerebras — plus any OpenAI-compatible endpoint via WithBaseURL (vLLM,
+// Ollama, self-hosted).
+//
+// Capabilities beyond chat:
+//
+//   - Embedder: OpenAI, Azure, Bedrock, Vertex, Gemini, Cohere, Mistral,
+//     Together, Fireworks, DeepSeek, Voyage AI.
+//   - Speaker (TTS): OpenAI, Azure, Gemini, Vertex, ElevenLabs, Cartesia.
+//   - Transcriber (STT): OpenAI Whisper, Azure Whisper, Groq Whisper,
+//     Gemini, Vertex, ElevenLabs Scribe, Deepgram Nova-3 (WebSocket).
+//   - Reranker: Cohere rerank-v3.5, Voyage rerank-2, Together Llama-Rank.
+//   - Realtime (full-duplex WebSocket): openairealtime (gpt-4o-realtime)
+//     and geminilive (BidiGenerateContent) — for low-latency voice agents
+//     with typed tool use.
+//   - Structured outputs via ChatRequest.ResponseSchema — translated to
+//     native response_format on OpenAI, forced tool-use on Anthropic, and
+//     ResponseMIMEType on Vertex / Gemini.
+//
+// Byte-passthrough is first-class: ChatRequest.Raw and Chunk.Raw let you
+// build an LLM gateway whose responses are byte-identical to upstream
+// OpenAI, ideal for proxies and observability layers.
 //
 // Quick start:
 //
 //	import (
 //		"context"
+//		"fmt"
 //		"github.com/elloloop/llmrouter"
 //		"github.com/elloloop/llmrouter/providers/openai"
 //	)
 //
 //	p, _ := openai.New(llmrouter.WithAPIKey("sk-..."))
 //	stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
-//		Model: "gpt-4o-mini",
-//		Messages: []llmrouter.Message{{Role: "user", Content: "hi"}},
+//		Model:    "gpt-4o-mini",
+//		Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
 //	})
 //	if err != nil { /* handle */ }
 //	for chunk := range stream.Chunks() {
-//		fmt.Print(chunk.Delta.Content)
+//		for _, c := range chunk.Choices {
+//			fmt.Print(c.Delta.Content)
+//		}
 //	}
 //	if err := stream.Err(); err != nil { /* upstream error */ }
+//
+// Subpackages: each provider lives under providers/, e.g.
+// providers/openai, providers/anthropic, providers/bedrock,
+// providers/vertex, providers/gemini, providers/elevenlabs,
+// providers/deepgram, providers/cartesia, providers/voyage,
+// providers/openairealtime, providers/geminilive.
 package llmrouter
 
 import (
