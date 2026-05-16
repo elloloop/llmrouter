@@ -21,6 +21,7 @@ package together
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/elloloop/llmrouter"
 	"github.com/elloloop/llmrouter/providers/openai"
@@ -35,20 +36,41 @@ const DefaultBaseURL = "https://api.together.xyz/v1"
 const providerName = "together"
 
 // Provider implements llmrouter.Provider against Together AI by
-// delegating to a configured openai.Provider.
+// delegating to a configured openai.Provider for chat/embeddings, and
+// issuing its own /rerank requests directly (Together's rerank route is
+// not OpenAI-shaped). The unexported apiKey + baseURL + httpClient fields
+// are captured at construction so Rerank can build requests without
+// reaching into the inner openai.Provider's unexported config.
 type Provider struct {
-	inner *openai.Provider
+	inner      *openai.Provider
+	apiKey     string
+	baseURL    string
+	httpClient *http.Client
 }
 
 // New constructs a Together AI provider. The default base URL targets
 // Together AI; pass llmrouter.WithBaseURL to override (e.g. for a
 // self-hosted proxy).
 func New(opts ...llmrouter.Option) (*Provider, error) {
-	inner, err := openai.New(prependDefaultBaseURL(opts)...)
+	resolved := prependDefaultBaseURL(opts)
+	inner, err := openai.New(resolved...)
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{inner: inner}, nil
+	// Resolve config a second time so we can read APIKey / BaseURL /
+	// HTTPClient for the Rerank endpoint without exporting fields from
+	// openai.Provider. Validation already passed inside openai.New, so any
+	// error here would be unexpected; surface it conservatively.
+	cfg, err := llmrouter.NewConfig(resolved...)
+	if err != nil {
+		return nil, err
+	}
+	return &Provider{
+		inner:      inner,
+		apiKey:     cfg.APIKey,
+		baseURL:    cfg.BaseURL,
+		httpClient: cfg.HTTP(),
+	}, nil
 }
 
 // Name returns the provider id.
