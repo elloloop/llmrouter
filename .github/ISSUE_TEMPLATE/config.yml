@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://elloloop.github.io/llmrouter/
+    about: Read the docs before filing an issue — most usage questions are covered.
+  - name: GitHub Discussions
+    url: https://github.com/elloloop/llmrouter/discussions
+    about: Ask questions, share what you've built, or discuss design ideas.
+  - name: Security disclosure
+    url: https://github.com/elloloop/llmrouter/security/advisories/new
+    about: Report a vulnerability privately. Do NOT use the public issue tracker for security issues.

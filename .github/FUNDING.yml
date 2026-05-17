@@ -1,0 +1,10 @@
+# Sponsorship channels surfaced via the "Sponsor" button on the repo page.
+# See https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+github: [elloloop]
+# Uncomment and adjust if/when additional sponsorship channels exist:
+# patreon: ''
+# open_collective: ''
+# ko_fi: ''
+# tidelift: 'go-modules/github.com%2Felloloop%2Fllmrouter'
+# custom: ['https://elloloop.com/sponsor']

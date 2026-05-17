@@ -1,0 +1,34 @@
+# CODEOWNERS — automatic reviewer assignment.
+#
+# Syntax: <pattern> <owner1> <owner2> ...
+# Patterns use gitignore-style globs but are absolute from the repo root.
+# Later matches override earlier ones.
+#
+# See https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default — everyone in the maintainers team reviews if no more specific
+# rule matches.
+* @elloloop/maintainers
+
+# Provider-specific routing — expand as additional reviewers join.
+# Uncomment + adjust handles below once dedicated maintainers exist.
+#
+# /providers/openai/         @some-openai-reviewer
+# /providers/anthropic/      @some-anthropic-reviewer
+# /providers/bedrock/        @some-aws-reviewer
+# /providers/vertex/         @some-gcp-reviewer
+# /providers/azureopenai/    @some-azure-reviewer
+# /providers/azureanthropic/ @some-azure-reviewer
+# /providers/azureserverless/ @some-azure-reviewer
+# /router/                   @router-reviewers
+
+# Docs site — anyone in the docs team may approve content-only changes.
+/docs-site/                  @elloloop/maintainers
+/README.md                   @elloloop/maintainers
+/CHANGELOG.md                @elloloop/maintainers
+
+# CI + release automation — restricted to maintainers because mistakes here
+# can publish or block releases.
+/.github/                    @elloloop/maintainers
+/release-please-config.json  @elloloop/maintainers
+/.release-please-manifest.json @elloloop/maintainers
