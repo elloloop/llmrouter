@@ -484,11 +484,17 @@ func TestTranscribeStreaming(t *testing.T) {
 	})
 
 	t.Run("non_results_frames_forwarded_with_type", func(t *testing.T) {
+		// Use the REAL upstream payload shapes. UtteranceEnd and
+		// SpeechStarted both reuse the `channel` key with an array
+		// value [0, 1] (channel indices), not an object. A previous
+		// regression decoded `channel` into a struct-typed Channel
+		// field on the envelope, failing the whole frame before the
+		// Type guard could dispatch — see Issue #9.
 		mixed := []string{
-			`{"type":"Metadata","request_id":"r1"}`,
-			`{"type":"SpeechStarted","timestamp":0.1}`,
+			`{"type":"Metadata","request_id":"r1","transaction_key":"deprecated","sha256":"x","created":"2026-05-17T00:00:00.000Z","duration":0,"channels":1}`,
+			`{"type":"SpeechStarted","channel":[0,1],"timestamp":0.1}`,
 			resultFrame("hi", 0.0, 0.5, false, nil),
-			`{"type":"UtteranceEnd","last_word_end":0.5}`,
+			`{"type":"UtteranceEnd","channel":[0,1],"last_word_end":0.5}`,
 			resultFrame("hi there", 0.0, 1.0, true, nil),
 		}
 		p, _, done := newLiveTestServer(t, liveServerOpts{}, mixed)
@@ -883,4 +889,95 @@ func TestTranscribeStreaming(t *testing.T) {
 			t.Fatalf("expected no encoding= for unknown format, got %q", snap.upgradeURL)
 		}
 	})
+}
+
+// TestDecodeLiveFrame_VariantChannelShapes locks down Issue #9: the
+// `channel` key has different shapes in different upstream frame types
+// (object for Results, array for UtteranceEnd / SpeechStarted). A
+// previous regression unmarshalled `channel` into a struct-typed field
+// on the envelope, dropping non-Results frames at the JSON layer.
+func TestDecodeLiveFrame_VariantChannelShapes(t *testing.T) {
+	cases := []struct {
+		name        string
+		payload     string
+		wantType    string
+		wantText    string
+		wantFinal   bool
+		wantSpeechF bool
+	}{
+		{
+			name:     "UtteranceEnd_with_channel_array",
+			payload:  `{"type":"UtteranceEnd","channel":[0,1],"last_word_end":2.42}`,
+			wantType: "UtteranceEnd",
+		},
+		{
+			name:     "SpeechStarted_with_channel_array",
+			payload:  `{"type":"SpeechStarted","channel":[0,1],"timestamp":0.42}`,
+			wantType: "SpeechStarted",
+		},
+		{
+			name:     "Metadata_no_channel",
+			payload:  `{"type":"Metadata","request_id":"r1","duration":1.5,"channels":1}`,
+			wantType: "Metadata",
+		},
+		{
+			name:        "Results_with_object_channel",
+			payload:     `{"type":"Results","start":0.0,"duration":1.0,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hello world","confidence":0.97,"words":[]}]}}`,
+			wantType:    "Results",
+			wantText:    "hello world",
+			wantFinal:   true,
+			wantSpeechF: true,
+		},
+		{
+			name:     "Results_with_unexpected_channel_shape_degrades",
+			payload:  `{"type":"Results","start":0.0,"duration":0.5,"is_final":false,"channel":"weird-future-shape"}`,
+			wantType: "Results",
+		},
+		{
+			name:     "Results_with_empty_alternatives",
+			payload:  `{"type":"Results","start":0.0,"duration":0.5,"channel":{"alternatives":[]}}`,
+			wantType: "Results",
+		},
+		{
+			name:     "Future_unknown_event_type_with_channel_array",
+			payload:  `{"type":"SomeFutureEvent","channel":[0,1,2],"foo":"bar"}`,
+			wantType: "SomeFutureEvent",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seg, ok, err := decodeLiveFrame([]byte(tc.payload))
+			if err != nil {
+				t.Fatalf("decodeLiveFrame returned error for %s payload: %v", tc.name, err)
+			}
+			if !ok {
+				t.Fatalf("decodeLiveFrame returned ok=false; expected forwarded segment")
+			}
+			if seg.Type != tc.wantType {
+				t.Errorf("Type = %q, want %q", seg.Type, tc.wantType)
+			}
+			if seg.Text != tc.wantText {
+				t.Errorf("Text = %q, want %q", seg.Text, tc.wantText)
+			}
+			if seg.Final != tc.wantFinal {
+				t.Errorf("Final = %v, want %v", seg.Final, tc.wantFinal)
+			}
+			if seg.SpeechFinal != tc.wantSpeechF {
+				t.Errorf("SpeechFinal = %v, want %v", seg.SpeechFinal, tc.wantSpeechF)
+			}
+			if len(seg.Raw) == 0 {
+				t.Errorf("Raw must carry original bytes")
+			}
+		})
+	}
+}
+
+// TestDecodeLiveFrame_MalformedEnvelopeStillErrors confirms that
+// genuinely malformed JSON (not just a variant-shape `channel`) still
+// surfaces as an error rather than being swallowed.
+func TestDecodeLiveFrame_MalformedEnvelopeStillErrors(t *testing.T) {
+	_, _, err := decodeLiveFrame([]byte(`{not json at all`))
+	if err == nil {
+		t.Fatal("expected error from malformed envelope JSON")
+	}
 }

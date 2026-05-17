@@ -278,22 +278,37 @@ func mergeRawQueryKeys(q url.Values, raw json.RawMessage, keys []string) {
 	}
 }
 
-// deepgramLiveFrame is the subset of a live Results event the provider
-// consumes. Unknown fields are ignored.
+// deepgramLiveFrame is the variant-tolerant envelope for every wire
+// payload Deepgram's live endpoint can emit. The Channel field is held
+// as a raw JSON message because non-Results frames (UtteranceEnd,
+// SpeechStarted, etc.) reuse the `channel` key with a different shape:
+//
+//	Results       channel: {"alternatives": [...]}
+//	UtteranceEnd  channel: [0, 1]
+//	SpeechStarted channel: [0, 1]
+//
+// Decoding upfront into a struct-typed Channel would fail on the array
+// shape, dropping the frame before the Type guard could dispatch on it.
+// Channel is interpreted only on Results frames (see deepgramChannel
+// below).
 type deepgramLiveFrame struct {
-	Type         string  `json:"type"`
-	Start        float64 `json:"start"`
-	Duration     float64 `json:"duration"`
-	IsFinal      bool    `json:"is_final"`
-	SpeechFinal  bool    `json:"speech_final"`
-	ChannelIndex []int   `json:"channel_index"`
-	Channel      struct {
-		Alternatives []struct {
-			Transcript string         `json:"transcript"`
-			Confidence float64        `json:"confidence"`
-			Words      []deepgramWord `json:"words"`
-		} `json:"alternatives"`
-	} `json:"channel"`
+	Type         string          `json:"type"`
+	Start        float64         `json:"start"`
+	Duration     float64         `json:"duration"`
+	IsFinal      bool            `json:"is_final"`
+	SpeechFinal  bool            `json:"speech_final"`
+	ChannelIndex []int           `json:"channel_index"`
+	Channel      json.RawMessage `json:"channel"`
+}
+
+// deepgramChannel is the Results-only Channel shape; unmarshalled
+// lazily, only when frame.Type == "Results".
+type deepgramChannel struct {
+	Alternatives []struct {
+		Transcript string         `json:"transcript"`
+		Confidence float64        `json:"confidence"`
+		Words      []deepgramWord `json:"words"`
+	} `json:"alternatives"`
 }
 
 // decodeLiveFrame converts one wire payload into a TranscriptSegment.
@@ -306,8 +321,13 @@ type deepgramLiveFrame struct {
 // only care about transcript text should switch on Type and skip
 // anything other than "" or "Results".
 //
+// The Channel field is held as json.RawMessage and only interpreted
+// when Type == "Results" (UtteranceEnd / SpeechStarted reuse the key
+// with an array shape that would fail strict struct-typed unmarshal —
+// see deepgramLiveFrame's comment).
+//
 // Returns ok=false only for the empty payload (used by tests). Returns
-// a non-nil error only when the JSON itself is malformed.
+// a non-nil error only when the envelope JSON itself is malformed.
 func decodeLiveFrame(payload []byte) (llmrouter.TranscriptSegment, bool, error) {
 	if len(payload) == 0 {
 		return llmrouter.TranscriptSegment{}, false, nil
@@ -327,13 +347,35 @@ func decodeLiveFrame(payload []byte) (llmrouter.TranscriptSegment, bool, error) 
 			Raw:  rawCopy,
 		}, true, nil
 	}
-	if len(frame.Channel.Alternatives) == 0 {
+
+	// Results: lazily unmarshal the channel object. If the upstream
+	// emits a Results frame with an unexpected channel shape (e.g.
+	// schema drift), degrade to an event-only segment rather than
+	// dropping the frame entirely.
+	var ch deepgramChannel
+	if len(frame.Channel) > 0 {
+		if err := json.Unmarshal(frame.Channel, &ch); err != nil {
+			return llmrouter.TranscriptSegment{
+				Type:        frame.Type,
+				Final:       frame.IsFinal,
+				SpeechFinal: frame.SpeechFinal,
+				Start:       secondsToDuration(frame.Start),
+				End:         secondsToDuration(frame.Start + frame.Duration),
+				Raw:         rawCopy,
+			}, true, nil
+		}
+	}
+	if len(ch.Alternatives) == 0 {
 		return llmrouter.TranscriptSegment{
-			Type: frame.Type,
-			Raw:  rawCopy,
+			Type:        frame.Type,
+			Final:       frame.IsFinal,
+			SpeechFinal: frame.SpeechFinal,
+			Start:       secondsToDuration(frame.Start),
+			End:         secondsToDuration(frame.Start + frame.Duration),
+			Raw:         rawCopy,
 		}, true, nil
 	}
-	alt := frame.Channel.Alternatives[0]
+	alt := ch.Alternatives[0]
 	seg := llmrouter.TranscriptSegment{
 		Type:        frame.Type,
 		Text:        alt.Transcript,
