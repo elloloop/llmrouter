@@ -1,0 +1,338 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Azure AI Foundry — Serverless API (MaaS)">
+  <h1>Azure AI Foundry — Serverless API (MaaS)</h1>
+  <p>
+    The <code>azureserverless</code> provider talks to non-OpenAI,
+    non-Anthropic models hosted on Azure AI Foundry's Serverless API
+    deployment mode (Models-as-a-Service, MaaS). This is the catch-all
+    provider for the Foundry marketplace: <strong>Llama</strong> (Meta),
+    <strong>Mistral</strong>, <strong>Cohere</strong>,
+    <strong>Phi</strong> (Microsoft), <strong>Jais</strong>,
+    <strong>Nemotron</strong> (NVIDIA), <strong>DeepSeek</strong>, and
+    any other OpenAI-compatible chat-completions model that ships in
+    Foundry's catalogue.
+  </p>
+  <p>
+    On the wire the request and response are OpenAI-shaped chat
+    completions — Foundry's Serverless API exposes every model
+    through the same <code>/v1/chat/completions</code> contract. The
+    differences from
+    <a href="/llmrouter/docs/providers/openai">direct OpenAI</a> are
+    the hostname pattern, the lack of an <code>api-version</code>
+    query, and the Azure-style <code>api-key</code> (or AAD) auth.
+  </p>
+
+  <h2 id="picking-the-right-provider">Picking the right Foundry provider</h2>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/providers/azure-openai"><code>providers/azureopenai</code></a>
+      — OpenAI's own GPT models on Foundry. Different URL shape (needs
+      <code>api-version</code> query +
+      <code>/openai/deployments/&lt;name&gt;</code> path).
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/azure-anthropic"><code>providers/azureanthropic</code></a>
+      — Claude on Foundry. Different body shape (native Anthropic
+      <code>/messages</code>).
+    </li>
+    <li>
+      <strong><code>providers/azureserverless</code></strong> (this page)
+      — everything else on Foundry. OpenAI-shaped chat completions.
+    </li>
+  </ul>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/azureserverless"
+)`} />
+
+  <h2 id="url-variants">Two URL shapes</h2>
+  <p>
+    Foundry exposes Serverless API models under two endpoint patterns.
+    Pick by whether you provisioned a single deployment per model or a
+    shared hub endpoint that fans out to multiple deployments. Both are
+    passed in via <code>llmrouter.WithBaseURL</code> — the provider
+    appends <code>/v1/chat/completions</code> for you.
+  </p>
+  <ol>
+    <li>
+      <strong>Deployment-scoped (single model per deployment).</strong>
+      The deployment name and region are baked into the hostname; the
+      request body's <code>model</code> field is echoed back unchanged.
+      <br />
+      <code>{`https://<deployment>.<region>.models.ai.azure.com`}</code>
+      <br />
+      Example: <code>https://my-llama.eastus.models.ai.azure.com</code>.
+    </li>
+    <li>
+      <strong>Hub-scoped (single hub, multiple models).</strong> The
+      hostname is shared; the <code>model</code> field in the body picks
+      which deployment.
+      <br />
+      <code>{`https://<hub-endpoint>`}</code>
+    </li>
+  </ol>
+
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Gotcha — no <code>api-version</code> query.</strong> Unlike
+    <a href="/llmrouter/docs/providers/azure-openai"><code>azureopenai</code></a>,
+    Foundry's Serverless API endpoints do <em>not</em> take an
+    <code>api-version</code> query parameter. If you copy-paste a URL
+    that has <code>?api-version=...</code> on the end, the request will
+    400. Pass the bare hostname to <code>WithBaseURL</code>.
+  </aside>
+
+  <h2 id="auth">Authentication</h2>
+  <p>
+    Auth is XOR: provide exactly <em>one</em> of
+    <code>llmrouter.WithAPIKey(...)</code> or
+    <code>azureserverless.WithAADToken(...)</code>. Providing both —
+    or neither — fails at <code>New()</code> with
+    <code>ErrInvalidConfig</code>.
+  </p>
+  <ul>
+    <li>
+      <strong>API key.</strong> Flows as the Azure-specific
+      <code>api-key</code> request header — <em>not</em>
+      <code>Authorization: Bearer</code>. The deployment's primary or
+      secondary key from the Foundry portal.
+    </li>
+    <li>
+      <strong>AAD bearer.</strong> Same shape as on
+      <code>azureanthropic</code>: a per-request
+      <code>AADTokenSource</code> callback returning a fresh bearer
+      token. Use this when you want service-principal or
+      managed-identity auth instead of a static key.
+    </li>
+  </ul>
+
+  <h2 id="construction">Construction</h2>
+  <p>
+    A single-model deployment with API-key auth:
+  </p>
+  <Code lang="go" code={`p, err := azureserverless.New(
+    llmrouter.WithAPIKey(os.Getenv("AZURE_FOUNDRY_KEY")),
+    llmrouter.WithBaseURL("https://my-llama.eastus.models.ai.azure.com"),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>AAD-bearer auth instead:</p>
+  <Code lang="go" code={`p, err := azureserverless.New(
+    llmrouter.WithBaseURL("https://my-llama.eastus.models.ai.azure.com"),
+    azureserverless.WithAADToken(func(ctx context.Context) (string, error) {
+        tok, err := myAzureCredential.GetToken(ctx, policy.TokenRequestOptions{
+            Scopes: []string{"https://cognitiveservices.azure.com/.default"},
+        })
+        if err != nil {
+            return "", err
+        }
+        return tok.Token, nil
+    }),
+)`} />
+
+  <h2 id="example">Full example — Llama 3 70B Instruct on Foundry</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/azureserverless"
+)
+
+func main() {
+    p, err := azureserverless.New(
+        llmrouter.WithAPIKey(os.Getenv("AZURE_FOUNDRY_KEY")),
+        llmrouter.WithBaseURL("https://my-llama3-70b.eastus.models.ai.azure.com"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        // Deployment-scoped URL — the Model field is echoed back unchanged.
+        Model: "Meta-Llama-3-70B-Instruct",
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("system", "You are a concise assistant."),
+            llmrouter.TextMessage("user", "What is Azure AI Foundry Serverless API?"),
+        },
+        MaxTokens: 256,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="model-catalogue">Model catalogue and deployment-name patterns</h2>
+  <p>
+    Foundry's Serverless API catalogue is large and changes often. The
+    table below shows the families currently served via this provider
+    and the typical deployment-name pattern Foundry uses when you
+    provision them through the portal. The exact name varies by
+    Foundry region and by what you typed in the deployment wizard —
+    treat these as guidelines, not contracts.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Family</th>
+          <th class="text-left p-3 border-b border-border">Typical model id (<code>ChatRequest.Model</code>)</th>
+          <th class="text-left p-3 border-b border-border">Deployment-name pattern</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Llama (Meta)</strong></td>
+          <td class="p-3 border-b border-border"><code>Meta-Llama-3-70B-Instruct</code>, <code>Meta-Llama-3.1-405B-Instruct</code></td>
+          <td class="p-3 border-b border-border"><code>my-llama3-70b</code>, <code>llama-31-405b-instruct</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Mistral</strong></td>
+          <td class="p-3 border-b border-border"><code>Mistral-large-2407</code>, <code>Mistral-Nemo</code></td>
+          <td class="p-3 border-b border-border"><code>mistral-large</code>, <code>mistral-nemo-12b</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Cohere</strong></td>
+          <td class="p-3 border-b border-border"><code>Cohere-command-r-plus</code>, <code>Cohere-command-r</code></td>
+          <td class="p-3 border-b border-border"><code>cohere-command-r-plus</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Phi (Microsoft)</strong></td>
+          <td class="p-3 border-b border-border"><code>Phi-3.5-MoE-instruct</code>, <code>Phi-3-medium-128k-instruct</code></td>
+          <td class="p-3 border-b border-border"><code>phi-35-moe</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Jais</strong></td>
+          <td class="p-3 border-b border-border"><code>jais-30b-chat</code></td>
+          <td class="p-3 border-b border-border"><code>jais-30b</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>Nemotron (NVIDIA)</strong></td>
+          <td class="p-3 border-b border-border"><code>Nemotron-3-8B-Chat</code></td>
+          <td class="p-3 border-b border-border"><code>nemotron-3-8b</code></td>
+        </tr>
+        <tr>
+          <td class="p-3"><strong>DeepSeek</strong></td>
+          <td class="p-3"><code>DeepSeek-V3</code>, <code>DeepSeek-R1</code></td>
+          <td class="p-3"><code>deepseek-v3</code>, <code>deepseek-r1</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    For deployment-scoped URLs the deployment name lives in the
+    hostname and the <code>Model</code> field is informational. For
+    hub-scoped URLs the <code>Model</code> field is the deployment
+    selector.
+  </p>
+
+  <h2 id="capabilities">Capabilities</h2>
+  <p>
+    Whatever the underlying model supports on its OpenAI-compatible
+    chat-completions endpoint. Foundry deployments expose the standard
+    chat-completions surface plus byte passthrough — pass
+    <code>ChatRequest.Raw</code> to send provider-specific fields the
+    typed surface doesn't model, and read <code>Chunk.Raw</code> on
+    the way back. Tool use, multimodal content, and JSON mode work
+    when the underlying model supports them.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "azureserverless"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — wrong <code>api-key</code> or expired AAD token.</li>
+    <li><code>403</code> — the deployment's content-safety filter rejected the input or output.</li>
+    <li><code>404</code> — wrong hostname (typo in the deployment / region segment) or the deployment was deleted.</li>
+    <li><code>404</code> with <code>?api-version=...</code> in the URL — the Serverless API does not accept that query parameter (see the gotcha above).</li>
+    <li><code>429</code> — Foundry capacity throttle; honour <code>Retry-After</code>.</li>
+    <li><code>400</code> — body shape mismatch; the most common cause is sending OpenAI tool-call shapes to a model that doesn't support tools.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>No default base URL.</strong> The caller must pass a
+      hostname — there is no canonical Foundry-wide endpoint, because
+      every deployment gets its own subdomain (or hub).
+    </li>
+    <li>
+      <strong>Capability varies per model.</strong> Llama, Mistral, and
+      Cohere on Foundry have different feature sets — only some
+      support tool use, only some support JSON mode. Check the model's
+      Foundry catalogue page before relying on a feature.
+    </li>
+    <li>
+      <strong>Content safety is enforced server-side.</strong>
+      Microsoft applies an Azure-managed content filter to every
+      Foundry deployment by default. Filter rejections come back as
+      403 with a body describing which category triggered (hate,
+      self-harm, sexual, violence). Inspect
+      <code>ErrUpstream.Body</code>.
+    </li>
+    <li>
+      <strong>Auth is mutually exclusive.</strong> Providing both an
+      API key and an AAD source — or neither — fails fast in
+      <code>New()</code>.
+    </li>
+  </ul>
+
+  <h2 id="when-to-use">When to use this</h2>
+  <ul>
+    <li>
+      <strong>You're on Azure</strong> and want a single billing /
+      compliance surface across OpenAI's GPT models, Anthropic's
+      Claude, and an open-weights model (Llama, Mistral, Cohere, Phi).
+    </li>
+    <li>
+      <strong>You need data residency in a Microsoft-managed
+      region</strong> — Foundry runs the model inside Azure's own
+      tenant, not as a passthrough to a third party.
+    </li>
+    <li>
+      <strong>You want to consolidate</strong> multiple open-weights
+      models onto one billing surface instead of separate accounts at
+      Together / Groq / Fireworks.
+    </li>
+  </ul>
+  <p>
+    If you only need one or two models and aren't on Azure, the direct
+    vendor providers (<a href="/llmrouter/docs/providers/mistral">Mistral</a>,
+    <a href="/llmrouter/docs/providers/cohere">Cohere</a>) or the
+    OpenAI-compatible specialists
+    (<a href="/llmrouter/docs/providers/openai-compatible">Together /
+    Groq / Fireworks / DeepSeek</a>) are usually cheaper and have
+    fresher model availability.
+  </p>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI provider</a> — same transport family for OpenAI's GPT models.</li>
+    <li><a href="/llmrouter/docs/providers/azure-anthropic">Azure AI Foundry — Anthropic provider</a> — same transport family for Claude.</li>
+    <li><a href="/llmrouter/docs/providers/openai-compatible">OpenAI-compatible providers</a> — same chat-completions shape, different platforms.</li>
+    <li><a href="/llmrouter/docs/concepts/router">The Router</a> — automatic platform resolution.</li>
+  </ul>
+</DocsLayout>

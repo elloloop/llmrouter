@@ -1,0 +1,536 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="The Router — Magic Model × Platform Resolution">
+  <h1>The Router — Magic Model × Platform Resolution</h1>
+  <p>
+    The headline value proposition of <code>llmrouter</code> is to
+    decouple <strong>the model vendor</strong> (OpenAI, Anthropic,
+    Meta/Llama, Mistral, Cohere, Google, xAI, DeepSeek) from
+    <strong>the hosting platform</strong> (the vendor's own API, AWS
+    Bedrock, Google Vertex AI, Azure AI Foundry, OpenRouter, Together,
+    Groq, Fireworks, Cerebras, DeepSeek, Perplexity, xAI). A user
+    wants &ldquo;Claude on Bedrock&rdquo; or &ldquo;Llama on Groq&rdquo;
+    — they should not need to know that the first answer lives in
+    <code>providers/bedrock</code> and the second in
+    <code>providers/groq</code>.
+  </p>
+  <p>
+    The <code>router</code> package is the resolver that turns a
+    <code>{`{Model, Platform, Credentials}`}</code> tuple into a working
+    <code>llmrouter.Provider</code>. It infers the model family from
+    the id, validates that the platform can serve that family, gathers
+    credentials (from <code>Credentials</code> or the environment), and
+    constructs the underlying provider.
+  </p>
+
+  <h2 id="api">The minimal API</h2>
+  <p>One function, one request type, one result.</p>
+  <Code lang="go" code={`import "github.com/elloloop/llmrouter/router"
+
+p, err := router.Resolve(router.Request{
+    Model:    "claude-3-5-sonnet-20241022",
+    Platform: router.PlatformBedrock,
+    Credentials: router.Credentials{
+        AWSRegion: "us-east-1",
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+// p is a working llmrouter.Provider — exactly the shape every other
+// provider package returns.
+stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+    Model:     "claude-3-5-sonnet-20241022",
+    MaxTokens: 1024,
+    Messages:  []llmrouter.Message{ llmrouter.TextMessage("user", "hi") },
+})`} />
+
+  <h2 id="platforms">The 12 platforms</h2>
+  <p>
+    A <code>Platform</code> identifies <em>where</em> the model runs.
+    Pass <code>PlatformAuto</code> (the zero value) to let the router
+    pick the first platform whose credentials are present in the
+    environment.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Constant</th>
+          <th class="text-left p-3 border-b border-border">Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>PlatformAuto</code></td><td class="p-3 border-b border-border">Pick the first platform from the family's preference list that has credentials available.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformDirect</code></td><td class="p-3 border-b border-border">The model vendor's native API (<code>api.openai.com</code>, <code>api.anthropic.com</code>, &hellip;).</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformBedrock</code></td><td class="p-3 border-b border-border">AWS Bedrock Runtime ConverseStream.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformVertex</code></td><td class="p-3 border-b border-border">Google Vertex AI / Model Garden.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformAzure</code></td><td class="p-3 border-b border-border">Azure AI Foundry; the router picks the right sub-provider (<code>azureopenai</code> / <code>azureanthropic</code> / <code>azureserverless</code>) based on the model family.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformOpenRouter</code></td><td class="p-3 border-b border-border">OpenRouter fan-out proxy.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformTogether</code></td><td class="p-3 border-b border-border">Together AI hosted-OSS-models.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformGroq</code></td><td class="p-3 border-b border-border">Groq low-latency inference.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformFireworks</code></td><td class="p-3 border-b border-border">Fireworks AI.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformCerebras</code></td><td class="p-3 border-b border-border">Cerebras Cloud Inference.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformDeepSeek</code></td><td class="p-3 border-b border-border">DeepSeek's first-party API.</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>PlatformPerplexity</code></td><td class="p-3 border-b border-border">Perplexity sonar-family API.</td></tr>
+        <tr><td class="p-3"><code>PlatformxAI</code></td><td class="p-3">xAI Grok API.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="families">The 9 model families</h2>
+  <p>
+    A <code>ModelFamily</code> identifies <em>which vendor</em> built
+    the model, independent of where it's hosted. The router infers
+    the family from the model id via simple prefix matching after
+    stripping any hosting-platform vendor prefix.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Family</th>
+          <th class="text-left p-3 border-b border-border">Prefix examples</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="p-3 border-b border-border"><code>FamilyOpenAI</code></td><td class="p-3 border-b border-border"><code>gpt-*</code>, <code>o1-*</code>, <code>o3-*</code>, <code>o4-*</code>, <code>chatgpt-*</code>, <code>text-embedding-3-*</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyAnthropic</code></td><td class="p-3 border-b border-border"><code>claude-*</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyLlama</code></td><td class="p-3 border-b border-border"><code>llama-*</code>, <code>llama3*</code>, <code>meta.llama*</code>, anything containing <code>llama</code> (case-insensitive)</td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyMistral</code></td><td class="p-3 border-b border-border"><code>mistral-*</code>, <code>mixtral-*</code>, <code>ministral-*</code>, <code>codestral-*</code>, <code>magistral-*</code>, <code>pixtral-*</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyCohere</code></td><td class="p-3 border-b border-border"><code>command-*</code>, <code>c4ai-*</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyGemini</code></td><td class="p-3 border-b border-border"><code>gemini-*</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyGrok</code></td><td class="p-3 border-b border-border"><code>grok-*</code></td></tr>
+        <tr><td class="p-3 border-b border-border"><code>FamilyDeepSeek</code></td><td class="p-3 border-b border-border"><code>deepseek-*</code></td></tr>
+        <tr><td class="p-3"><code>FamilyOther</code></td><td class="p-3">Anything else — still routable via platforms that accept arbitrary model ids (<code>PlatformOpenRouter</code>, <code>PlatformTogether</code>, <code>PlatformAzure</code>).</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Hosting-platform vendor prefixes (<code>anthropic.</code>,
+    <code>meta.</code>, <code>mistral.</code>, <code>cohere.</code>,
+    <code>amazon.</code>, <code>ai21.</code>, <code>stability.</code>)
+    are stripped before matching, so
+    <code>anthropic.claude-3-5-sonnet-20241022-v2:0</code> still
+    resolves to <code>FamilyAnthropic</code>.
+  </p>
+
+  <h2 id="matrix">The full routing matrix</h2>
+  <p>
+    Rows are model families; columns are platforms. A cell shows the
+    underlying provider package the router constructs.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Family</th>
+          <th class="text-left p-3 border-b border-border">Direct</th>
+          <th class="text-left p-3 border-b border-border">Bedrock</th>
+          <th class="text-left p-3 border-b border-border">Vertex</th>
+          <th class="text-left p-3 border-b border-border">Azure</th>
+          <th class="text-left p-3 border-b border-border">OpenRouter</th>
+          <th class="text-left p-3 border-b border-border">Together</th>
+          <th class="text-left p-3 border-b border-border">Groq</th>
+          <th class="text-left p-3 border-b border-border">Fireworks</th>
+          <th class="text-left p-3 border-b border-border">Other</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>openai</strong></td>
+          <td class="p-3 border-b border-border"><code>openai</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>azureopenai</code></td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>anthropic</strong></td>
+          <td class="p-3 border-b border-border"><code>anthropic</code></td>
+          <td class="p-3 border-b border-border"><code>bedrock</code></td>
+          <td class="p-3 border-b border-border"><code>vertexanthropic</code></td>
+          <td class="p-3 border-b border-border"><code>azureanthropic</code></td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>llama</strong></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>bedrock</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>azureserverless</code></td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border"><code>together</code></td>
+          <td class="p-3 border-b border-border"><code>groq</code></td>
+          <td class="p-3 border-b border-border"><code>fireworks</code></td>
+          <td class="p-3 border-b border-border"><code>cerebras</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>mistral</strong></td>
+          <td class="p-3 border-b border-border"><code>mistral</code></td>
+          <td class="p-3 border-b border-border"><code>bedrock</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>azureserverless</code></td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border"><code>together</code></td>
+          <td class="p-3 border-b border-border"><code>groq</code></td>
+          <td class="p-3 border-b border-border"><code>fireworks</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>cohere</strong></td>
+          <td class="p-3 border-b border-border"><code>cohere</code></td>
+          <td class="p-3 border-b border-border"><code>bedrock</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>azureserverless</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>gemini</strong></td>
+          <td class="p-3 border-b border-border"><code>gemini</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>vertex</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>grok</strong></td>
+          <td class="p-3 border-b border-border"><code>xai</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>xai</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><strong>deepseek</strong></td>
+          <td class="p-3 border-b border-border"><code>deepseek</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>openrouter</code></td>
+          <td class="p-3 border-b border-border"><code>together</code></td>
+          <td class="p-3 border-b border-border">&mdash;</td>
+          <td class="p-3 border-b border-border"><code>fireworks</code></td>
+          <td class="p-3 border-b border-border"><code>deepseek</code></td>
+        </tr>
+        <tr>
+          <td class="p-3"><strong>other</strong></td>
+          <td class="p-3">(error)</td>
+          <td class="p-3">&mdash;</td>
+          <td class="p-3">&mdash;</td>
+          <td class="p-3"><code>azureserverless</code></td>
+          <td class="p-3"><code>openrouter</code></td>
+          <td class="p-3"><code>together</code></td>
+          <td class="p-3">&mdash;</td>
+          <td class="p-3">&mdash;</td>
+          <td class="p-3">&mdash;</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="example-explicit">Example: explicit — Claude on Bedrock</h2>
+  <p>
+    You know exactly what you want: Claude 3.5 Sonnet served from AWS
+    Bedrock in <code>us-east-1</code>. Tell the router and skip the
+    Bedrock model-id translation by hand.
+  </p>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/router"
+)
+
+func main() {
+    p, err := router.Resolve(router.Request{
+        Model:    "claude-3-5-sonnet-20241022",
+        Platform: router.PlatformBedrock,
+        Credentials: router.Credentials{
+            AWSRegion: "us-east-1",
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Optional: rewrite the model id to Bedrock's prefixed form
+    // ("anthropic.claude-3-5-sonnet-20241022-v2:0").
+    req := router.ApplyModelTranslation(llmrouter.ChatRequest{
+        Model:     "claude-3-5-sonnet-20241022",
+        MaxTokens: 1024,
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "What region am I served from?"),
+        },
+    }, router.PlatformBedrock)
+
+    stream, err := p.CompletionStream(context.Background(), req)
+    if err != nil {
+        log.Fatal(err)
+    }
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+}`} />
+
+  <h2 id="example-auto">Example: auto-resolve from env vars</h2>
+  <p>
+    For the common case of &ldquo;use whatever credentials are set,
+    pick the best available platform,&rdquo; pass
+    <code>PlatformAuto</code> (or use the
+    <code>ResolveFromEnv</code> shortcut).
+  </p>
+  <Code lang="go" code={`p, err := router.ResolveFromEnv("claude-3-5-sonnet-20241022")
+if err != nil {
+    log.Fatal(err)
+}
+// If ANTHROPIC_API_KEY is set, p talks to direct Anthropic.
+// Else if AWS_REGION is set, p talks to Bedrock.
+// Else if GOOGLE_CLOUD_PROJECT + Credentials.GCPRegion are set,
+//   p talks to Vertex Model Garden.
+// Else if AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY are set,
+//   p talks to Azure AI Foundry — Anthropic.
+// Else if OPENROUTER_API_KEY is set, p talks to OpenRouter.
+// Else: ErrNoAutoPlatform.`} />
+
+  <h2 id="auto-preference">PlatformAuto preference order</h2>
+  <p>
+    When <code>PlatformAuto</code> is in play the router scans this
+    list in order and picks the first platform that (a) supports the
+    inferred family and (b) has the required credentials:
+  </p>
+  <ol>
+    <li><code>PlatformDirect</code></li>
+    <li><code>PlatformBedrock</code></li>
+    <li><code>PlatformVertex</code></li>
+    <li><code>PlatformAzure</code></li>
+    <li><code>PlatformOpenRouter</code></li>
+    <li><code>PlatformTogether</code></li>
+    <li><code>PlatformGroq</code></li>
+    <li><code>PlatformFireworks</code></li>
+    <li><code>PlatformCerebras</code></li>
+    <li><code>PlatformDeepSeek</code></li>
+    <li><code>PlatformPerplexity</code></li>
+    <li><code>PlatformxAI</code></li>
+  </ol>
+  <p>
+    The order rewards <em>specificity</em>: direct first (you opted
+    into a vendor by setting their key), then cloud accounts (Bedrock /
+    Vertex / Azure, in alphabetical AWS-Google-Microsoft cycling
+    order), then fan-out proxies (OpenRouter, Together, Groq, &hellip;).
+    If you want a different priority, write your own preference loop
+    around <code>router.SupportedPlatforms</code>.
+  </p>
+
+  <h2 id="model-translation">Bedrock + Vertex model ID translation</h2>
+  <p>
+    Bedrock and Vertex address Claude / Llama / Mistral / Cohere with
+    platform-specific prefixes and version suffixes.
+    <code>ApplyModelTranslation</code> rewrites a vendor-neutral id to
+    the right form so application code can keep using the canonical
+    id and let the router translate at the boundary.
+  </p>
+  <div class="not-prose my-6 overflow-x-auto rounded-lg border border-border">
+    <table class="w-full text-sm">
+      <thead class="bg-muted/40">
+        <tr>
+          <th class="text-left p-3 border-b border-border">Vendor-neutral id</th>
+          <th class="text-left p-3 border-b border-border">Bedrock</th>
+          <th class="text-left p-3 border-b border-border">Vertex (Anthropic)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="p-3 border-b border-border"><code>claude-3-5-sonnet</code></td>
+          <td class="p-3 border-b border-border"><code>anthropic.claude-3-5-sonnet-20241022-v2:0</code></td>
+          <td class="p-3 border-b border-border"><code>claude-3-5-sonnet-v2@20241022</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>claude-3-5-haiku</code></td>
+          <td class="p-3 border-b border-border"><code>anthropic.claude-3-5-haiku-20241022-v1:0</code></td>
+          <td class="p-3 border-b border-border"><code>claude-3-5-haiku@20241022</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>claude-3-opus</code></td>
+          <td class="p-3 border-b border-border"><code>anthropic.claude-3-opus-20240229-v1:0</code></td>
+          <td class="p-3 border-b border-border"><code>claude-3-opus@20240229</code></td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>llama-3.1-70b-instruct</code></td>
+          <td class="p-3 border-b border-border"><code>meta.llama3-1-70b-instruct-v1:0</code></td>
+          <td class="p-3 border-b border-border">(n/a)</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>llama-3.1-405b-instruct</code></td>
+          <td class="p-3 border-b border-border"><code>meta.llama3-1-405b-instruct-v1:0</code></td>
+          <td class="p-3 border-b border-border">(n/a)</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>mistral-large</code></td>
+          <td class="p-3 border-b border-border"><code>mistral.mistral-large-2407-v1:0</code></td>
+          <td class="p-3 border-b border-border">(n/a)</td>
+        </tr>
+        <tr>
+          <td class="p-3 border-b border-border"><code>mixtral-8x7b-instruct</code></td>
+          <td class="p-3 border-b border-border"><code>mistral.mixtral-8x7b-instruct-v0:1</code></td>
+          <td class="p-3 border-b border-border">(n/a)</td>
+        </tr>
+        <tr>
+          <td class="p-3"><code>command-r-plus</code></td>
+          <td class="p-3"><code>cohere.command-r-plus-v1:0</code></td>
+          <td class="p-3">(n/a)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Pass a model id that already has the platform-specific prefix and
+    the translator leaves it alone — so feeding
+    <code>anthropic.claude-3-5-sonnet-20241022-v2:0</code> to a
+    Bedrock route is a no-op.
+  </p>
+
+  <h2 id="env-vars">Env-var fallback registry</h2>
+  <p>
+    When <code>Credentials</code> fields are empty the router falls
+    back to environment variables. The mapping lives in the global
+    <code>router.DefaultEnvVars</code> — override it to swap in
+    custom env var names (handy for multi-tenant CI runners).
+  </p>
+  <Code lang="go" code={`var DefaultEnvVars = router.EnvVars{
+    OpenAIAPIKey:    "OPENAI_API_KEY",
+    AnthropicAPIKey: "ANTHROPIC_API_KEY",
+    MistralAPIKey:   "MISTRAL_API_KEY",
+    CohereAPIKey:    "COHERE_API_KEY",
+    GoogleAPIKey:    "GOOGLE_API_KEY",
+    GrokAPIKey:      "GROK_API_KEY",
+    DeepSeekAPIKey:  "DEEPSEEK_API_KEY",
+
+    OpenRouterAPIKey: "OPENROUTER_API_KEY",
+    TogetherAPIKey:   "TOGETHER_API_KEY",
+    GroqAPIKey:       "GROQ_API_KEY",
+    FireworksAPIKey:  "FIREWORKS_API_KEY",
+    CerebrasAPIKey:   "CEREBRAS_API_KEY",
+    PerplexityAPIKey: "PERPLEXITY_API_KEY",
+
+    AzureBaseURL: "AZURE_OPENAI_ENDPOINT",
+    AzureAPIKey:  "AZURE_OPENAI_API_KEY",
+    AWSRegion:    "AWS_REGION",
+    AWSRegionAlt: "AWS_DEFAULT_REGION",
+    GCPProject:   "GOOGLE_CLOUD_PROJECT",
+}
+
+// To use custom env var names — e.g. multi-tenant CI:
+router.DefaultEnvVars.OpenAIAPIKey = "TENANT_A_OPENAI_KEY"`} />
+  <p>
+    AWS credentials (access key, secret, session token) are <em>not</em>
+    in this list — Bedrock uses the standard AWS credential chain
+    (env vars, profile, IAM role) via the AWS SDK. The router only
+    needs the AWS <em>region</em> from <code>Credentials.AWSRegion</code>
+    or the <code>AWS_REGION</code> / <code>AWS_DEFAULT_REGION</code>
+    env vars.
+  </p>
+
+  <h2 id="errors">Errors</h2>
+  <ul>
+    <li>
+      <code>router.ErrEmptyModel</code> — <code>Request.Model</code>
+      is empty. Always check this; an empty model bypasses the family
+      inference entirely.
+    </li>
+    <li>
+      <code>router.ErrUnsupportedRoute</code> — the inferred family
+      cannot be served by the requested platform (e.g. Gemini on
+      Bedrock).
+    </li>
+    <li>
+      <code>router.ErrMissingCredentials</code> — required credentials
+      are missing. The wrapped message names the field the caller
+      forgot.
+    </li>
+    <li>
+      <code>router.ErrNoAutoPlatform</code> — <code>PlatformAuto</code>
+      could not find any supported platform with credentials.
+    </li>
+    <li>
+      Wrapped <code>llmrouter.ErrInvalidConfig</code> — the underlying
+      provider's <code>New()</code> rejected the assembled options
+      (e.g. Azure missing <code>api-version</code>).
+    </li>
+  </ul>
+
+  <h2 id="when-to-use">When to use the router vs constructing a provider directly</h2>
+  <p>Use <code>router.Resolve</code> when:</p>
+  <ul>
+    <li>
+      Your application is <strong>multi-vendor</strong> — you switch
+      between Claude, GPT, Llama, Gemini based on cost, latency, or
+      availability.
+    </li>
+    <li>
+      You want a <strong>single config surface</strong> across
+      environments (env vars in CI, Credentials struct in production).
+    </li>
+    <li>
+      You're <strong>building a gateway</strong> that routes
+      tenant-supplied model ids without knowing the family in advance.
+    </li>
+  </ul>
+  <p>
+    Construct a provider directly (<code>openai.New(...)</code>,
+    <code>anthropic.New(...)</code>, &hellip;) when:
+  </p>
+  <ul>
+    <li>
+      You only use one vendor and one platform. The direct
+      constructor has a sharper API surface and no resolution overhead.
+    </li>
+    <li>
+      You need provider-specific options not modelled in
+      <code>router.Credentials</code> (custom HTTP middleware, vendor
+      retry policies, specialised constructors like
+      <code>anthropic.NewRecommendedEmbedder</code>).
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/api/router">API reference: <code>router</code></a> — every public symbol.</li>
+    <li><a href="/llmrouter/docs/providers/azure-anthropic">Azure AI Foundry — Anthropic</a> — one of the providers the router can resolve to.</li>
+    <li><a href="/llmrouter/docs/providers/vertex-anthropic">Vertex AI Model Garden — Anthropic</a> — another.</li>
+    <li><a href="/llmrouter/docs/providers/azure-serverless">Azure AI Foundry — Serverless</a> — the catch-all for Llama / Mistral / Cohere on Azure.</li>
+    <li><a href="/llmrouter/docs/guides/switching-providers">Switching providers at runtime</a> — pattern for hot-swapping providers behind a single config.</li>
+  </ul>
+</DocsLayout>

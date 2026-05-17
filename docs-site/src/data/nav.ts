@@ -41,6 +41,7 @@ export const sidebarSections: NavSection[] = [
       { label: "Realtime sessions", href: `${BASE}/concepts/realtime` },
       { label: "Structured outputs", href: `${BASE}/concepts/structured-outputs` },
       { label: "Rerank", href: `${BASE}/concepts/rerank` },
+      { label: "The Router", href: `${BASE}/concepts/router` },
     ],
   },
   {
@@ -51,8 +52,11 @@ export const sidebarSections: NavSection[] = [
       { label: "Gemini Live", href: `${BASE}/providers/gemini-live` },
       { label: "Anthropic", href: `${BASE}/providers/anthropic` },
       { label: "Azure OpenAI", href: `${BASE}/providers/azure-openai` },
+      { label: "Azure Foundry — Anthropic", href: `${BASE}/providers/azure-anthropic` },
+      { label: "Azure Foundry — Serverless", href: `${BASE}/providers/azure-serverless` },
       { label: "AWS Bedrock", href: `${BASE}/providers/bedrock` },
       { label: "Google Vertex AI", href: `${BASE}/providers/vertex` },
+      { label: "Vertex AI — Anthropic", href: `${BASE}/providers/vertex-anthropic` },
       { label: "Google Gemini (AI Studio)", href: `${BASE}/providers/gemini` },
       { label: "Cohere", href: `${BASE}/providers/cohere` },
       { label: "Mistral", href: `${BASE}/providers/mistral` },
@@ -87,6 +91,7 @@ export const sidebarSections: NavSection[] = [
       { label: "Rerank", href: `${BASE}/api/rerank` },
       { label: "Provider openai", href: `${BASE}/api/provider-openai` },
       { label: "Provider anthropic", href: `${BASE}/api/provider-anthropic` },
+      { label: "Package router", href: `${BASE}/api/router` },
     ],
   },
   {

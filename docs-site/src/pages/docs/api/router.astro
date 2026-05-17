@@ -1,0 +1,283 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Package router">
+  <h1>Package router</h1>
+  <p>
+    Every public symbol declared under
+    <a href="https://github.com/elloloop/llmrouter/tree/main/router"><code>router/</code></a>.
+    This package resolves <code>{`{Model, Platform, Credentials}`}</code>
+    triples into concrete <code>llmrouter.Provider</code> implementations.
+    See the
+    <a href="/llmrouter/docs/concepts/router">Router concept</a>
+    for the design narrative and worked examples.
+  </p>
+  <p>
+    Import path:
+    <Code lang="go" code={`import "github.com/elloloop/llmrouter/router"`} />
+  </p>
+
+  <h2 id="resolve">Resolve</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/router.go#L54">router/router.go#L54</a>.
+  </p>
+  <Code lang="go" code={`func Resolve(req Request) (llmrouter.Provider, error)`} />
+  <p>
+    Builds an <code>llmrouter.Provider</code> for the requested
+    <code>{`{Model, Platform, Credentials}`}</code> tuple. Steps:
+  </p>
+  <ol>
+    <li>Validates <code>req.Model</code> is non-empty.</li>
+    <li>Calls <code>InferFamily(req.Model)</code> to pick a <code>ModelFamily</code>.</li>
+    <li>If <code>req.Platform == PlatformAuto</code>, scans <code>autoPreference</code> and picks the first platform that supports the family and has credentials.</li>
+    <li>Validates the (family, platform) pair against <code>SupportedPlatforms(family)</code>.</li>
+    <li>Dispatches to the right underlying provider constructor and returns the result.</li>
+  </ol>
+  <p>Returns one of: <code>ErrEmptyModel</code>, <code>ErrUnsupportedRoute</code>, <code>ErrMissingCredentials</code>, <code>ErrNoAutoPlatform</code>, or a wrapped <code>llmrouter.ErrInvalidConfig</code> from the underlying provider's <code>New()</code>.</p>
+
+  <h2 id="resolvefromenv">ResolveFromEnv</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/router.go#L75">router/router.go#L75</a>.
+  </p>
+  <Code lang="go" code={`func ResolveFromEnv(model string) (llmrouter.Provider, error)`} />
+  <p>
+    Convenience for the common case: equivalent to
+    <code>Resolve(Request{`{Model: model, Platform: PlatformAuto}`})</code>.
+    Reads all credentials from environment variables according to
+    <a href="#defaultenvvars"><code>DefaultEnvVars</code></a>.
+  </p>
+
+  <h2 id="inferfamily">InferFamily</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/family.go#L32">router/family.go#L32</a>.
+  </p>
+  <Code lang="go" code={`func InferFamily(model string) ModelFamily`} />
+  <p>
+    Returns the <code>ModelFamily</code> implied by a model id via
+    case-insensitive prefix matching after stripping hosting-platform
+    vendor prefixes (<code>anthropic.</code>, <code>meta.</code>,
+    <code>mistral.</code>, <code>cohere.</code>, <code>amazon.</code>,
+    <code>ai21.</code>, <code>stability.</code>). Unknown ids return
+    <code>FamilyOther</code>.
+  </p>
+
+  <h2 id="supportedplatforms">SupportedPlatforms</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/platform.go#L62">router/platform.go#L62</a>.
+  </p>
+  <Code lang="go" code={`func SupportedPlatforms(family ModelFamily) []Platform`} />
+  <p>
+    Returns the platforms that can serve the given family, in the
+    router's preferred order. Useful for building custom preference
+    loops when <code>PlatformAuto</code> isn't quite right.
+  </p>
+
+  <h2 id="applymodeltranslation">ApplyModelTranslation</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/router.go#L330">router/router.go#L330</a>.
+  </p>
+  <Code lang="go" code={`func ApplyModelTranslation(req llmrouter.ChatRequest, platform Platform) llmrouter.ChatRequest`} />
+  <p>
+    Returns a copy of <code>req</code> with <code>Model</code> rewritten
+    to the platform-specific form. Currently translates Anthropic and
+    Llama / Mistral / Cohere ids to the Bedrock prefixed form
+    (<code>anthropic.claude-3-5-sonnet-20241022-v2:0</code>) and
+    Anthropic ids to the Vertex <code>@</code>-versioned form
+    (<code>claude-3-5-sonnet-v2@20241022</code>). The original request is
+    unchanged. Ids that already carry the right prefix or
+    <code>@</code>-version pass through unchanged.
+  </p>
+
+  <h2 id="platform">Platform</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/platform.go">router/platform.go</a>.
+  </p>
+  <Code lang="go" code={`type Platform string
+
+const (
+    PlatformAuto       Platform = ""           // pick from autoPreference based on credentials
+    PlatformDirect     Platform = "direct"      // vendor's native API
+    PlatformBedrock    Platform = "bedrock"     // AWS Bedrock Runtime ConverseStream
+    PlatformVertex     Platform = "vertex"      // Google Vertex AI / Model Garden
+    PlatformAzure      Platform = "azure"       // Azure AI Foundry (router picks sub-provider)
+    PlatformOpenRouter Platform = "openrouter"  // OpenRouter fan-out proxy
+    PlatformTogether   Platform = "together"    // Together AI
+    PlatformGroq       Platform = "groq"        // Groq Cloud
+    PlatformFireworks  Platform = "fireworks"   // Fireworks AI
+    PlatformCerebras   Platform = "cerebras"    // Cerebras Cloud Inference
+    PlatformDeepSeek   Platform = "deepseek"    // DeepSeek first-party API
+    PlatformPerplexity Platform = "perplexity"  // Perplexity sonar-family API
+    PlatformxAI        Platform = "xai"         // xAI Grok API
+)`} />
+
+  <h2 id="modelfamily">ModelFamily</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/family.go">router/family.go</a>.
+  </p>
+  <Code lang="go" code={`type ModelFamily string
+
+const (
+    FamilyOpenAI    ModelFamily = "openai"    // gpt-*, o1-*, o3-*, o4-*, chatgpt-*
+    FamilyAnthropic ModelFamily = "anthropic" // claude-*
+    FamilyLlama     ModelFamily = "llama"     // llama-*, meta.llama-*, anything containing "llama"
+    FamilyMistral   ModelFamily = "mistral"   // mistral-*, mixtral-*, ministral-*, codestral-*, magistral-*, pixtral-*
+    FamilyCohere    ModelFamily = "cohere"    // command-*, c4ai-*
+    FamilyGemini    ModelFamily = "gemini"    // gemini-*
+    FamilyGrok      ModelFamily = "grok"      // grok-*
+    FamilyDeepSeek  ModelFamily = "deepseek"  // deepseek-*
+    FamilyOther     ModelFamily = "other"     // unknown / opaque
+)`} />
+
+  <h2 id="credentials">Credentials</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/credentials.go#L12">router/credentials.go#L12</a>.
+  </p>
+  <Code lang="go" code={`type Credentials struct {
+    // Generic API key for direct platforms and most OpenAI-compatible
+    // proxies. Empty falls back to a family- or platform-specific env var.
+    APIKey string
+
+    // Azure-specific fields.
+    AzureBaseURL    string // resource hostname; e.g. https://<resource>.services.ai.azure.com
+    AzureDeployment string // deployment name from the Foundry portal
+    AzureAPIVersion string // e.g. "2024-10-21"
+    AzureAPIKey     string // overrides APIKey for Azure-only setups
+
+    // AWS Bedrock. The AWS SDK handles access-key wiring via its
+    // standard credential chain — the router only needs the region.
+    AWSRegion string
+
+    // GCP. Project + region select the Vertex tenant. Access token is
+    // optional; when empty, Application Default Credentials are used
+    // by the underlying provider.
+    GCPProject     string
+    GCPRegion      string
+    GCPAccessToken string
+}`} />
+
+  <h2 id="request">Request</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/credentials.go#L103">router/credentials.go#L103</a>.
+  </p>
+  <Code lang="go" code={`type Request struct {
+    Model       string         // required; e.g. "claude-3-5-sonnet-20241022"
+    Platform    Platform       // PlatformAuto picks from autoPreference
+    Credentials Credentials    // platform-specific auth fields
+    HTTPClient  *http.Client   // optional; forwarded when the provider supports it
+}`} />
+
+  <h2 id="envvars">EnvVars</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/credentials.go#L48">router/credentials.go#L48</a>.
+  </p>
+  <Code lang="go" code={`type EnvVars struct {
+    // Family-keyed API keys for direct platforms.
+    OpenAIAPIKey    string
+    AnthropicAPIKey string
+    MistralAPIKey   string
+    CohereAPIKey    string
+    GoogleAPIKey    string // Gemini direct
+    GrokAPIKey      string // xAI direct
+    DeepSeekAPIKey  string
+
+    // Platform-keyed API keys for fan-out platforms.
+    OpenRouterAPIKey string
+    TogetherAPIKey   string
+    GroqAPIKey       string
+    FireworksAPIKey  string
+    CerebrasAPIKey   string
+    PerplexityAPIKey string
+
+    // Azure / AWS / GCP.
+    AzureBaseURL string
+    AzureAPIKey  string
+    AWSRegion    string // primary
+    AWSRegionAlt string // fallback (typically AWS_DEFAULT_REGION)
+    GCPProject   string
+}`} />
+
+  <h2 id="defaultenvvars">DefaultEnvVars</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/credentials.go#L77">router/credentials.go#L77</a>.
+  </p>
+  <Code lang="go" code={`var DefaultEnvVars = EnvVars{
+    OpenAIAPIKey:    "OPENAI_API_KEY",
+    AnthropicAPIKey: "ANTHROPIC_API_KEY",
+    MistralAPIKey:   "MISTRAL_API_KEY",
+    CohereAPIKey:    "COHERE_API_KEY",
+    GoogleAPIKey:    "GOOGLE_API_KEY",
+    GrokAPIKey:      "GROK_API_KEY",
+    DeepSeekAPIKey:  "DEEPSEEK_API_KEY",
+
+    OpenRouterAPIKey: "OPENROUTER_API_KEY",
+    TogetherAPIKey:   "TOGETHER_API_KEY",
+    GroqAPIKey:       "GROQ_API_KEY",
+    FireworksAPIKey:  "FIREWORKS_API_KEY",
+    CerebrasAPIKey:   "CEREBRAS_API_KEY",
+    PerplexityAPIKey: "PERPLEXITY_API_KEY",
+
+    AzureBaseURL: "AZURE_OPENAI_ENDPOINT",
+    AzureAPIKey:  "AZURE_OPENAI_API_KEY",
+    AWSRegion:    "AWS_REGION",
+    AWSRegionAlt: "AWS_DEFAULT_REGION",
+    GCPProject:   "GOOGLE_CLOUD_PROJECT",
+}`} />
+  <p>
+    Mutate this global at process start to swap in custom env var
+    names — useful for multi-tenant CI runners that need to scope
+    keys per tenant.
+  </p>
+
+  <h2 id="errors">Errors</h2>
+  <p>
+    Source:
+    <a href="https://github.com/elloloop/llmrouter/blob/main/router/router.go#L29">router/router.go#L29</a>.
+  </p>
+  <Code lang="go" code={`var (
+    // ErrEmptyModel — Request.Model is empty.
+    ErrEmptyModel = errors.New("router: model id cannot be empty")
+
+    // ErrUnsupportedRoute — the inferred family cannot be served by
+    // the requested platform.
+    ErrUnsupportedRoute = errors.New("router: unsupported (family, platform) combination")
+
+    // ErrMissingCredentials — required credentials are missing.
+    // Wrapped with the field name the caller forgot.
+    ErrMissingCredentials = errors.New("router: missing required credentials")
+
+    // ErrNoAutoPlatform — PlatformAuto found no platform with credentials.
+    ErrNoAutoPlatform = errors.New("router: no platform with credentials available for the inferred family")
+)`} />
+  <p>
+    Use <code>errors.Is</code> to inspect:
+  </p>
+  <Code lang="go" code={`_, err := router.Resolve(req)
+switch {
+case errors.Is(err, router.ErrUnsupportedRoute):
+    // Family doesn't run on the requested platform.
+case errors.Is(err, router.ErrMissingCredentials):
+    // The wrapped message names the missing field.
+case errors.Is(err, llmrouter.ErrInvalidConfig):
+    // The underlying provider's New() rejected the assembled options.
+}`} />
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/concepts/router">The Router concept</a> — design narrative + worked examples.</li>
+    <li><a href="/llmrouter/docs/api/llmrouter">Package llmrouter</a> — the root types this package returns.</li>
+    <li><a href="/llmrouter/docs/api/errors">API: errors</a> — <code>ErrUpstream</code>, <code>ErrInvalidConfig</code>.</li>
+  </ul>
+</DocsLayout>

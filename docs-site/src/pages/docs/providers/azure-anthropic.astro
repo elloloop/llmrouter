@@ -1,0 +1,273 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Azure AI Foundry — Anthropic">
+  <h1>Azure AI Foundry — Anthropic</h1>
+  <p>
+    The <code>azureanthropic</code> provider talks to <strong>Claude</strong>
+    models hosted on Azure AI Foundry. The transport layer is
+    Azure-shaped (deployment-scoped URL or <code>/openai/v1/messages</code>,
+    <code>api-version</code> query parameter, <code>api-key</code> header
+    OR an AAD bearer token), but the request body and the SSE event
+    stream are <em>byte-identical to direct
+    <a href="/llmrouter/docs/providers/anthropic">Anthropic</a></em>.
+    Application code that already targets the
+    <code>anthropic</code> provider runs unchanged here — only the
+    constructor changes.
+  </p>
+  <p>
+    Picking the right Anthropic surface:
+  </p>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/providers/anthropic"><code>providers/anthropic</code></a>
+      — direct <code>api.anthropic.com</code>.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/bedrock"><code>providers/bedrock</code></a>
+      — Claude via AWS Bedrock (Converse API).
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/vertex-anthropic"><code>providers/vertexanthropic</code></a>
+      — Claude via Google Vertex AI Model Garden.
+    </li>
+    <li>
+      <strong><code>providers/azureanthropic</code></strong> (this page)
+      — Claude via Azure AI Foundry.
+    </li>
+  </ul>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/azureanthropic"
+)`} />
+
+  <h2 id="url-variants">Two URL variants</h2>
+  <p>
+    Foundry exposes Claude under two endpoint shapes. Pick by whether
+    you provisioned a Foundry <em>deployment</em> for a specific Claude
+    variant, or you're hitting the resource-scoped messages endpoint
+    that picks the variant from the request body.
+  </p>
+  <ol>
+    <li>
+      <strong>Deployment-scoped (recommended).</strong> Opt in by passing
+      <code>WithDeployment("...")</code>. The constructed URL is:
+      <br />
+      <code>{`https://<resource>.services.ai.azure.com/openai/deployments/<deployment>/messages?api-version=<v>`}</code>
+    </li>
+    <li>
+      <strong>Resource-scoped (<code>/openai/v1/messages</code>).</strong>
+      Omit <code>WithDeployment</code>. The constructed URL is:
+      <br />
+      <code>{`https://<resource>.services.ai.azure.com/openai/v1/messages?api-version=<v>`}</code>
+      <br />
+      The <code>model</code> field in the request body selects the
+      Claude variant.
+    </li>
+  </ol>
+
+  <h2 id="auth">Authentication</h2>
+  <p>
+    Auth is XOR: provide exactly <em>one</em> of
+    <code>llmrouter.WithAPIKey(...)</code> or
+    <code>azureanthropic.WithAADToken(...)</code>. Providing both —
+    or neither — fails at <code>New()</code> with
+    <code>ErrInvalidConfig</code>.
+  </p>
+  <ul>
+    <li>
+      <strong>API key.</strong> Flows as the Azure-specific
+      <code>api-key</code> request header (<em>not</em>
+      <code>x-api-key</code>, the direct-Anthropic header — Foundry
+      uses Azure conventions).
+    </li>
+    <li>
+      <strong>AAD bearer.</strong> Mint a token from your AAD source
+      (e.g. <code>azidentity</code>) and return it from the
+      <code>AADTokenSource</code> callback. The source is called once
+      per request, so it's the right place to implement caching and
+      refresh.
+    </li>
+  </ul>
+  <p>
+    The <code>anthropic-version</code> header is <strong>never</strong>
+    sent — Foundry manages the API version via the
+    <code>api-version</code> query parameter. <code>WithAPIVersion</code>
+    is mandatory.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <Code lang="go" code={`p, err := azureanthropic.New(
+    llmrouter.WithAPIKey(os.Getenv("AZURE_FOUNDRY_KEY")),
+    llmrouter.WithBaseURL("https://my-resource.services.ai.azure.com"),
+    azureanthropic.WithDeployment("claude-3-5-sonnet"),
+    azureanthropic.WithAPIVersion("2024-10-21"),
+)
+if err != nil {
+    log.Fatal(err)
+}`} />
+  <p>For AAD-bearer auth instead:</p>
+  <Code lang="go" code={`p, err := azureanthropic.New(
+    llmrouter.WithBaseURL("https://my-resource.services.ai.azure.com"),
+    azureanthropic.WithAPIVersion("2024-10-21"),
+    azureanthropic.WithAADToken(func(ctx context.Context) (string, error) {
+        // Implement caching + refresh in your token source.
+        tok, err := myAzureCredential.GetToken(ctx, policy.TokenRequestOptions{
+            Scopes: []string{"https://cognitiveservices.azure.com/.default"},
+        })
+        if err != nil {
+            return "", err
+        }
+        return tok.Token, nil
+    }),
+)`} />
+
+  <h2 id="capabilities">Capabilities</h2>
+  <p>
+    Because the body and SSE event stream are identical to direct
+    Anthropic, every feature of the
+    <a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a>
+    works without code changes:
+  </p>
+  <ul>
+    <li>Typed tool use via <code>ChatRequest.Tools</code> and translation to <code>tool_use</code> / <code>tool_result</code> blocks.</li>
+    <li>Extended thinking deltas for Claude 3.7+ (surfaced via <code>Choice.Delta.Thinking</code>).</li>
+    <li>Prompt caching via <code>Message.CacheControl</code>.</li>
+    <li>Multipart content (text + image blocks) via <code>ImageURLContent</code> / <code>ImageBytesContent</code>.</li>
+    <li>Mid-stream error surfacing on <code>Stream.Err()</code>.</li>
+    <li>Structured outputs via forced tool-use (set <code>ChatRequest.ResponseSchema</code> — see <a href="/llmrouter/docs/concepts/structured-outputs#anthropic-shape">Structured outputs on Anthropic</a>).</li>
+    <li>Tool-result messages via <code>llmrouter.ToolResultMessage(toolCallID, content)</code>.</li>
+  </ul>
+
+  <h2 id="example">Full example</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/azureanthropic"
+)
+
+func main() {
+    p, err := azureanthropic.New(
+        llmrouter.WithAPIKey(os.Getenv("AZURE_FOUNDRY_KEY")),
+        llmrouter.WithBaseURL(os.Getenv("AZURE_FOUNDRY_ENDPOINT")),
+        azureanthropic.WithDeployment("claude-3-5-sonnet"),
+        azureanthropic.WithAPIVersion("2024-10-21"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+        Model:     "claude-3-5-sonnet-20241022",
+        MaxTokens: 1024,
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("system", "You are concise."),
+            llmrouter.TextMessage("user", "In one sentence, what is Azure AI Foundry?"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "azureanthropic"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — missing or wrong <code>api-key</code> / expired AAD token.</li>
+    <li><code>404</code> — deployment not found, or wrong API version for this Foundry region.</li>
+    <li><code>400</code> — Azure content-filter trigger, or malformed body (the body shape must match Anthropic <code>/v1/messages</code>; check <code>MaxTokens</code>).</li>
+    <li><code>429</code> — Foundry capacity throttle; honour <code>Retry-After</code>.</li>
+  </ul>
+
+  <h2 id="caveats">Caveats</h2>
+  <ul>
+    <li>
+      <strong>Translation code is duplicated.</strong> The body and SSE
+      translation lives in
+      <code>providers/azureanthropic/translation.go</code> as a
+      byte-identical copy of the logic in
+      <code>providers/anthropic</code>. This is intentional — Foundry's
+      transport layer is different but the wire protocol is the same,
+      and keeping the translation here removes the cross-package
+      coupling. The source file documents this with a sync target
+      comment; if you find a wire-level fix in
+      <code>providers/anthropic</code>, mirror it here too.
+    </li>
+    <li>
+      <strong>Pin <code>api-version</code>.</strong> Azure rolls
+      <code>api-version</code> forward and old values eventually 404.
+      Pin to a known-good value and bump deliberately.
+    </li>
+    <li>
+      <strong>No <code>x-api-key</code> header.</strong> Direct
+      Anthropic uses <code>x-api-key</code>; Foundry uses
+      <code>api-key</code>. The provider sets the right one — you do
+      not need to do this yourself.
+    </li>
+    <li>
+      <strong>Auth is mutually exclusive.</strong> Providing both an
+      API key and an AAD source — or neither — fails fast in
+      <code>New()</code>.
+    </li>
+  </ul>
+
+  <h2 id="when-to-use">When to use this vs other Anthropic surfaces</h2>
+  <ul>
+    <li>
+      <strong>Use <code>azureanthropic</code> when</strong> your
+      organisation has standardised on Azure AI Foundry (single billing
+      surface, Azure AAD for auth, regional data-residency
+      requirements that need Microsoft as the data processor).
+    </li>
+    <li>
+      <strong>Use <a href="/llmrouter/docs/providers/anthropic">direct
+      Anthropic</a> when</strong> you want the fastest path to the
+      latest model variants and you don't need an Azure billing path.
+      Anthropic ships new Claude variants on
+      <code>api.anthropic.com</code> first; Foundry lags by days to
+      weeks.
+    </li>
+    <li>
+      <strong>Use <a href="/llmrouter/docs/providers/bedrock">Bedrock</a>
+      when</strong> you're on AWS and want a single IAM-based auth
+      story shared with the rest of your AWS workloads.
+    </li>
+    <li>
+      <strong>Use <a href="/llmrouter/docs/providers/vertex-anthropic">vertexanthropic</a>
+      when</strong> you're on GCP and want ADC-based auth alongside
+      the rest of your Vertex usage.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a> — direct API; same body and SSE shape.</li>
+    <li><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI provider</a> — same transport family for OpenAI's own models.</li>
+    <li><a href="/llmrouter/docs/providers/azure-serverless">Azure Serverless provider</a> — same transport family for non-OpenAI/non-Claude models on Foundry.</li>
+    <li><a href="/llmrouter/docs/concepts/router">The Router</a> — automatic platform resolution for Claude.</li>
+  </ul>
+</DocsLayout>

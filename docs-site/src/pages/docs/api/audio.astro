@@ -263,22 +263,55 @@ func (s *TranscriptStream) Cancel()`} />
 
   <h2 id="transcript-segment">TranscriptSegment</h2>
   <Code lang="go" code={`type TranscriptSegment struct {
-    Text       string          // transcribed text
-    Final      bool            // true on the terminal segment
-    Start, End time.Duration   // timestamps relative to audio start
-    Words      []TranscriptWord
-    Confidence float32         // [0, 1]; zero when not provided
-    Raw        json.RawMessage // original wire JSON for this segment
+    Type        string          // upstream event name; "" for transcript-content
+    Text        string          // transcribed text
+    Final       bool            // true on the terminal segment for an utterance
+    SpeechFinal bool            // true when the provider detected end-of-speech
+    Start, End  time.Duration   // timestamps relative to audio start
+    Words       []TranscriptWord
+    Confidence  float32         // [0, 1]; zero when not provided
+    Raw         json.RawMessage // original wire JSON for this segment
 }`} />
   <p>
     Source:
-    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L181">audio.go#L181</a>.
+    <a href="https://github.com/elloloop/llmrouter/blob/main/audio.go#L191">audio.go#L191</a>.
   </p>
+  <dl>
+    <dt><code>Type</code> <em>(v0.6+)</em></dt>
+    <dd>
+      Discriminates transcript-content segments
+      (<code>Type == ""</code>, the common case) from non-transcript
+      stream events. Streaming providers populate this verbatim from
+      the upstream event name — e.g. Deepgram emits
+      <code>"Results"</code>, <code>"SpeechStarted"</code>,
+      <code>"UtteranceEnd"</code>, <code>"Metadata"</code>.
+      Consumers should switch on this to drive barge-in, turn-taking,
+      and similar behaviours.
+    </dd>
+    <dt><code>Text</code></dt>
+    <dd>The transcribed text. Empty for non-transcript event types.</dd>
+    <dt><code>Final</code></dt>
+    <dd>
+      True on the terminal segment for the current transcript window.
+      Streaming providers may emit several
+      <code>Final=true</code> segments within a single utterance
+      (Deepgram's <code>is_final</code>).
+    </dd>
+    <dt><code>SpeechFinal</code> <em>(v0.6+)</em></dt>
+    <dd>
+      Distinct from <code>Final</code>: indicates the provider has
+      detected <em>end-of-speech</em> for the current utterance.
+      Deepgram surfaces this as a separate bool alongside
+      <code>is_final</code>. Voice-agent turn-taking should dispatch
+      off <code>SpeechFinal</code>, not <code>Final</code>.
+    </dd>
+  </dl>
   <p>
     Streaming providers emit interim segments
-    (<code>Final=false</code>) followed by exactly one
-    <code>Final=true</code> segment. Non-streaming providers emit
-    exactly one <code>Final=true</code> segment.
+    (<code>Final=false</code>) followed by one or more
+    <code>Final=true</code> segments. Non-streaming providers emit
+    exactly one <code>Final=true</code> segment with
+    <code>Type == ""</code>.
   </p>
 
   <h2 id="transcript-word">TranscriptWord</h2>

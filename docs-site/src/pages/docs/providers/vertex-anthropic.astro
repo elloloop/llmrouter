@@ -1,0 +1,280 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import { Code } from "astro-expressive-code/components";
+---
+
+<DocsLayout title="Vertex AI Model Garden — Anthropic">
+  <h1>Vertex AI Model Garden — Anthropic</h1>
+  <p>
+    The <code>vertexanthropic</code> provider talks to
+    <strong>Claude</strong> models hosted on Google Vertex AI Model
+    Garden. The transport layer is Vertex-shaped (regional
+    <code>:streamRawPredict</code> endpoint, OAuth2 access token from
+    Google ADC), but the request body and the SSE event stream are
+    native Anthropic. There is one Vertex-specific quirk — covered
+    below — and one model-id format change.
+  </p>
+  <p>
+    Picking the right Anthropic surface:
+  </p>
+  <ul>
+    <li>
+      <a href="/llmrouter/docs/providers/anthropic"><code>providers/anthropic</code></a>
+      — direct <code>api.anthropic.com</code>.
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/bedrock"><code>providers/bedrock</code></a>
+      — Claude via AWS Bedrock (Converse API).
+    </li>
+    <li>
+      <a href="/llmrouter/docs/providers/azure-anthropic"><code>providers/azureanthropic</code></a>
+      — Claude via Azure AI Foundry.
+    </li>
+    <li>
+      <strong><code>providers/vertexanthropic</code></strong>
+      (this page) — Claude via Vertex Model Garden.
+    </li>
+  </ul>
+
+  <h2 id="import">Import path</h2>
+  <Code lang="go" code={`import (
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/vertexanthropic"
+)`} />
+
+  <h2 id="endpoint">Endpoint shape</h2>
+  <p>
+    Vertex serves Anthropic models from a regional, project-scoped
+    endpoint:
+  </p>
+  <Code lang="bash" code={`POST https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/publishers/anthropic/models/<model>:streamRawPredict`} />
+  <p>
+    The provider composes this URL from <code>WithProject</code>,
+    <code>WithRegion</code>, and the model id on the request. You can
+    override the host with <code>llmrouter.WithBaseURL</code> if you
+    front Vertex behind a custom hostname.
+  </p>
+
+  <h2 id="quirks">Vertex-specific quirks</h2>
+  <ul>
+    <li>
+      <strong>The Vertex version goes in the body.</strong> Anthropic on
+      Vertex requires a top-level <code>"anthropic_version":
+      "vertex-2023-10-16"</code> field in the request body — not in a
+      header. The provider injects this automatically; you do not need
+      to set it on <code>ChatRequest</code>.
+    </li>
+    <li>
+      <strong>Model id uses <code>@</code>-versioning.</strong> Vertex
+      addresses Claude variants as
+      <code>{`claude-3-5-sonnet-v2@20241022`}</code>, not the
+      dash-separated form direct Anthropic uses. Pass the Vertex form
+      verbatim in <code>ChatRequest.Model</code> — the provider
+      interpolates it straight into the URL. (The
+      <a href="/llmrouter/docs/concepts/router">router</a> can translate
+      vendor-neutral ids like <code>claude-3-5-sonnet</code> to the
+      <code>@</code>-versioned form for you via
+      <code>router.ApplyModelTranslation</code>.)
+    </li>
+    <li>
+      <strong>Pure HTTP, no <code>google.golang.org/genai</code>
+      dependency.</strong> Unlike
+      <a href="/llmrouter/docs/providers/vertex"><code>providers/vertex</code></a>
+      (which uses the genai SDK for Gemini), this package is
+      intentionally a pure-HTTP provider — it does not import the GCP
+      SDK. Bring your own token source.
+    </li>
+  </ul>
+
+  <h2 id="auth">Authentication</h2>
+  <p>
+    Vertex uses Google ADC (Application Default Credentials), surfaced
+    here as an OAuth2 access token sent in the
+    <code>Authorization: Bearer</code> header. Two ways to provide
+    one — pick exactly one:
+  </p>
+  <ul>
+    <li>
+      <strong><code>WithTokenSource(src TokenSource)</code> —
+      preferred.</strong> Your callback is invoked once per
+      <code>CompletionStream</code> call. Implement caching and refresh
+      inside the callback (the standard pattern wraps an
+      <code>oauth2.TokenSource</code> from
+      <code>golang.org/x/oauth2/google</code>).
+    </li>
+    <li>
+      <strong><code>WithAccessToken(token string)</code> —
+      static.</strong> Convenient for CI runs where the token is
+      minted out-of-band and lives long enough for the request to
+      complete. Not appropriate for long-lived servers (tokens expire
+      every hour).
+    </li>
+  </ul>
+  <p>
+    <strong><code>llmrouter.WithAPIKey</code> is rejected at
+    <code>New()</code>.</strong> Vertex does not accept API keys for
+    Model Garden endpoints, and accepting one silently would
+    misconfigure auth.
+  </p>
+
+  <h2 id="construction">Construction</h2>
+  <p>
+    The canonical pattern wraps a Google ADC token source:
+  </p>
+  <Code lang="go" code={`import (
+    "context"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/vertexanthropic"
+    "golang.org/x/oauth2/google"
+)
+
+func newProvider(ctx context.Context) (*vertexanthropic.Provider, error) {
+    creds, err := google.FindDefaultCredentials(ctx,
+        "https://www.googleapis.com/auth/cloud-platform")
+    if err != nil {
+        return nil, err
+    }
+
+    return vertexanthropic.New(
+        vertexanthropic.WithProject("my-gcp-project"),
+        vertexanthropic.WithRegion("us-east5"),
+        vertexanthropic.WithTokenSource(func(ctx context.Context) (string, error) {
+            tok, err := creds.TokenSource.Token()
+            if err != nil {
+                return "", err
+            }
+            return tok.AccessToken, nil
+        }),
+    )
+}`} />
+  <p>
+    The token source closes over the cached <code>oauth2.TokenSource</code>,
+    so refreshes happen transparently inside the callback.
+  </p>
+
+  <h2 id="capabilities">Capabilities</h2>
+  <p>
+    Because the body and SSE event stream are native Anthropic, every
+    feature of the
+    <a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a>
+    works without code changes — typed tool use, extended thinking
+    deltas, prompt caching, multipart content, mid-stream errors,
+    structured outputs via forced tool-use, tool-result messages.
+  </p>
+
+  <h2 id="example">Full example</h2>
+  <Code lang="go" code={`package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/elloloop/llmrouter"
+    "github.com/elloloop/llmrouter/providers/vertexanthropic"
+    "golang.org/x/oauth2/google"
+)
+
+func main() {
+    ctx := context.Background()
+
+    creds, err := google.FindDefaultCredentials(ctx,
+        "https://www.googleapis.com/auth/cloud-platform")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    p, err := vertexanthropic.New(
+        vertexanthropic.WithProject("my-gcp-project"),
+        vertexanthropic.WithRegion("us-east5"),
+        vertexanthropic.WithTokenSource(func(ctx context.Context) (string, error) {
+            tok, err := creds.TokenSource.Token()
+            if err != nil {
+                return "", err
+            }
+            return tok.AccessToken, nil
+        }),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    stream, err := p.CompletionStream(ctx, llmrouter.ChatRequest{
+        // Vertex addresses Claude with an @-versioned model id.
+        Model:     "claude-3-5-sonnet-v2@20241022",
+        MaxTokens: 1024,
+        Messages: []llmrouter.Message{
+            llmrouter.TextMessage("user", "In one sentence, what is Vertex Model Garden?"),
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for chunk := range stream.Chunks() {
+        for _, c := range chunk.Choices {
+            fmt.Print(c.Delta.Content)
+        }
+    }
+    if err := stream.Err(); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println()
+}`} />
+
+  <h2 id="regions">Supported regions</h2>
+  <p>
+    Vertex serves Anthropic models from a subset of regions. Check the
+    current list at
+    <a href="https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude" target="_blank" rel="noopener noreferrer">cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude</a>.
+    At time of writing, <code>us-east5</code> and
+    <code>europe-west1</code> are the most widely available regions
+    for the current Claude 3.5 generation.
+  </p>
+
+  <h2 id="errors">Error handling</h2>
+  <p>
+    Non-2xx responses surface as
+    <a href="/llmrouter/docs/api/llmrouter#errupstream"><code>*llmrouter.ErrUpstream</code></a>
+    with <code>Provider == "vertexanthropic"</code>. Common cases:
+  </p>
+  <ul>
+    <li><code>401</code> — access token expired or wrong scopes (need <code>cloud-platform</code>).</li>
+    <li><code>403</code> — IAM permission missing on the project; the caller needs <code>aiplatform.endpoints.predict</code> or the broader <code>roles/aiplatform.user</code>.</li>
+    <li><code>404</code> — model id not available in this region (check the supported-regions matrix).</li>
+    <li><code>400</code> — body shape mismatch; the most common cause is sending a model id without the <code>@</code>-version suffix.</li>
+  </ul>
+
+  <h2 id="when-to-use">When to use this vs other Anthropic surfaces</h2>
+  <ul>
+    <li>
+      <strong>Use <code>vertexanthropic</code> when</strong> you're on
+      GCP and want IAM + project + region as the auth and billing
+      boundary, or your data-residency requirements pin you to a GCP
+      region.
+    </li>
+    <li>
+      <strong>Use <a href="/llmrouter/docs/providers/anthropic">direct
+      Anthropic</a> when</strong> you want the latest variants on day
+      one. Vertex Model Garden lags direct Anthropic by days to
+      weeks for new releases.
+    </li>
+    <li>
+      <strong>Use <a href="/llmrouter/docs/providers/bedrock">Bedrock</a>
+      when</strong> you're on AWS — same shape, different cloud.
+    </li>
+    <li>
+      <strong>Use <a href="/llmrouter/docs/providers/azure-anthropic">azureanthropic</a>
+      when</strong> you're on Azure.
+    </li>
+  </ul>
+
+  <h2 id="see-also">See also</h2>
+  <ul>
+    <li><a href="/llmrouter/docs/providers/anthropic">Anthropic provider</a> — direct API; same body and SSE shape.</li>
+    <li><a href="/llmrouter/docs/providers/vertex">Vertex AI provider</a> — Gemini on Vertex (uses the genai SDK).</li>
+    <li><a href="/llmrouter/docs/concepts/router">The Router</a> — automatic platform resolution with model-id translation.</li>
+    <li><a href="/llmrouter/docs/api/router#applymodeltranslation"><code>router.ApplyModelTranslation</code></a> — translate vendor-neutral Claude ids to the Vertex <code>@</code>-versioned form.</li>
+  </ul>
+</DocsLayout>

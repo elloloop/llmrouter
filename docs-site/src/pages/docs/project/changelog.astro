@@ -23,6 +23,305 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     page is the curated, human-written summary.
   </p>
 
+  <h2 id="v0-8-0">v0.8.0 — 2026-05-17</h2>
+  <p><strong>The Router, Vertex AI Anthropic, Azure Serverless, Deepgram decode fix.</strong></p>
+  <p>
+    The headline release for the "magic model × platform" story. A
+    new <code>router/</code> package decouples the model vendor from
+    the hosting platform; two new provider packages
+    (<code>vertexanthropic</code>, <code>azureserverless</code>)
+    fill in the Vertex Claude story and unlock the
+    Llama / Mistral / Cohere / Phi / DeepSeek catalogue on Azure;
+    Issue #9 (Deepgram decode bug) is fixed; the test suite grew by
+    ~127 new regression tests.
+  </p>
+
+  <h3>New <code>router</code> package</h3>
+  <ul>
+    <li>
+      <strong>New API</strong>:
+      <code>router.Resolve(Request{`{Model, Platform, Credentials}`}) (llmrouter.Provider, error)</code>
+      and <code>router.ResolveFromEnv(model string) (llmrouter.Provider, error)</code>.
+    </li>
+    <li>
+      <strong>12 platforms</strong>: <code>PlatformAuto</code>,
+      <code>PlatformDirect</code>, <code>PlatformBedrock</code>,
+      <code>PlatformVertex</code>, <code>PlatformAzure</code>,
+      <code>PlatformOpenRouter</code>, <code>PlatformTogether</code>,
+      <code>PlatformGroq</code>, <code>PlatformFireworks</code>,
+      <code>PlatformCerebras</code>, <code>PlatformDeepSeek</code>,
+      <code>PlatformPerplexity</code>, <code>PlatformxAI</code>.
+    </li>
+    <li>
+      <strong>9 model families</strong>: <code>FamilyOpenAI</code>,
+      <code>FamilyAnthropic</code>, <code>FamilyLlama</code>,
+      <code>FamilyMistral</code>, <code>FamilyCohere</code>,
+      <code>FamilyGemini</code>, <code>FamilyGrok</code>,
+      <code>FamilyDeepSeek</code>, <code>FamilyOther</code>. Family
+      inference via prefix matching after stripping hosting-platform
+      vendor prefixes.
+    </li>
+    <li>
+      <strong>Model-id translation</strong>:
+      <code>router.ApplyModelTranslation(req, platform)</code>
+      rewrites vendor-neutral ids to Bedrock prefixed form
+      (<code>anthropic.claude-3-5-sonnet-20241022-v2:0</code>) and
+      Vertex <code>@</code>-versioned form
+      (<code>claude-3-5-sonnet-v2@20241022</code>).
+    </li>
+    <li>
+      <strong>Env-var fallback</strong>: <code>router.DefaultEnvVars</code>
+      is the global lookup table (<code>OPENAI_API_KEY</code>,
+      <code>ANTHROPIC_API_KEY</code>, <code>AWS_REGION</code>, &hellip;).
+      Mutate to customise per-tenant.
+    </li>
+    <li>
+      <strong>4 typed errors</strong>: <code>ErrEmptyModel</code>,
+      <code>ErrUnsupportedRoute</code>,
+      <code>ErrMissingCredentials</code>,
+      <code>ErrNoAutoPlatform</code>. Use
+      <code>errors.Is</code> to discriminate. See the
+      <a href="/llmrouter/docs/concepts/router">Router concept</a>
+      and <a href="/llmrouter/docs/api/router">API reference</a>.
+    </li>
+  </ul>
+
+  <h3>New <code>providers/vertexanthropic</code></h3>
+  <ul>
+    <li>
+      <strong>Claude on Google Vertex AI Model Garden.</strong>
+      Endpoint:
+      <code>{`https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/publishers/anthropic/models/<model>:streamRawPredict`}</code>.
+    </li>
+    <li>
+      <strong>Pure HTTP</strong> — no
+      <code>google.golang.org/genai</code> dependency. Bring your own
+      token source.
+    </li>
+    <li>
+      <strong>Vertex-specific quirk handled</strong>: the
+      <code>anthropic_version: "vertex-2023-10-16"</code> field is
+      injected into the body (Vertex requires it in the body, not as
+      a header).
+    </li>
+    <li>
+      <strong>Model id uses <code>@</code>-versioning</strong>:
+      <code>claude-3-5-sonnet-v2@20241022</code>. Pass verbatim in
+      <code>ChatRequest.Model</code> or use
+      <code>router.ApplyModelTranslation</code>.
+    </li>
+    <li>
+      <strong>Auth</strong>: <code>WithTokenSource(...)</code>
+      (preferred — supports refresh) or
+      <code>WithAccessToken(...)</code> (static). Rejects
+      <code>llmrouter.WithAPIKey</code>. See the
+      <a href="/llmrouter/docs/providers/vertex-anthropic">provider page</a>.
+    </li>
+  </ul>
+
+  <h3>New <code>providers/azureserverless</code></h3>
+  <ul>
+    <li>
+      <strong>Generic provider</strong> for non-OpenAI / non-Claude
+      models on Azure AI Foundry's Serverless API (MaaS) deployment
+      mode. Covers Llama, Mistral, Cohere, Phi, Jais, Nemotron,
+      DeepSeek.
+    </li>
+    <li>
+      <strong>Two URL shapes</strong>: deployment-scoped
+      (<code>{`https://<deploy>.<region>.models.ai.azure.com`}</code>)
+      and hub-scoped. Both via <code>llmrouter.WithBaseURL</code>.
+    </li>
+    <li>
+      <strong>No <code>api-version</code> query</strong> (gotcha
+      versus <code>azureopenai</code> — copy-pasted URLs with
+      <code>?api-version=...</code> will 400).
+    </li>
+    <li>
+      <strong>Auth</strong>: <code>llmrouter.WithAPIKey</code>
+      (sets the Azure-style <code>api-key</code> header) XOR
+      <code>azureserverless.WithAADToken</code>. See the
+      <a href="/llmrouter/docs/providers/azure-serverless">provider page</a>.
+    </li>
+  </ul>
+
+  <h3>Bug fixes</h3>
+  <ul>
+    <li>
+      <strong>Deepgram decode (Issue
+      <a href="https://github.com/elloloop/llmrouter/issues/9" target="_blank" rel="noopener noreferrer">#9</a>)</strong>
+      — some interim segments on Nova-3 streams were surfacing with
+      empty <code>Text</code>. The decoder now handles the affected
+      event shape.
+    </li>
+  </ul>
+
+  <h3>Tests</h3>
+  <ul>
+    <li>
+      ~127 new regression tests covering the router resolution
+      matrix, the Vertex Anthropic body / SSE translation, the
+      Azure Serverless URL composition and auth XOR, and the
+      Deepgram decode regression.
+    </li>
+  </ul>
+
+  <h3>Migration notes</h3>
+  <ul>
+    <li>
+      v0.7 code runs unchanged. The <code>router/</code> package is
+      additive; existing callers that construct providers directly
+      keep working.
+    </li>
+    <li>
+      Deepgram callers on streams that hit Issue #9 will start
+      seeing populated <code>Text</code> on the previously empty
+      interim segments. Re-test any downstream code that filtered
+      empty-text segments as a workaround.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.8.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.8.0</a>
+  </p>
+
+  <h2 id="v0-7-0">v0.7.0 — 2026-05-17</h2>
+  <p><strong>Azure AI Foundry Anthropic, polished README, 10 examples, CONTRIBUTING, hardened CI.</strong></p>
+  <p>
+    The "make it usable" release. One new provider package fills the
+    Claude gap on Azure AI Foundry; the README becomes the canonical
+    install + capability-matrix surface; ten end-to-end examples land
+    under <code>examples/</code>; CONTRIBUTING is added; and CI is
+    hardened with race-clean runs and static-analysis gates.
+  </p>
+
+  <h3>New <code>providers/azureanthropic</code></h3>
+  <ul>
+    <li>
+      <strong>Claude on Azure AI Foundry.</strong> Body and SSE event
+      stream are byte-identical to direct Anthropic — every
+      capability of the
+      <a href="/llmrouter/docs/providers/anthropic">direct provider</a>
+      works without code changes (typed tool use, thinking deltas,
+      prompt cache, multipart, structured outputs, mid-stream errors,
+      <code>ToolResultMessage</code>).
+    </li>
+    <li>
+      <strong>Two URL variants</strong>: deployment-scoped
+      (<code>{`/openai/deployments/<deployment>/messages`}</code>) via
+      <code>WithDeployment(...)</code>, or resource-scoped
+      (<code>/openai/v1/messages</code>) when no deployment is set.
+      The model field in the body picks the variant in the
+      resource-scoped path.
+    </li>
+    <li>
+      <strong>Mandatory <code>WithAPIVersion(version)</code></strong>
+      — the <code>anthropic-version</code> header is never sent;
+      Foundry manages the API version via the query parameter.
+    </li>
+    <li>
+      <strong>Auth</strong>: <code>llmrouter.WithAPIKey</code>
+      (Azure-style <code>api-key</code> header, not
+      <code>x-api-key</code>) XOR
+      <code>azureanthropic.WithAADToken(src)</code>. Both — or
+      neither — fails fast in <code>New()</code>. See the
+      <a href="/llmrouter/docs/providers/azure-anthropic">provider page</a>.
+    </li>
+  </ul>
+
+  <h3>Polished README + 10 examples + CONTRIBUTING</h3>
+  <ul>
+    <li>
+      The canonical 22-provider capability matrix moves to the README
+      so <code>pkg.go.dev</code> visitors see it without clicking
+      through to the docs site.
+    </li>
+    <li>
+      Ten runnable examples under <code>examples/</code> covering
+      chat (OpenAI, Anthropic), embeddings, TTS, STT, realtime,
+      rerank, structured outputs, and the new Azure Anthropic flow.
+    </li>
+    <li>
+      <code>CONTRIBUTING.md</code> documents the byte-passthrough
+      contract, the provider-package conventions, and the
+      table-driven test idioms the rest of the codebase uses.
+    </li>
+  </ul>
+
+  <h3>CI hardening</h3>
+  <ul>
+    <li>Race-clean test runs on every PR (<code>go test -race -count=1 ./...</code>).</li>
+    <li><code>go vet</code> + <code>staticcheck</code> gates.</li>
+    <li>Coverage tracking surfaced on the README badge.</li>
+  </ul>
+
+  <h3>Migration notes</h3>
+  <ul>
+    <li>v0.6 code runs unchanged. <code>providers/azureanthropic</code> is additive.</li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.7.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.7.0</a>
+  </p>
+
+  <h2 id="v0-6-0">v0.6.0 — 2026-05-16</h2>
+  <p><strong>STT event-type discriminator + SpeechFinal for voice-agent turn-taking.</strong></p>
+  <p>
+    A focused STT release. Streaming transcribers now distinguish
+    transcript content from endpointing / metadata events, and
+    voice-agent callers get a clean turn-taking signal that's
+    independent of the per-window <code>is_final</code> marker.
+  </p>
+
+  <h3>New <code>TranscriptSegment</code> fields</h3>
+  <ul>
+    <li>
+      <strong><code>Type string</code></strong> — populated verbatim
+      from the upstream event name. Empty string is the default and
+      means "transcript content"; non-empty values surface the
+      upstream's discriminator (Deepgram:
+      <code>"Results"</code>, <code>"SpeechStarted"</code>,
+      <code>"UtteranceEnd"</code>, <code>"Metadata"</code>).
+    </li>
+    <li>
+      <strong><code>SpeechFinal bool</code></strong> — distinct from
+      <code>Final</code>. <code>Final</code> is the upstream's
+      per-window <code>is_final</code>; <code>SpeechFinal</code> is
+      the end-of-utterance signal from VAD. Voice agents should
+      dispatch turn-taking off <code>SpeechFinal</code>, not
+      <code>Final</code>. See the
+      <a href="/llmrouter/docs/concepts/audio#speech-final">audio concept</a>.
+    </li>
+  </ul>
+
+  <h3>Migration notes</h3>
+  <ul>
+    <li>
+      Both fields default to the zero value — existing consumers
+      that read <code>Text</code>, <code>Final</code>,
+      <code>Words</code> keep working with no code changes.
+    </li>
+    <li>
+      <strong>Deepgram callers</strong> that previously dispatched
+      voice-agent turn-taking off <code>Final</code> should switch
+      to <code>SpeechFinal</code>. The previous behaviour was
+      effectively wrong on long utterances —
+      <code>is_final</code> fires several times within a single
+      sentence as Deepgram freezes intermediate windows.
+    </li>
+    <li>
+      A separate Deepgram decode bug (Issue
+      <a href="https://github.com/elloloop/llmrouter/issues/9" target="_blank" rel="noopener noreferrer">#9</a>)
+      that produced empty <code>Text</code> on some interim segments
+      was discovered after v0.6 shipped and fixed in v0.8. Bump to
+      v0.8 or later if you hit it.
+    </li>
+  </ul>
+  <p>
+    <strong>Release link:</strong>
+    <a href="https://github.com/elloloop/llmrouter/releases/tag/v0.6.0" target="_blank" rel="noopener noreferrer">github.com/elloloop/llmrouter/releases/tag/v0.6.0</a>
+  </p>
+
   <h2 id="v0-5-0">v0.5.0 — 2026-05-16</h2>
   <p><strong>Gemini Live, Realtime tool use, structured outputs, Rerank, embeddings on Fireworks + DeepSeek.</strong></p>
   <p>
@@ -811,9 +1110,11 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     Future versions are appended at the top of this page as they
     ship. The
     <a href="/llmrouter/docs/project/roadmap">roadmap</a> describes
-    what is planned for v0.6 (OpenAI Files + Assistants v2, batch
-    APIs, audio in chat, semantic caching, prompt management) and
-    v1.0 (API freeze).
+    what is planned for v0.9 (Vertex-native
+    <code>vertexllama</code> / <code>vertexmistral</code> /
+    <code>vertexcohere</code>, batch APIs, OpenAI Files +
+    Assistants v2, <code>gpt-4o-audio</code> in chat), v0.10
+    (prompt management, semantic caching), and v1.0 (API freeze).
   </p>
   <p>
     For commit-by-commit detail and signed release artifacts, see

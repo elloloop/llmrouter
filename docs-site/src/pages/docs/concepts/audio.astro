@@ -246,12 +246,14 @@ func (s *TranscriptStream) Cancel()`} />
 
   <h3 id="transcript-segment">TranscriptSegment</h3>
   <Code lang="go" code={`type TranscriptSegment struct {
-    Text       string             // transcribed text for this segment
-    Final      bool               // true on the terminal segment
-    Start, End time.Duration      // timestamps relative to audio start
-    Words      []TranscriptWord   // per-word timing (verbose_json, Deepgram, ElevenLabs)
-    Confidence float32            // per-segment confidence in [0,1]
-    Raw        json.RawMessage    // original wire-format JSON
+    Type        string             // upstream event name; "" for transcript-content
+    Text        string             // transcribed text for this segment
+    Final       bool               // true on the terminal segment for an utterance
+    SpeechFinal bool               // true when the provider detected end-of-speech
+    Start, End  time.Duration      // timestamps relative to audio start
+    Words       []TranscriptWord   // per-word timing (verbose_json, Deepgram, ElevenLabs)
+    Confidence  float32            // per-segment confidence in [0,1]
+    Raw         json.RawMessage    // original wire-format JSON
 }`} />
   <p>
     Streaming providers emit interim segments
@@ -259,6 +261,101 @@ func (s *TranscriptStream) Cancel()`} />
     Non-streaming providers emit one <code>Final=true</code> segment
     and close the channel.
   </p>
+
+  <h3 id="event-discriminator">Event-type discriminator (v0.6)</h3>
+  <p>
+    Streaming STT providers like <strong>Deepgram</strong> emit more
+    than just transcript text on the wire — they also send
+    endpointing, diarization, and session-metadata events. v0.6
+    surfaces these as <code>TranscriptSegment</code>s with
+    <code>Type</code> populated verbatim from the upstream event name.
+  </p>
+  <ul>
+    <li>
+      <code>Type == ""</code> — transcript content. Use
+      <code>Text</code>, <code>Final</code>, <code>Words</code>. This
+      is the common case and the default zero value, so existing
+      consumers keep working.
+    </li>
+    <li>
+      <code>Type == "Results"</code> — Deepgram's transcript event
+      name when verbatim event types are enabled (some providers emit
+      this even for transcript-content segments).
+    </li>
+    <li>
+      <code>Type == "SpeechStarted"</code> — Deepgram VAD: the user
+      began speaking. Useful for barge-in detection in voice agents.
+    </li>
+    <li>
+      <code>Type == "UtteranceEnd"</code> — Deepgram VAD: the
+      provider detected end-of-utterance based on silence padding.
+    </li>
+    <li>
+      <code>Type == "Metadata"</code> — session-level metadata
+      (request id, model info, channel count). Usually ignored.
+    </li>
+  </ul>
+  <p>
+    Consumers that don't care about non-transcript events should
+    skip segments where <code>Type != ""</code>:
+  </p>
+  <Code lang="go" code={`for seg := range stream.Segments() {
+    if seg.Type != "" && seg.Type != "Results" {
+        continue // skip endpointing / metadata events
+    }
+    // ...handle transcript content
+}`} />
+
+  <h3 id="speech-final">SpeechFinal vs Final (v0.6)</h3>
+  <p>
+    These look identical but they're not. The distinction matters for
+    voice-agent turn-taking — pick the wrong one and your agent
+    interrupts the user mid-sentence or sits waiting after they're
+    clearly done.
+  </p>
+  <ul>
+    <li>
+      <strong><code>Final</code></strong> — the upstream marks the
+      current <em>transcript window</em> as final. Deepgram's
+      <code>is_final</code>. Set when the provider has frozen the
+      text it has so far; the next transcript window starts a new
+      sliding buffer. Several <code>Final=true</code> segments can
+      arrive within a single user utterance.
+    </li>
+    <li>
+      <strong><code>SpeechFinal</code></strong> — the provider
+      detected <em>end-of-speech</em> for the current utterance.
+      Deepgram's <code>speech_final</code>, surfaced as a separate
+      bool. Set exactly once per utterance, at the natural turn
+      boundary.
+    </li>
+  </ul>
+  <p>
+    Voice agents should dispatch turn-taking off
+    <code>SpeechFinal</code>, not <code>Final</code> — the latter
+    fires too often and interrupts the user mid-thought.
+  </p>
+  <Code lang="go" code={`for seg := range stream.Segments() {
+    if seg.Type != "" && seg.Type != "Results" {
+        continue
+    }
+    if seg.SpeechFinal {
+        // Utterance is done — kick off the LLM turn.
+        go runLLM(seg.Text)
+    }
+}`} />
+  <aside class="not-prose my-6 rounded-lg border border-border bg-muted/30 p-4 text-sm">
+    <strong>Migration note (v0.5 &rarr; v0.6).</strong> Deepgram callers
+    that previously dispatched turn-taking off <code>Final</code>
+    should switch to <code>SpeechFinal</code>. The
+    <code>Type</code> field is new and defaults to <code>""</code> —
+    existing consumers that switch on <code>Type</code> get the same
+    behaviour as before. v0.8 fixed a separate Deepgram decode bug
+    (Issue
+    <a href="https://github.com/elloloop/llmrouter/issues/9" target="_blank" rel="noopener noreferrer">#9</a>)
+    that caused some interim segments to surface with empty
+    <code>Text</code>; bump to v0.8 or later.
+  </aside>
 
   <h3 id="stt-example">Full STT example</h3>
   <Code lang="go" code={`package main

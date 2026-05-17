@@ -105,24 +105,26 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <div class="badge">
             <span class="dot"></span>
-            v0.5.0 &middot; 22 providers &middot; chat, embeddings, TTS, STT, realtime, rerank
+            v0.8.0 &middot; 24+ providers &middot; chat, embeddings, TTS, STT, realtime, rerank &middot; new <code>router</code> package
           </div>
           <h1>
             One Go client.<br />
-            <span class="gradient">Every LLM provider.</span>
+            <span class="gradient">Every model. Every platform.</span>
           </h1>
           <p class="subtitle">
             <strong>llmrouter</strong> is a streaming-first Go library
-            that gives you an OpenAI-shaped API across 22 providers
+            that gives you an OpenAI-shaped API across 24+ providers
             &mdash; chat, embeddings, text-to-speech, speech-to-text,
             full-duplex realtime, structured outputs, and rerank
-            &mdash; with byte-passthrough for building gateways and
-            proxies.
+            &mdash; plus a new <strong><code>router</code></strong>
+            package that decouples the model vendor from the hosting
+            platform (Claude on Bedrock, Llama on Groq, GPT on Azure)
+            with one call.
           </p>
           <div class="install-highlight">
             <div class="install-box">
-              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.5.0</code>
-              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.5.0">
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.8.0</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.8.0">
                 Copy
               </button>
             </div>
@@ -187,6 +189,20 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               </p>
             </article>
             <article class="pillar">
+              <div class="pillar-icon">M×P</div>
+              <h3>Model &times; Platform router</h3>
+              <p>
+                v0.8 ships the <code>router</code> package:
+                <code>router.Resolve(Request{`{Model, Platform, Credentials}`})</code>
+                turns &ldquo;Claude on Bedrock&rdquo; or &ldquo;Llama
+                on Groq&rdquo; into a working
+                <code>Provider</code>. Twelve platforms, nine model
+                families, one resolver. Application code never
+                branches on which provider package handles which
+                combination.
+              </p>
+            </article>
+            <article class="pillar">
               <div class="pillar-icon">A+R</div>
               <h3>Audio, embeddings, realtime, rerank</h3>
               <p>
@@ -194,11 +210,12 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
                 <code>Speaker</code>, <code>Transcriber</code>, and
                 <code>Embedder</code>. v0.4 added WebSocket
                 streaming and full-duplex
-                <code>openairealtime.Session</code>. v0.5 adds
-                <strong>Gemini Live</strong>, tool use on Realtime,
-                <strong>structured outputs</strong>, and a new
+                <code>openairealtime.Session</code>. v0.5 added
+                Gemini Live, tool use on Realtime,
+                <strong>structured outputs</strong>, and a
                 <code>Reranker</code> interface (Cohere, Voyage,
-                Together).
+                Together). v0.6 added voice-agent-friendly
+                <code>SpeechFinal</code> on STT.
               </p>
             </article>
             <article class="pillar">
@@ -222,23 +239,41 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
       <section class="features" id="features">
         <div class="container">
           <p class="section-label reveal">What you get today</p>
-          <h2 class="section-heading reveal">22 providers, six capabilities, one shape.</h2>
+          <h2 class="section-heading reveal">24+ providers, six capabilities, one shape.</h2>
           <p class="section-sub reveal">
-            v0.5 ships chat, embeddings, TTS, STT, full-duplex
+            v0.8 ships chat, embeddings, TTS, STT, full-duplex
             realtime, and rerank &mdash; against every major LLM
             vendor plus specialist audio, embedding, realtime, and
             rerank shops. Structured outputs (JSON Schema) work
-            cross-vendor on the chat surface.
+            cross-vendor on the chat surface. A new
+            <code>router</code> package picks the right provider
+            from the model id + available credentials.
           </p>
           <div class="features-grid reveal">
             <article class="feature-card">
               <div class="feature-icon">CHAT</div>
-              <h3>16 chat providers</h3>
+              <h3>18 chat providers</h3>
               <p>
-                OpenAI, Anthropic, Azure, Bedrock, Vertex, Gemini,
-                Cohere, Mistral &mdash; plus OpenRouter, Together,
-                Groq, DeepSeek, Fireworks, xAI, Perplexity, Cerebras
-                via the OpenAI-compatible path.
+                OpenAI, Anthropic, Azure OpenAI,
+                <strong>Azure&nbsp;Foundry&nbsp;Anthropic</strong>,
+                <strong>Azure&nbsp;Foundry&nbsp;Serverless</strong>
+                (Llama / Mistral / Cohere / Phi / DeepSeek), Bedrock,
+                Vertex, <strong>Vertex&nbsp;Anthropic</strong>,
+                Gemini, Cohere, Mistral &mdash; plus OpenRouter,
+                Together, Groq, DeepSeek, Fireworks, xAI, Perplexity,
+                Cerebras via the OpenAI-compatible path.
+              </p>
+            </article>
+            <article class="feature-card">
+              <div class="feature-icon">M&times;P</div>
+              <h3>The <code>router</code> (new in v0.8)</h3>
+              <p>
+                <code>router.Resolve(Request{`{Model, Platform, Credentials}`})</code>
+                returns a working <code>Provider</code>. 12 platforms
+                &times; 9 model families. Pass
+                <code>PlatformAuto</code> and the router picks the
+                first platform with credentials present. See
+                <a href="/llmrouter/docs/concepts/router">The Router</a>.
               </p>
             </article>
             <article class="feature-card">
@@ -324,7 +359,7 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
               <div class="feature-icon">A2</div>
               <h3>Apache-2.0, pre-1.0</h3>
               <p>
-                Apache-2.0 licensed. Currently v0.5.x &mdash; expect
+                Apache-2.0 licensed. Currently v0.8.x &mdash; expect
                 minor API churn between minor versions until v1.0
                 freezes the surface. Patch versions never break the
                 API.
@@ -373,13 +408,15 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
       <section class="providers-section" id="providers">
         <div class="container">
           <p class="section-label reveal">Providers</p>
-          <h2 class="section-heading reveal">Six capabilities. Twenty-two backends.</h2>
+          <h2 class="section-heading reveal">Six capabilities. 24+ backends. One router.</h2>
           <p class="section-sub reveal">
             Chat, embeddings, TTS, STT, and rerank are single
             one-method interfaces. Realtime is its own session-based
             surface for full-duplex voice agents. Structured outputs
-            ride on the chat surface as one extra field. Application
-            code never branches on which vendor is upstream.
+            ride on the chat surface as one extra field. The new
+            <code>router</code> package decouples the model vendor
+            from the hosting platform — application code never
+            branches on which provider package is upstream.
           </p>
 
           <div class="capability-matrix reveal">
@@ -399,8 +436,11 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
                 <tr><td><a href="/llmrouter/docs/providers/openai">OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/anthropic">Anthropic</a></td><td class="y">&#10003;</td><td class="n">use Voyage</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">tool-use</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/azure-openai">Azure OpenAI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">Whisper</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/azure-anthropic">Azure Foundry &mdash; Anthropic</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">tool-use</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/azure-serverless">Azure Foundry &mdash; Serverless</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/bedrock">AWS Bedrock</a></td><td class="y">&#10003;</td><td class="y">Titan + Cohere</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/vertex">Vertex AI</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y partial">partial</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
+                <tr><td><a href="/llmrouter/docs/providers/vertex-anthropic">Vertex AI &mdash; Anthropic</a></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">tool-use</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/gemini">Gemini (AI Studio)</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">audio</td><td class="n">&mdash;</td><td class="y">&#10003;</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/cohere">Cohere</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">v3.5</td><td class="n">&mdash;</td></tr>
                 <tr><td><a href="/llmrouter/docs/providers/mistral">Mistral</a></td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>
@@ -424,12 +464,29 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
 
           <div class="providers-grid reveal">
             <article class="provider-card shipped">
-              <div class="provider-tag">Chat</div>
-              <h3>16 chat providers</h3>
+              <div class="provider-tag">Router</div>
+              <h3>Model &times; Platform router (v0.8)</h3>
               <p>
-                OpenAI, Anthropic, Azure, Bedrock, Vertex, Gemini,
-                Cohere, Mistral &mdash; plus eight OpenAI-compatible
-                vendors via <code>WithBaseURL</code>.
+                <code>router.Resolve(Request{`{Model, Platform, Credentials}`})</code>
+                returns a working <code>Provider</code>. 12 platforms,
+                9 model families. <code>PlatformAuto</code> picks
+                from env vars. <strong>This is the headline value
+                prop.</strong>
+              </p>
+              <a href="/llmrouter/docs/concepts/router" class="provider-link">
+                Read The Router &rarr;
+              </a>
+            </article>
+            <article class="provider-card shipped">
+              <div class="provider-tag">Chat</div>
+              <h3>18 chat providers</h3>
+              <p>
+                OpenAI, Anthropic, Azure&nbsp;OpenAI,
+                Azure&nbsp;Foundry&nbsp;Anthropic,
+                Azure&nbsp;Foundry&nbsp;Serverless, Bedrock, Vertex,
+                Vertex&nbsp;Anthropic, Gemini, Cohere, Mistral
+                &mdash; plus eight OpenAI-compatible vendors via
+                <code>WithBaseURL</code>.
               </p>
               <a href="/llmrouter/docs/providers/openai" class="provider-link">
                 Browse chat providers &rarr;
@@ -518,19 +575,19 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
         <div class="container">
           <div class="stats-grid reveal">
             <div>
-              <div class="stat-value">v0.5.0</div>
+              <div class="stat-value">v0.8.0</div>
               <div class="stat-label">Latest release</div>
             </div>
             <div>
-              <div class="stat-value">22</div>
-              <div class="stat-label">Providers</div>
+              <div class="stat-value">24+</div>
+              <div class="stat-label">Provider packages</div>
             </div>
             <div>
               <div class="stat-value">6</div>
               <div class="stat-label">Capabilities (chat, embed, TTS, STT, realtime, rerank)</div>
             </div>
             <div>
-              <div class="stat-value">2,000+</div>
+              <div class="stat-value">~2,600</div>
               <div class="stat-label">Subtests</div>
             </div>
           </div>
@@ -543,8 +600,8 @@ stream, _ := p.CompletionStream(ctx, llmrouter.ChatRequest{
             <h2>Install in one line.</h2>
             <p class="install-sub">Go 1.23+. Apache-2.0. No surprises in your <code>go.sum</code>.</p>
             <div class="install-cmd">
-              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.5.0</code>
-              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.5.0">Copy</button>
+              <code><span class="prompt">$</span> go get github.com/elloloop/llmrouter@v0.8.0</code>
+              <button class="copy-btn" data-copy="go get github.com/elloloop/llmrouter@v0.8.0">Copy</button>
             </div>
             <p class="install-platforms">
               Then head to the

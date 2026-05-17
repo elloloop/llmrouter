@@ -20,6 +20,149 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
 
   <h2 id="shipped">Shipped</h2>
 
+  <h3 id="v0-8-0">v0.8.0 — The Router, Vertex AI Anthropic, Azure Serverless, Deepgram fix</h3>
+  <p>
+    The headline release for the "magic model × platform" story. A
+    new <code>router/</code> package decouples the model vendor from
+    the hosting platform — callers ask for "Claude on Bedrock" or
+    "Llama on Groq" and the router resolves to the right underlying
+    provider. Two new provider packages
+    (<code>vertexanthropic</code>, <code>azureserverless</code>)
+    complete the Foundry / Vertex Claude story and unlock the
+    Llama / Mistral / Cohere / Phi / DeepSeek catalogue on Azure.
+  </p>
+  <ul>
+    <li>
+      <strong>New <code>router/</code> package</strong> —
+      <code>router.Resolve(Request{`{Model, Platform, Credentials}`})</code>
+      returns a working <code>llmrouter.Provider</code>. Twelve
+      platforms (Direct / Bedrock / Vertex / Azure / OpenRouter /
+      Together / Groq / Fireworks / Cerebras / DeepSeek / Perplexity /
+      xAI) × nine model families
+      (OpenAI / Anthropic / Llama / Mistral / Cohere / Gemini /
+      Grok / DeepSeek / Other). <code>PlatformAuto</code> picks the
+      first platform with credentials present;
+      <code>ResolveFromEnv</code> is the one-line shortcut. See the
+      <a href="/llmrouter/docs/concepts/router">Router concept</a> and
+      <a href="/llmrouter/docs/api/router">API reference</a>.
+    </li>
+    <li>
+      <strong>New <code>providers/vertexanthropic</code></strong> —
+      Claude on Google Vertex AI Model Garden. Pure HTTP, no
+      <code>google.golang.org/genai</code> dependency. Vertex-specific
+      quirk handled: the <code>anthropic_version</code> field goes in
+      the body (not a header), and the model id uses
+      <code>@</code>-versioning. See the
+      <a href="/llmrouter/docs/providers/vertex-anthropic">provider page</a>.
+    </li>
+    <li>
+      <strong>New <code>providers/azureserverless</code></strong> —
+      catch-all for non-OpenAI / non-Anthropic models on Azure AI
+      Foundry's Serverless API (MaaS) deployment mode. Llama,
+      Mistral, Cohere, Phi, Jais, Nemotron, DeepSeek. Two URL
+      shapes (deployment-scoped vs hub-scoped), <code>api-key</code>
+      XOR AAD bearer auth, no <code>api-version</code> query. See
+      the <a href="/llmrouter/docs/providers/azure-serverless">provider page</a>.
+    </li>
+    <li>
+      <strong>Deepgram decode fix</strong> — Issue
+      <a href="https://github.com/elloloop/llmrouter/issues/9" target="_blank" rel="noopener noreferrer">#9</a>:
+      some interim segments were surfacing with empty
+      <code>Text</code> on certain Nova-3 streams. The decoder now
+      handles the affected event shape.
+    </li>
+    <li>
+      <strong>Test suite</strong> — grew by ~127 new regression tests
+      covering the router resolution matrix, the Vertex Anthropic
+      body / SSE translation, the Azure Serverless URL composition
+      and auth XOR, and the Deepgram decode regression.
+    </li>
+  </ul>
+
+  <h3 id="v0-7-0">v0.7.0 — Azure Foundry Anthropic, README polish, 10 examples, hardened CI</h3>
+  <p>
+    The "make it usable" release. A new
+    <code>providers/azureanthropic</code> package fills the Claude
+    gap on Azure AI Foundry, the README is rebuilt as the canonical
+    install + capability matrix surface, ten end-to-end examples
+    land under <code>examples/</code>, a CONTRIBUTING guide gets
+    added, and CI is hardened with race-clean test runs and
+    static-analysis gates.
+  </p>
+  <ul>
+    <li>
+      <strong>New <code>providers/azureanthropic</code></strong> —
+      Claude on Azure AI Foundry. Two URL variants
+      (deployment-scoped vs <code>/openai/v1/messages</code>),
+      <code>api-key</code> XOR AAD bearer auth, mandatory
+      <code>WithAPIVersion</code>. The body and SSE event stream are
+      byte-identical to direct Anthropic — every capability of the
+      direct provider works (typed tool use, thinking deltas, prompt
+      cache, multipart, structured outputs, mid-stream errors). See
+      the <a href="/llmrouter/docs/providers/azure-anthropic">provider page</a>.
+    </li>
+    <li>
+      <strong>Polished README</strong> — the canonical capability
+      matrix moves to the README so <code>pkg.go.dev</code> visitors
+      see it without clicking through. The 22-provider matrix is
+      the single source of truth shared with the landing page.
+    </li>
+    <li>
+      <strong>10 examples under <code>examples/</code></strong> —
+      end-to-end runnable programs covering chat (OpenAI,
+      Anthropic), embeddings, TTS, STT, realtime, rerank, structured
+      outputs, and the new Azure Anthropic + Vertex Anthropic
+      flows. Drop-in for new users; run with <code>go run</code>
+      against the right env vars.
+    </li>
+    <li>
+      <strong>CONTRIBUTING.md</strong> — explicit guidance on
+      writing new providers, the byte-passthrough contract, and the
+      test conventions.
+    </li>
+    <li>
+      <strong>Hardened CI</strong> — race-clean test runs on every
+      PR, <code>go vet</code> + <code>staticcheck</code> gates, and
+      coverage tracking surfaced on the README badge.
+    </li>
+  </ul>
+
+  <h3 id="v0-6-0">v0.6.0 — STT event-type discriminator + SpeechFinal</h3>
+  <p>
+    A focused STT release. Streaming transcribers now distinguish
+    transcript content from endpointing / metadata events, and
+    voice-agent callers get a clean turn-taking signal that's
+    independent of the per-window <code>is_final</code> marker.
+  </p>
+  <ul>
+    <li>
+      <strong>New <code>TranscriptSegment.Type</code> field</strong>
+      — populated verbatim from the upstream event name. Empty
+      string is the default and means "transcript content"; non-empty
+      values surface the upstream's discriminator
+      (Deepgram: <code>"Results"</code>, <code>"SpeechStarted"</code>,
+      <code>"UtteranceEnd"</code>, <code>"Metadata"</code>).
+      Existing consumers that don't switch on <code>Type</code> keep
+      working — they receive transcript content as before.
+    </li>
+    <li>
+      <strong>New <code>TranscriptSegment.SpeechFinal</code>
+      field</strong> — distinct from <code>Final</code>.
+      <code>Final</code> is the upstream's per-window
+      <code>is_final</code>; <code>SpeechFinal</code> is the
+      end-of-utterance signal from VAD. Voice agents should dispatch
+      turn-taking off <code>SpeechFinal</code>, not
+      <code>Final</code>. See the
+      <a href="/llmrouter/docs/concepts/audio#speech-final">audio concept</a>.
+    </li>
+    <li>
+      <strong>Migration note</strong> — Deepgram callers that
+      previously dispatched turn-taking off <code>Final</code> should
+      switch to <code>SpeechFinal</code>; the previous behaviour was
+      effectively wrong (it fired mid-utterance on long sentences).
+    </li>
+  </ul>
+
   <h3 id="v0-5-0">v0.5.0 — Gemini Live, Realtime tool use, structured outputs, rerank</h3>
   <p>
     The function-calling and RAG-refinement release. Tool use lands
@@ -322,15 +465,35 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
     <li>Anthropic provider with full request and SSE translation.</li>
   </ul>
 
-  <h2 id="v0-6">Planned for v0.6 — Files, batch, audio in chat, semantic caching</h2>
+  <h2 id="v0-9">Planned for v0.9 — Vertex-native Llama / Mistral / Cohere, batch APIs</h2>
   <p>
-    With realtime, function-calling, structured outputs, and rerank
-    in place, v0.6 turns toward the operational surface that's still
-    only available via vendor SDKs: file uploads, batch jobs,
-    multimodal audio in synchronous chat, and the next tier of
-    cross-vendor caching and prompt management.
+    The router landed in v0.8 with placeholder errors for the Vertex
+    routes that don't yet have a backing package. v0.9 fills those
+    in and adds the operational surface that's still
+    vendor-SDK-only today.
   </p>
   <ul>
+    <li>
+      <strong>New <code>providers/vertexllama</code></strong> — Llama
+      family models on Vertex AI Model Garden. Same pure-HTTP shape
+      as <code>vertexanthropic</code>; ADC bearer token, regional
+      <code>:streamRawPredict</code> endpoint.
+    </li>
+    <li>
+      <strong>New <code>providers/vertexmistral</code></strong> —
+      Mistral on Vertex Model Garden.
+    </li>
+    <li>
+      <strong>New <code>providers/vertexcohere</code></strong> —
+      Cohere on Vertex Model Garden.
+    </li>
+    <li>
+      <strong>Batch APIs</strong> — OpenAI and Anthropic both expose
+      24-hour batch endpoints at ~50% cost. A cross-vendor
+      <code>Batcher</code> interface that takes a slice of
+      <code>ChatRequest</code> and returns a job handle, mirroring
+      the existing <code>Stream</code> lifecycle for poll-based jobs.
+    </li>
     <li>
       <strong>OpenAI Files API + Assistants v2</strong> — typed
       file-upload surface for documents, plus a thin wrapper around
@@ -338,25 +501,20 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
       thread state.
     </li>
     <li>
-      <strong>Batch APIs</strong> — OpenAI and Anthropic both
-      expose 24-hour batch endpoints at ~50% cost. A cross-vendor
-      <code>Batcher</code> interface that takes a slice of
-      <code>ChatRequest</code> and returns a job handle.
-    </li>
-    <li>
       <strong>Audio in chat (gpt-4o audio)</strong> — typed
       audio-input message content for the synchronous
       <code>gpt-4o-audio-preview</code> family, complementing the
       Realtime path for cases that don't need full duplex.
     </li>
+  </ul>
+
+  <h2 id="v0-10">Planned for v0.10 — Prompt management, semantic caching</h2>
+  <ul>
     <li>
-      <strong>Embeddings for Anthropic</strong> when (and if)
-      Anthropic ships a first-party embedding endpoint. Until then,
-      use
-      <code>anthropic.NewRecommendedEmbedder</code> (shipped in
-      v0.4) or pair with
-      <a href="/llmrouter/docs/providers/voyage">Voyage AI</a>
-      directly.
+      <strong>Prompt management / versioning</strong> — a typed
+      <code>PromptTemplate</code> surface with named versions, so
+      application code can refer to prompts by id and pin to a
+      version separately from the model id.
     </li>
     <li>
       <strong>Semantic caching</strong> — an opt-in cache layer that
@@ -365,16 +523,17 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
       off.
     </li>
     <li>
-      <strong>Prompt management / versioning</strong> — a typed
-      <code>PromptTemplate</code> surface with named versions, so
-      application code can refer to prompts by id and pin to a
-      version separately from the model id.
+      <strong>Embeddings for Anthropic</strong> when (and if)
+      Anthropic ships a first-party embedding endpoint. Until then,
+      use <code>anthropic.NewRecommendedEmbedder</code> or pair with
+      <a href="/llmrouter/docs/providers/voyage">Voyage AI</a>
+      directly.
     </li>
   </ul>
 
   <h2 id="v1-0">Planned for v1.0 — API freeze</h2>
   <p>
-    Once v0.6 ships and the surface has been stable for a few months,
+    Once v0.10 ships and the surface has been stable for a few months,
     v1.0 freezes the public API. The contract from v1.0 onwards:
   </p>
   <ul>
