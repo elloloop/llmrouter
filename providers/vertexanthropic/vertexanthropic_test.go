@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1526,9 +1525,6 @@ func TestE2E_ChunkIDFormat(t *testing.T) {
 func TestProviderName_Constant(t *testing.T) {
 	if providerName != "vertexanthropic" {
 		t.Errorf("providerName = %q", providerName)
-	}
-	if fmt.Sprintf("%s", providerName) != "vertexanthropic" {
-		t.Errorf("sprintf failed")
 	}
 }
 
