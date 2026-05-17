@@ -83,14 +83,14 @@ type Provider interface {
 // passthrough providers (OpenAI-compatible) to forward the original JSON
 // without re-serializing fields they don't model (tools, vision, etc.).
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []Message       `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Stop        []string        `json:"stop,omitempty"`
-	User        string          `json:"user,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Temperature *float64  `json:"temperature,omitempty"`
+	TopP        *float64  `json:"top_p,omitempty"`
+	Stop        []string  `json:"stop,omitempty"`
+	User        string    `json:"user,omitempty"`
+	Stream      bool      `json:"stream,omitempty"`
 
 	// ResponseSchema asks the model to produce output that strictly matches
 	// a JSON Schema. OpenAI maps to response_format={"type":"json_schema",
@@ -216,12 +216,12 @@ func (m Message) PlainText() string {
 // match the OpenAI Chat Completion chunk format; Usage is populated only
 // on the final chunk when the upstream reports it.
 type Chunk struct {
-	ID      string    `json:"id"`
-	Object  string    `json:"object"`
-	Created int64     `json:"created"`
-	Model   string    `json:"model"`
-	Choices []Choice  `json:"choices"`
-	Usage   *Usage    `json:"usage,omitempty"`
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   *Usage   `json:"usage,omitempty"`
 	// Raw is the original wire-format JSON for this chunk. Passthrough
 	// providers populate this; consumers that want to forward bytes
 	// unmodified should prefer Raw over re-marshaling the typed fields.

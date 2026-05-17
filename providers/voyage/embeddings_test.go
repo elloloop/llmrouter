@@ -283,9 +283,9 @@ func TestEmbed_RequestShape(t *testing.T) {
 
 func TestEmbed_TaskTypeMapping(t *testing.T) {
 	cases := []struct {
-		taskType   string
-		wantField  bool
-		wantValue  string
+		taskType  string
+		wantField bool
+		wantValue string
 	}{
 		{"RETRIEVAL_QUERY", true, "query"},
 		{"QUESTION_ANSWERING", true, "query"},

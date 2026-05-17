@@ -421,13 +421,13 @@ type sessionUpdateEnvelope struct {
 
 // sessionPayload is the inner "session" object of session.update.
 type sessionPayload struct {
-	Modalities        []string             `json:"modalities,omitempty"`
-	Voice             string               `json:"voice,omitempty"`
-	Instructions      string               `json:"instructions,omitempty"`
-	InputAudioFormat  string               `json:"input_audio_format,omitempty"`
-	OutputAudioFormat string               `json:"output_audio_format,omitempty"`
-	Temperature       *float64             `json:"temperature,omitempty"`
-	Tools             []realtimeTool       `json:"tools,omitempty"`
+	Modalities        []string              `json:"modalities,omitempty"`
+	Voice             string                `json:"voice,omitempty"`
+	Instructions      string                `json:"instructions,omitempty"`
+	InputAudioFormat  string                `json:"input_audio_format,omitempty"`
+	OutputAudioFormat string                `json:"output_audio_format,omitempty"`
+	Temperature       *float64              `json:"temperature,omitempty"`
+	Tools             []realtimeTool        `json:"tools,omitempty"`
 	ToolChoice        *llmrouter.ToolChoice `json:"tool_choice,omitempty"`
 }
 

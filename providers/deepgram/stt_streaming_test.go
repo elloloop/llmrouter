@@ -884,4 +884,3 @@ func TestTranscribeStreaming(t *testing.T) {
 		}
 	})
 }
-

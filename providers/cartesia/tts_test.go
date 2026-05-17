@@ -428,11 +428,11 @@ func TestSpeak_Defaults(t *testing.T) {
 
 func TestSpeak_FormatMapping(t *testing.T) {
 	cases := []struct {
-		name      string
-		format    string
-		container string
-		encoding  string
-		sample    float64
+		name       string
+		format     string
+		container  string
+		encoding   string
+		sample     float64
 		hasBitRate bool
 	}{
 		{"mp3", "mp3", "mp3", "mp3", 44100, true},

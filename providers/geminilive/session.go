@@ -430,7 +430,7 @@ type setupPayload struct {
 // package actively translates. Anything else can be merged in via
 // SessionConfig.Raw.
 type generationConfig struct {
-	ResponseModalities []string     `json:"response_modalities,omitempty"`
+	ResponseModalities []string      `json:"response_modalities,omitempty"`
 	SpeechConfig       *speechConfig `json:"speech_config,omitempty"`
 	Temperature        *float64      `json:"temperature,omitempty"`
 	TopP               *float64      `json:"top_p,omitempty"`
@@ -552,8 +552,8 @@ type serverContentField struct {
 
 // modelTurn is the assistant turn body inside serverContent.
 type modelTurn struct {
-	Role  string         `json:"role"`
-	Parts []serverPart   `json:"parts"`
+	Role  string       `json:"role"`
+	Parts []serverPart `json:"parts"`
 }
 
 // serverPart is a content fragment in a modelTurn. Either Text or

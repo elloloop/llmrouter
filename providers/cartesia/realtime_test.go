@@ -315,7 +315,7 @@ func TestSpeakRealtime_ContentType(t *testing.T) {
 func TestSpeakRealtime_EmptyInput(t *testing.T) {
 	cap := &realtimeCapture{}
 	srv := newFakeRealtimeServer(t, fakeRealtimeServer{
-		audioChunks: [][]byte{[]byte("late")},
+		audioChunks:   [][]byte{[]byte("late")},
 		waitForFrames: 2, // wait for initial + Append before emitting
 	}, cap)
 	p := newTestProvider(t, srv.URL)
@@ -590,8 +590,8 @@ func TestSpeakRealtime_AppendEmptyIsNoop(t *testing.T) {
 
 func TestBuildRealtimeURL(t *testing.T) {
 	cases := []struct {
-		name    string
-		baseURL string
+		name       string
+		baseURL    string
 		wantPrefix string
 	}{
 		{"https → wss", "https://api.cartesia.ai", "wss://api.cartesia.ai/tts/websocket?"},

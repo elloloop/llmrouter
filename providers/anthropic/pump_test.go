@@ -19,17 +19,17 @@ import (
 
 func TestMapStopReason_Table(t *testing.T) {
 	cases := map[string]string{
-		"end_turn":           "stop",
-		"stop_sequence":      "stop",
-		"max_tokens":         "length",
-		"tool_use":           "tool_calls",
-		"":                   "stop",
-		"unknown_thing":      "stop",
-		"refusal":            "stop",
-		"completed":          "stop",
-		"system_interrupt":   "stop",
-		"END_TURN":           "stop", // case-sensitive: not matched → default
-		"  end_turn  ":       "stop", // not trimmed → default
+		"end_turn":         "stop",
+		"stop_sequence":    "stop",
+		"max_tokens":       "length",
+		"tool_use":         "tool_calls",
+		"":                 "stop",
+		"unknown_thing":    "stop",
+		"refusal":          "stop",
+		"completed":        "stop",
+		"system_interrupt": "stop",
+		"END_TURN":         "stop", // case-sensitive: not matched → default
+		"  end_turn  ":     "stop", // not trimmed → default
 	}
 	for in, want := range cases {
 		t.Run("in="+strings.ReplaceAll(in, " ", "_"), func(t *testing.T) {
@@ -1074,4 +1074,3 @@ func TestCurrentUsage_IncludesCacheTokens(t *testing.T) {
 		})
 	}
 }
-

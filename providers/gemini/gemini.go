@@ -233,11 +233,11 @@ func pump(ctx context.Context, resp *http.Response, model string, hooks llmroute
 
 // pumpState carries identifiers and per-stream flags across SSE events.
 type pumpState struct {
-	chatID      string
-	created     int64
-	model       string
-	rolePrimed  bool
-	finishSent  bool
+	chatID     string
+	created    int64
+	model      string
+	rolePrimed bool
+	finishSent bool
 }
 
 // generateContentResponse mirrors the subset of Gemini's response shape

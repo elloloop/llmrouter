@@ -188,13 +188,13 @@ func wrapPCMAsWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	_ = binary.Write(buf, binary.LittleEndian, uint32(36+dataSize))
 	buf.WriteString("WAVE")
 	buf.WriteString("fmt ")
-	_ = binary.Write(buf, binary.LittleEndian, uint32(16))           // PCM fmt chunk size
-	_ = binary.Write(buf, binary.LittleEndian, uint16(1))            // audio format = PCM
-	_ = binary.Write(buf, binary.LittleEndian, uint16(channels))     //
-	_ = binary.Write(buf, binary.LittleEndian, uint32(sampleRate))   //
-	_ = binary.Write(buf, binary.LittleEndian, uint32(byteRate))     //
-	_ = binary.Write(buf, binary.LittleEndian, uint16(blockAlign))   //
-	_ = binary.Write(buf, binary.LittleEndian, uint16(bitsPerSample))//
+	_ = binary.Write(buf, binary.LittleEndian, uint32(16))            // PCM fmt chunk size
+	_ = binary.Write(buf, binary.LittleEndian, uint16(1))             // audio format = PCM
+	_ = binary.Write(buf, binary.LittleEndian, uint16(channels))      //
+	_ = binary.Write(buf, binary.LittleEndian, uint32(sampleRate))    //
+	_ = binary.Write(buf, binary.LittleEndian, uint32(byteRate))      //
+	_ = binary.Write(buf, binary.LittleEndian, uint16(blockAlign))    //
+	_ = binary.Write(buf, binary.LittleEndian, uint16(bitsPerSample)) //
 	buf.WriteString("data")
 	_ = binary.Write(buf, binary.LittleEndian, uint32(dataSize))
 	buf.Write(pcm)

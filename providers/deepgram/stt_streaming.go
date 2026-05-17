@@ -347,4 +347,3 @@ func decodeLiveFrame(payload []byte) (llmrouter.TranscriptSegment, bool, error) 
 	}
 	return seg, true, nil
 }
-

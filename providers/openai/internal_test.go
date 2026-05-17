@@ -1543,4 +1543,3 @@ func TestBuildRequestBody_ResponseSchema(t *testing.T) {
 		}
 	})
 }
-

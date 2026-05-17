@@ -441,9 +441,9 @@ func handleEvent(ctx context.Context, evType, payload string, st *pumpState, hoo
 		var ev struct {
 			Index        int `json:"index"`
 			ContentBlock struct {
-				Type  string `json:"type"`
-				ID    string `json:"id"`
-				Name  string `json:"name"`
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
 			} `json:"content_block"`
 		}
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {

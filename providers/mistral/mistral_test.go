@@ -21,15 +21,15 @@ import (
 // followed by [DONE]. Header/path assertions are deferred to the caller via
 // the captured request.
 type captureServer struct {
-	server     *httptest.Server
-	mu         sync.Mutex
-	gotPath    string
-	gotAuth    string
-	gotAccept  string
-	gotCType   string
-	gotBody    []byte
-	gotMethod  string
-	hitCount   atomic.Int32
+	server    *httptest.Server
+	mu        sync.Mutex
+	gotPath   string
+	gotAuth   string
+	gotAccept string
+	gotCType  string
+	gotBody   []byte
+	gotMethod string
+	hitCount  atomic.Int32
 }
 
 func newCaptureServer(t *testing.T, payloads []string) *captureServer {
