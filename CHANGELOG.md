@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0](https://github.com/elloloop/llmrouter/compare/v0.8.0...v1.0.0) (2026-05-17)
+
+
+### Documentation
+
+* add COMPATIBILITY.md — declare v1.0 API stability ([054fa38](https://github.com/elloloop/llmrouter/commit/054fa384453737bb4433622406d9bedf0bc0b009))
+
 ## [0.8.0](https://github.com/elloloop/llmrouter/compare/v0.7.0...v0.8.0) (2026-05-17)
 
 
