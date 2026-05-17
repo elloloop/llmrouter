@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.0](https://github.com/elloloop/llmrouter/compare/v0.7.0...v0.8.0) (2026-05-17)
+
+
+### Features
+
+* providers/vertexanthropic + providers/azureserverless ([cb04731](https://github.com/elloloop/llmrouter/commit/cb04731944af1b13f4c6047ee0d2c5c294f0ab87))
+* **router:** magic model x platform resolution ([63dde6d](https://github.com/elloloop/llmrouter/commit/63dde6dafcf4572024a0ea4cbd5f19bc355cc895))
+
+
+### Bug Fixes
+
+* **azureanthropic:** drop unused fmt import + lint issues ([a238f58](https://github.com/elloloop/llmrouter/commit/a238f58603ea1e307da1f11011d3b89fbccc28b1))
+* **deepgram:** tolerate variant channel shapes (closes [#9](https://github.com/elloloop/llmrouter/issues/9)) ([dbfe592](https://github.com/elloloop/llmrouter/commit/dbfe592547aad412e44cb1ecabe2e6b1692d210e))
+
 ## [0.7.0](https://github.com/elloloop/llmrouter/compare/v0.6.0...v0.7.0) (2026-05-16)
 
 
