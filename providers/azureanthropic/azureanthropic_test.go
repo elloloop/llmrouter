@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1407,8 +1406,8 @@ func TestNew_OptionPropagationError(t *testing.T) {
 	}
 }
 
-// staticErr is a sentinel used by silly negative tests.
-var staticErr = errors.New("static")
+// errStatic is a sentinel used by silly negative tests.
+var errStatic = errors.New("static")
 
 func TestBody_NoSystemNoSystemField(t *testing.T) {
 	body, _ := buildBody(llmrouter.ChatRequest{
@@ -1469,8 +1468,8 @@ func TestProviderName_Constant(t *testing.T) {
 	if providerName != "azureanthropic" {
 		t.Errorf("providerName = %q", providerName)
 	}
-	if fmt.Sprintf("%s", providerName) != "azureanthropic" {
-		t.Errorf("sprintf failed")
+	if providerName != "azureanthropic" {
+		t.Errorf("provider name compare failed")
 	}
-	_ = staticErr // keep referenced to avoid lint
+	_ = errStatic // keep referenced to avoid lint
 }
