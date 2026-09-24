@@ -1007,3 +1007,31 @@ func TestProvider_Name(t *testing.T) {
 		t.Errorf("Name = %q, want azureserverless", p.Name())
 	}
 }
+
+// A typed ResponseSchema is ignored here, as ChatRequest.ResponseSchema
+// documents — never sent as a field the endpoint does not accept.
+func TestCompletionStream_BodyDropsTheTypedResponseSchema(t *testing.T) {
+	captured := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	p := newAPIKeyProvider(t, srv.URL)
+	stream, err := p.CompletionStream(context.Background(), llmrouter.ChatRequest{
+		Model:          "llama",
+		Messages:       []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+		ResponseSchema: &llmrouter.ResponseSchema{Name: "answer", Schema: []byte(`{"type":"object"}`)},
+	})
+	if err != nil {
+		t.Fatalf("CompletionStream: %v", err)
+	}
+	for range stream.Chunks() {
+	}
+	if body := <-captured; strings.Contains(string(body), "response_schema") {
+		t.Errorf("typed response_schema field sent: %s", body)
+	}
+}

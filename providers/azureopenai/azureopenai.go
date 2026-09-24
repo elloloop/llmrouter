@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/internal/openaiwire"
 )
 
 // Extra config keys used by this provider.
@@ -157,7 +158,7 @@ func (p *Provider) Name() string { return "azureopenai" }
 // OpenAI deployment and returns a llmrouter.Stream that yields normalized
 // chunks.
 func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error) {
-	body, err := buildRequestBody(req)
+	body, err := buildRequestBody(req, p.apiVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -204,12 +205,29 @@ func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatReque
 	return stream, nil
 }
 
+// maxCompletionTokensSince is the first api-version whose chat completions
+// accept max_completion_tokens (added with the o1 models in
+// 2024-09-01-preview). Earlier versions only know max_tokens.
+const maxCompletionTokensSince = "2024-09-01"
+
+// apiVersionDateLen is the length of an api-version's date prefix
+// (YYYY-MM-DD); a preview suffix does not change which fields it accepts.
+const apiVersionDateLen = len("2006-01-02")
+
+// acceptsMaxCompletionTokens reports whether apiVersion is new enough for
+// max_completion_tokens, comparing the date prefix only.
+func acceptsMaxCompletionTokens(apiVersion string) bool {
+	return len(apiVersion) >= apiVersionDateLen && apiVersion[:apiVersionDateLen] >= maxCompletionTokensSince
+}
+
 // buildRequestBody assembles the outgoing JSON. If req.Raw is supplied,
 // it is reused (passthrough); otherwise the typed ChatRequest is
-// marshaled. In both cases stream:true and stream_options.include_usage
-// are forced on. The Model field is overlaid only when non-empty — Azure
-// ignores it for routing but echoes it back in chunks.
-func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
+// marshaled, with MaxTokens sent as max_completion_tokens where apiVersion
+// accepts it. In both cases stream:true and stream_options.include_usage
+// are forced on, and a typed ResponseSchema becomes response_format unless
+// the body already has one. The Model field is overlaid only when
+// non-empty — Azure ignores it for routing but echoes it back in chunks.
+func buildRequestBody(req llmrouter.ChatRequest, apiVersion string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if len(req.Raw) > 0 {
 		if err := json.Unmarshal(req.Raw, &m); err != nil {
@@ -225,6 +243,9 @@ func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, err
 		}
+		if acceptsMaxCompletionTokens(apiVersion) {
+			openaiwire.UseMaxCompletionTokens(m)
+		}
 	}
 
 	if req.Model != "" {
@@ -237,6 +258,9 @@ func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
 	m["stream"] = json.RawMessage(`true`)
 	if _, ok := m["stream_options"]; !ok {
 		m["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	}
+	if err := openaiwire.SetResponseFormat(m, req.ResponseSchema); err != nil {
+		return nil, err
 	}
 	return json.Marshal(m)
 }

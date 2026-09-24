@@ -855,3 +855,19 @@ func TestTransport_NetworkErrorPropagates(t *testing.T) {
 		t.Errorf("got ErrUpstream for transport failure: %v", up)
 	}
 }
+
+// Mistral does no schema-coerced output here: a typed ResponseSchema is
+// ignored, as ChatRequest.ResponseSchema documents — never sent.
+func TestRequestBody_DropsTheTypedResponseSchema(t *testing.T) {
+	srv := newCaptureServer(t, []string{})
+	defer srv.close()
+	p := newProvider(t, srv.server.URL)
+	req := defaultReq()
+	req.ResponseSchema = &llmrouter.ResponseSchema{Name: "answer", Schema: json.RawMessage(`{"type":"object"}`)}
+	if _, err := p.CompletionStream(context.Background(), req); err != nil {
+		t.Fatalf("CompletionStream: %v", err)
+	}
+	if _, leaked := srv.bodyMap(t)["response_schema"]; leaked {
+		t.Errorf("typed response_schema field sent: %s", srv.gotBody)
+	}
+}

@@ -164,9 +164,12 @@ func TestBuildRequestBody_NonRawIncludesTypedFields(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	s := string(b)
+	if strings.Contains(s, `"max_tokens"`) {
+		t.Errorf("deprecated max_tokens sent: %s", s)
+	}
 	for _, want := range []string{
 		`"model":"gpt-4o"`,
-		`"max_tokens":500`,
+		`"max_completion_tokens":500`,
 		`"temperature":0.5`,
 		`"top_p":0.95`,
 		`"stop":["END"]`,
@@ -1310,6 +1313,9 @@ func TestBuildRequestBody_ResponseSchema(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(string(b), "response_schema") {
+			t.Errorf("typed response_schema field leaked into the body: %s", b)
 		}
 		rf := decodeResponseFormat(t, b)
 		if rf == nil {
