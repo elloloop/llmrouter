@@ -169,6 +169,20 @@ resp, err := embed.Embed(ctx, llmrouter.EmbedRequest{
       a known-good value; Azure rolls forward and old versions
       eventually 404.
     </li>
+    <li>
+      <strong>Structured output.</strong> <code>ChatRequest.ResponseSchema</code>
+      is sent as <code>response_format</code> with
+      <code>type: "json_schema"</code>, as on OpenAI. A
+      <code>response_format</code> you supply through <code>Raw</code>
+      wins.
+    </li>
+    <li>
+      <strong>Token limit.</strong> <code>MaxTokens</code> is sent as
+      <code>max_completion_tokens</code> on <code>api-version</code>
+      2024-09-01 and later: reasoning deployments (o-series, GPT-5)
+      reject <code>max_tokens</code>. Earlier versions still receive
+      <code>max_tokens</code>.
+    </li>
   </ul>
 
   <h2 id="see-also">See also</h2>
