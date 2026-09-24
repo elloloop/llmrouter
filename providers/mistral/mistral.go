@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/internal/openaiwire"
 )
 
 const (
@@ -117,6 +118,9 @@ func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, err
 		}
+		// No schema-coerced output here: the typed schema is ignored, as
+		// ChatRequest.ResponseSchema documents, not sent.
+		openaiwire.DropResponseSchema(m)
 	}
 
 	if req.Model != "" {

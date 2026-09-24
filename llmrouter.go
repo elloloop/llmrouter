@@ -82,6 +82,10 @@ type Provider interface {
 // ChatRequest is the OpenAI-shaped request. Raw, if non-nil, is used by
 // passthrough providers (OpenAI-compatible) to forward the original JSON
 // without re-serializing fields they don't model (tools, vision, etc.).
+//
+// MaxTokens reaches OpenAI, and Azure OpenAI from api-version 2024-09-01,
+// as max_completion_tokens: both deprecated max_tokens, and their reasoning
+// models (the o-series, GPT-5) reject it.
 type ChatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -93,10 +97,15 @@ type ChatRequest struct {
 	Stream      bool      `json:"stream,omitempty"`
 
 	// ResponseSchema asks the model to produce output that strictly matches
-	// a JSON Schema. OpenAI maps to response_format={"type":"json_schema",
-	// "json_schema":{...}}. Anthropic translates to forced tool-use with a
-	// synthetic tool matching the schema. Providers that don't support
-	// schema-coerced output ignore this field.
+	// a JSON Schema. OpenAI and Azure OpenAI map to
+	// response_format={"type":"json_schema","json_schema":{...}}. Anthropic
+	// translates to forced tool-use with a synthetic tool matching the
+	// schema. Providers that don't support schema-coerced output ignore this
+	// field.
+	//
+	// Its JSON name lets a ChatRequest round-trip through JSON; no upstream
+	// accepts it, so a provider that sends a marshaled ChatRequest as its
+	// body removes it (internal/openaiwire).
 	ResponseSchema *ResponseSchema `json:"response_schema,omitempty"`
 
 	Tools      []Tool          `json:"tools,omitempty"`

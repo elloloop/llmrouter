@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/elloloop/llmrouter"
+	"github.com/elloloop/llmrouter/internal/openaiwire"
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"
@@ -104,6 +105,7 @@ func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, err
 		}
+		openaiwire.UseMaxCompletionTokens(m)
 	}
 
 	if req.Model != "" {
@@ -117,40 +119,12 @@ func buildRequestBody(req llmrouter.ChatRequest) ([]byte, error) {
 	if _, ok := m["stream_options"]; !ok {
 		m["stream_options"] = json.RawMessage(`{"include_usage":true}`)
 	}
-	// Inject response_format from typed ResponseSchema unless the caller
-	// already supplied one via Raw (caller wins so manual JSON-mode setups
-	// don't get overwritten).
-	if req.ResponseSchema != nil {
-		if _, ok := m["response_format"]; !ok {
-			rfBytes, err := encodeResponseFormat(req.ResponseSchema)
-			if err != nil {
-				return nil, err
-			}
-			m["response_format"] = rfBytes
-		}
+	// Caller-supplied response_format (via Raw) wins, so manual JSON-mode
+	// setups are not overwritten.
+	if err := openaiwire.SetResponseFormat(m, req.ResponseSchema); err != nil {
+		return nil, err
 	}
 	return json.Marshal(m)
-}
-
-// encodeResponseFormat renders an llmrouter.ResponseSchema into OpenAI's
-// response_format = {"type":"json_schema","json_schema":{...}} envelope.
-// Description is omitted when empty; Schema is forwarded as-is.
-func encodeResponseFormat(s *llmrouter.ResponseSchema) (json.RawMessage, error) {
-	jsonSchema := map[string]any{
-		"name":   s.Name,
-		"strict": s.Strict,
-	}
-	if s.Description != "" {
-		jsonSchema["description"] = s.Description
-	}
-	if len(s.Schema) > 0 {
-		jsonSchema["schema"] = json.RawMessage(s.Schema)
-	}
-	envelope := map[string]any{
-		"type":        "json_schema",
-		"json_schema": jsonSchema,
-	}
-	return json.Marshal(envelope)
 }
 
 // pumpSSE reads the SSE stream from the upstream response, decodes each

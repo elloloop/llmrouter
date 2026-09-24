@@ -2,6 +2,7 @@ package azureopenai_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -797,5 +798,93 @@ func TestCompletionStream_PathContainsTrailingSlashHandled(t *testing.T) {
 	}
 	if seenAPIVersion != testAPIVersion {
 		t.Errorf("api-version = %q, want %q", seenAPIVersion, testAPIVersion)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Request body — what Azure OpenAI accepts. GPT-5 deployments answer a
+// leaked "response_schema" with 400 unknown_parameter and "max_tokens"
+// with 400 unsupported_parameter.
+// ---------------------------------------------------------------------
+
+// captureBody runs one request through a provider on apiVersion and returns
+// the JSON body the upstream received.
+func captureBody(t *testing.T, apiVersion string, req llmrouter.ChatRequest) map[string]any {
+	t.Helper()
+	captured := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	p := newAPIKeyProvider(t, srv.URL, azureopenai.WithAPIVersion(apiVersion))
+	stream, err := p.CompletionStream(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CompletionStream: %v", err)
+	}
+	for range stream.Chunks() {
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err = %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(<-captured, &m); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	return m
+}
+
+func TestCompletionStream_BodyCarriesTheSchemaAsResponseFormat(t *testing.T) {
+	m := captureBody(t, "2025-01-01-preview", llmrouter.ChatRequest{
+		Messages:       []llmrouter.Message{llmrouter.TextMessage("user", "hi")},
+		ResponseSchema: &llmrouter.ResponseSchema{Name: "answer", Strict: true, Schema: json.RawMessage(`{"type":"object"}`)},
+	})
+	if _, leaked := m["response_schema"]; leaked {
+		t.Errorf("typed response_schema field sent: %v", m)
+	}
+	rf, ok := m["response_format"].(map[string]any)
+	if !ok || rf["type"] != "json_schema" {
+		t.Fatalf("response_format = %v, want a json_schema envelope", m["response_format"])
+	}
+	if js, _ := rf["json_schema"].(map[string]any); js["name"] != "answer" || js["strict"] != true {
+		t.Errorf("json_schema = %v", rf["json_schema"])
+	}
+}
+
+func TestCompletionStream_MaxTokensFollowsTheAPIVersion(t *testing.T) {
+	cases := []struct {
+		apiVersion string
+		want       string
+		absent     string
+	}{
+		{"2025-01-01-preview", "max_completion_tokens", "max_tokens"},
+		{"2024-10-21", "max_completion_tokens", "max_tokens"},
+		{"2024-09-01-preview", "max_completion_tokens", "max_tokens"},
+		{"2024-06-01", "max_tokens", "max_completion_tokens"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.apiVersion, func(t *testing.T) {
+			m := captureBody(t, tc.apiVersion, llmrouter.ChatRequest{
+				Messages: []llmrouter.Message{llmrouter.TextMessage("user", "hi")}, MaxTokens: 700,
+			})
+			if m[tc.want] != float64(700) {
+				t.Errorf("%s = %v, want 700 (body %v)", tc.want, m[tc.want], m)
+			}
+			if _, ok := m[tc.absent]; ok {
+				t.Errorf("%s sent on api-version %s: %v", tc.absent, tc.apiVersion, m)
+			}
+		})
+	}
+}
+
+func TestCompletionStream_RawPassthroughKeepsTheCallersLimitField(t *testing.T) {
+	m := captureBody(t, "2025-01-01-preview", llmrouter.ChatRequest{
+		Raw: json.RawMessage(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":300}`),
+	})
+	if m["max_tokens"] != float64(300) {
+		t.Errorf("max_tokens = %v; a passthrough body is the caller's", m["max_tokens"])
 	}
 }
