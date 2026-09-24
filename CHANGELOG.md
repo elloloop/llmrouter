@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/elloloop/llmrouter/compare/v1.0.0...v1.0.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **azureopenai:** send structured output as response_format and the limit as max_completion_tokens ([#14](https://github.com/elloloop/llmrouter/issues/14)) ([acf9642](https://github.com/elloloop/llmrouter/commit/acf9642d94c7f313eac371ec22ab8a82e13d4aff))
+
 ## [1.0.0](https://github.com/elloloop/llmrouter/compare/v0.8.0...v1.0.0) (2026-05-17)
 
 
