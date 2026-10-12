@@ -369,7 +369,13 @@ func (s *Session) pump(ctx context.Context) {
 
 		typ, data, err := s.conn.Read(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			// Cancellation can arrive while Read is blocked, after the loop's
+			// context check. Preserve that terminal cause instead of a clean EOF.
+			if ctx.Err() != nil {
+				finishErr = ctx.Err()
+				return
+			}
+			if errors.Is(err, io.EOF) {
 				return
 			}
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
