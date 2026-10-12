@@ -80,6 +80,55 @@ if err != nil {
     <a href="https://github.com/elloloop/llmrouter/blob/main/providers/anthropic/anthropic.go#L53">anthropic.go#L53</a>.
   </p>
 
+  <h2 id="provider-complete">Provider.Complete</h2>
+  <Code lang="go" code={`func (p *Provider) Complete(ctx context.Context, request llmrouter.ChatRequest,
+    limits CompletionLimits) (*MessageResponse, error)
+
+type CompletionLimits struct {
+    MaxRequestBytes  int64
+    MaxResponseBytes int64
+}
+
+type MessageResponse struct {
+    ID, Type, Role, Model, StopReason string
+    Content      []json.RawMessage
+    StopSequence *string
+    Usage        json.RawMessage
+    Raw          json.RawMessage
+}`} />
+  <p>
+    Sends one non-streaming Messages request using the configured API key, base
+    URL and HTTP client. A nonblank model, positive <code>MaxTokens</code> and
+    positive serialized request/response byte limits are required;
+    <code>request.Stream</code> must be false. The URL is
+    <code>&lt;BaseURL&gt;/messages</code>.
+  </p>
+  <p>
+    Native assistant content is replayed without translation, preserving signed
+    and redacted thinking blocks, citations and unknown metadata. The returned
+    model and native stop reason are never substituted or normalized. Unknown
+    content types, including tool requests, remain visible to the caller.
+    <code>Raw</code> preserves the entire response body. Callers must decide
+    whether the returned model, stop reason and content are acceptable; parsing
+    a response does not establish a successful turn or execute a tool.
+  </p>
+  <p>
+    The method rejects malformed or incomplete message envelopes, trailing JSON,
+    invalid UTF-8, non-200 status and non-JSON media types. It clones the HTTP
+    client to disable cookies and all redirects, removes request-body replay,
+    and does not retry. An injected transport must honor cancellation and must
+    not retry internally. Other methods retain their existing behavior.
+  </p>
+  <p>
+    Use <code>errors.Is</code> with <code>llmrouter.ErrInvalidConfig</code>,
+    <code>ErrRequestTooLarge</code>, <code>ErrResponseTooLarge</code>,
+    <code>ErrInvalidResponse</code> or <code>ErrTransport</code>.
+    <code>errors.As</code> exposes <code>*HTTPStatusError</code> and its
+    <code>StatusCode</code>. Context cancellation/deadline identity is preserved.
+    Errors omit provider bodies, URLs and transport diagnostics. A transport
+    error can leave the remote outcome unknown; reconcile before retrying.
+  </p>
+
   <h2 id="provider-completion-stream">Provider.CompletionStream</h2>
   <Code lang="go" code={`func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatRequest) (*llmrouter.Stream, error)`} />
   <p>
