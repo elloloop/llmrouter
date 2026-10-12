@@ -60,15 +60,10 @@ func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatReque
 		return nil, fmt.Errorf("anthropic: build request: %w", err)
 	}
 
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		p.cfg.BaseURL+"/messages", bytes.NewReader(body))
+	hreq, err := p.messageRequest(ctx, body, "text/event-stream")
 	if err != nil {
 		return nil, err
 	}
-	hreq.Header.Set("Content-Type", "application/json")
-	hreq.Header.Set("Accept", "text/event-stream")
-	hreq.Header.Set("x-api-key", p.cfg.APIKey)
-	hreq.Header.Set("anthropic-version", anthropicVersion)
 
 	resp, err := p.cfg.HTTP().Do(hreq)
 	if err != nil {
@@ -89,9 +84,26 @@ func (p *Provider) CompletionStream(ctx context.Context, req llmrouter.ChatReque
 	return stream, nil
 }
 
+func (p *Provider) messageRequest(ctx context.Context, body []byte, accept string) (*http.Request, error) {
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.cfg.BaseURL+"/messages", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", accept)
+	r.Header.Set("X-Api-Key", p.cfg.APIKey)
+	r.Header.Set("Anthropic-Version", anthropicVersion)
+	return r, nil
+}
+
 // buildAnthropicBody converts an OpenAI-shaped ChatRequest to the
 // Anthropic /v1/messages JSON body.
 func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
+	return buildMessagesBody(req, true)
+}
+
+func buildMessagesBody(req llmrouter.ChatRequest, stream bool) ([]byte, error) {
 	type anMsg struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
@@ -117,7 +129,12 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 			system += m.PlainText()
 			continue
 		}
-		content := translateMultipartContent(m.Content)
+		content := m.Content
+		// Native completions replay signed assistant blocks and any provider
+		// metadata unchanged. Keep the streaming API's translation semantics.
+		if stream || m.Role != "assistant" {
+			content = translateMultipartContent(content)
+		}
 		msgs = append(msgs, anMsg{Role: m.Role, Content: content})
 	}
 
@@ -129,7 +146,7 @@ func buildAnthropicBody(req llmrouter.ChatRequest) ([]byte, error) {
 	out := map[string]any{
 		"model":      req.Model,
 		"max_tokens": maxTokens,
-		"stream":     true,
+		"stream":     stream,
 		"messages":   msgs,
 	}
 	if system != "" {
