@@ -1272,8 +1272,8 @@ func TestContextCancel_ClosesConnection(t *testing.T) {
 		t.Fatal("Events channel did not close after context cancel")
 	}
 	terminal := sess.Err()
-	if terminal == nil {
-		t.Error("Err() = nil, want context.Canceled")
+	if !errors.Is(terminal, context.Canceled) {
+		t.Errorf("Err() = %v, want context.Canceled", terminal)
 	}
 	_ = sess.Close()
 	<-done
@@ -1293,6 +1293,9 @@ func TestErr_ReturnsSameValueAcrossCalls(t *testing.T) {
 
 	e1 := sess.Err()
 	e2 := sess.Err()
+	if e1 != nil {
+		t.Errorf("Err() after normal upstream close = %v, want nil", e1)
+	}
 	if e1 != e2 {
 		t.Errorf("Err() not stable: %v / %v", e1, e2)
 	}
