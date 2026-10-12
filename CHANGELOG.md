@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/elloloop/llmrouter/compare/v1.0.1...v1.1.0) (2026-10-12)
+
+
+### Features
+
+* **anthropic:** add bounded native message completion ([19e3fbb](https://github.com/elloloop/llmrouter/commit/19e3fbb61752c00648af3053ee793aaaa2b8eb72))
+
+
+### Bug Fixes
+
+* **geminilive:** preserve context errors during blocked reads ([96de13f](https://github.com/elloloop/llmrouter/commit/96de13faf2ead72ea61fd6c51aae4a1e8bb1bba9))
+
 ## [1.0.1](https://github.com/elloloop/llmrouter/compare/v1.0.0...v1.0.1) (2026-09-24)
 
 
